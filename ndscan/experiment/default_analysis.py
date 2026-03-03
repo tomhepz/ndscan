@@ -16,19 +16,31 @@ Two modalities are supported:
 Both can produce :class:`Annotation`\ s; particular values or plot locations highlighted
 in the user interface.
 """
+
 import logging
 from collections.abc import Callable, Iterable
 from typing import Any
 
+import numpy as np
+from oitg.fitting.FitBase import FitBase, FitError
+
 from ..utils import FIT_OBJECTS
-from .annotations import (AnnotationValueRef, AnnotationContext, Annotation,
-                          computed_curve, axis_location)
+from .annotations import (
+    Annotation,
+    AnnotationContext,
+    AnnotationValueRef,
+    axis_location,
+    computed_curve,
+)
 from .parameters import ParamHandle
-from .result_channels import ResultChannel
+from .result_channels import OpaqueChannel, ResultChannel
 
 __all__ = [
-    "Annotation", "DefaultAnalysis", "CustomAnalysis", "OnlineFit",
-    "ResultPrefixAnalysisWrapper"
+    "Annotation",
+    "DefaultAnalysis",
+    "CustomAnalysis",
+    "OnlineFit",
+    "ResultPrefixAnalysisWrapper",
 ]
 
 logger = logging.getLogger(__name__)
@@ -44,6 +56,7 @@ class DefaultAnalysis:
     """Analysis functionality associated with an `ExpFragment` to be executed when that
     fragment is scanned in a particular way.
     """
+
     def required_axes(self) -> set[ParamHandle]:
         """Return the scan axes necessary for the analysis to apply, in form of the
         parameter handles."""
@@ -52,8 +65,7 @@ class DefaultAnalysis:
     def describe_online_analyses(
         self, context: AnnotationContext
     ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
-        """Exceute analysis and serialise information about resulting annotations and
-        online analyses to stringly typed metadata.
+        """Serialise information about online analyses to stringly typed metadata.
 
         :param context: The :class:`.AnnotationContext` to use to resolve references to
             fragment tree objects in user-specified data.
@@ -112,12 +124,18 @@ class CustomAnalysis(DefaultAnalysis):
     :param analysis_results: Optionally, a number of result channels for analysis
         results. They are later passed to ``analyze_fn``.
     """
+
     def __init__(
         self,
         required_axes: Iterable[ParamHandle],
-        analyze_fn: Callable[[
-            dict[ParamHandle, list], dict[ResultChannel, list], dict[str, ResultChannel]
-        ], list[Annotation] | None],
+        analyze_fn: Callable[
+            [
+                dict[ParamHandle, list],
+                dict[ResultChannel, list],
+                dict[str, ResultChannel],
+            ],
+            list[Annotation] | None,
+        ],
         analysis_results: Iterable[ResultChannel] = [],
     ):
         self._required_axis_handles = set(required_axes)
@@ -127,10 +145,14 @@ class CustomAnalysis(DefaultAnalysis):
         for channel in analysis_results:
             name = channel.path
             if name in self._result_channels:
-                axes = ", ".join(h.name + "@" + h.owner._stringize_path()
-                                 for h in self._required_axis_handles)
-                raise ValueError(f"Duplicate analysis result channel name '{name}' " +
-                                 f"in analysis for axes [{axes}]")
+                axes = ", ".join(
+                    h.name + "@" + h.owner._stringize_path()
+                    for h in self._required_axis_handles
+                )
+                raise ValueError(
+                    f"Duplicate analysis result channel name '{name}' "
+                    + f"in analysis for axes [{axes}]"
+                )
             self._result_channels[name] = channel
 
     def required_axes(self) -> set[ParamHandle]:
@@ -159,8 +181,9 @@ class CustomAnalysis(DefaultAnalysis):
             user_axis_data[handle] = axis_data[handle._store.identity]
 
         try:
-            annotations = self._analyze_fn(user_axis_data, result_data,
-                                           self._result_channels)
+            annotations = self._analyze_fn(
+                user_axis_data, result_data, self._result_channels
+            )
         except TypeError as orignal_exception:
             # Tolerate old analysis functions that do not take analysis result channels.
             try:
@@ -179,51 +202,15 @@ class CustomAnalysis(DefaultAnalysis):
 #: Default points of interest for various fit types (e.g. highlighting the π time for a
 #: Rabi flop fit, or the extremum of a parabola.
 DEFAULT_FIT_ANNOTATIONS = {
-    "decaying_sinusoid": {
-        "pi_time": {
-            "x": "t_max_transfer"
-        }
-    },
-    "detuned_square_pulse": {
-        "centre": {
-            "x": "offset"
-        }
-    },
-    "exponential_decay": {
-        "t_1_e": {
-            "x": "t_1_e"
-        }
-    },
-    "gaussian": {
-        "centre": {
-            "x": "x0"
-        }
-    },
-    "lorentzian": {
-        "extremum": {
-            "x": "x0"
-        }
-    },
-    "parabola": {
-        "extremum": {
-            "x": "position"
-        }
-    },
-    "rabi_flop": {
-        "pi_time": {
-            "x": "t_pi"
-        }
-    },
-    "sinusoid": {
-        "pi_time": {
-            "x": "t_pi"
-        }
-    },
-    "v_function": {
-        "centre": {
-            "x": "x0"
-        }
-    },
+    "decaying_sinusoid": {"pi_time": {"x": "t_max_transfer"}},
+    "detuned_square_pulse": {"centre": {"x": "offset"}},
+    "exponential_decay": {"t_1_e": {"x": "t_1_e"}},
+    "gaussian": {"centre": {"x": "x0"}},
+    "lorentzian": {"extremum": {"x": "x0"}},
+    "parabola": {"extremum": {"x": "position"}},
+    "rabi_flop": {"pi_time": {"x": "t_pi"}},
+    "sinusoid": {"pi_time": {"x": "t_pi"}},
+    "v_function": {"centre": {"x": "x0"}},
 }
 
 
@@ -248,16 +235,58 @@ class OnlineFit(DefaultAnalysis):
         a dictionary mapping fit parameter names to the respective values, forwarded to
         :meth:`oitg.fitting.FitBase.FitBase.fit`.
     """
-    def __init__(self,
-                 fit_type: str,
-                 data: dict[str, ParamHandle | ResultChannel],
-                 annotations: dict[str, dict[str, Any]] | None = None,
-                 analysis_identifier: str = None,
-                 constants: dict[str, Any] | None = None,
-                 initial_values: dict[str, Any] | None = None):
+
+    def __init__(
+        self,
+        fit_type: str,
+        data: dict[str, ParamHandle | ResultChannel],
+        annotations: dict[str, dict[str, Any]] | None = None,
+        analysis_identifier: str = None,
+        constants: dict[str, Any] | None = None,
+        initial_values: dict[str, Any] | None = None,
+        save_fit_results: bool | None = None,
+    ):
         self.fit_type = fit_type
+
         if fit_type not in FIT_OBJECTS:
-            logger.warning("Unknown fit type: '%s'", fit_type, exc_info=True)
+            raise ValueError(f"Unrecognised fit type: '{fit_type}'")
+
+        params = []
+        try:
+            params = FIT_OBJECTS[fit_type].all_parameter_names
+        except AttributeError:
+            # For backwards-compatibility with older oitg versions
+            # If explicitly requested to save fit results, then get all non-derived params
+            if save_fit_results is True:
+                logger.warning(
+                    "Derived parameters not accessible in installed version of oitg. "
+                    "Consider upgrading.",
+                    fit_type,
+                    exc_info=True,
+                )
+                params = FIT_OBJECTS[fit_type].parameter_names
+            else:
+                # If none specified and oitg version does not support derived_parameter_names,
+                # do not save results
+                save_fit_results = False
+        self._save_fit_results = (save_fit_results is None) or save_fit_results
+
+        self._result_channels = {}
+        self._channel_prefix = f"{fit_type}_fit_"
+
+        if self._save_fit_results:
+            for param in params:
+                self._result_channels[f"{self._channel_prefix}{param}"] = OpaqueChannel(
+                    f"{fit_type}_{param}"
+                )
+                self._result_channels[f"{self._channel_prefix}{param}_err"] = (
+                    OpaqueChannel(f"{fit_type}_{param}_err")
+                )
+
+            self._result_channels[f"{self._channel_prefix}reduced_chi_squared"] = (
+                OpaqueChannel(f"{self._channel_prefix}reduced_chi_squared")
+            )
+
         self.data = data
         if annotations is None:
             annotations = DEFAULT_FIT_ANNOTATIONS.get(fit_type, {})
@@ -276,7 +305,8 @@ class OnlineFit(DefaultAnalysis):
         ""
         # TODO: Generalise to higher-dimensional fits.
         channels = [
-            context.describe_coordinate(v) for v in self.data.values()
+            context.describe_coordinate(v)
+            for v in self.data.values()
             if isinstance(v, ResultChannel)
         ]
 
@@ -288,26 +318,31 @@ class OnlineFit(DefaultAnalysis):
             analysis_identifier = "fit_" + self.fit_type + "_" + "_".join(channels)
 
         def analysis_ref(key):
-            return AnnotationValueRef("online_result",
-                                      analysis_name=analysis_identifier,
-                                      result_key=key)
+            return AnnotationValueRef(
+                "online_result", analysis_name=analysis_identifier, result_key=key
+            )
 
         annotations = [
-            computed_curve(function_name=self.fit_type,
-                           parameters={
-                               k: analysis_ref(k)
-                               for k in FIT_OBJECTS[self.fit_type].parameter_names
-                           },
-                           associated_channels=channels)
+            computed_curve(
+                function_name=self.fit_type,
+                parameters={
+                    k: analysis_ref(k)
+                    for k in FIT_OBJECTS[self.fit_type].parameter_names
+                },
+                associated_channels=channels,
+            )
         ]
         for a in self.annotations.values():
             # TODO: Change API to allow more general annotations.
             if set(a.keys()) == set("x"):
                 annotations.append(
-                    axis_location(axis=self.data["x"],
-                                  position=analysis_ref(a["x"]),
-                                  position_error=analysis_ref(a["x"] + "_error"),
-                                  associated_channels=channels))
+                    axis_location(
+                        axis=self.data["x"],
+                        position=analysis_ref(a["x"]),
+                        position_error=analysis_ref(a["x"] + "_error"),
+                        associated_channels=channels,
+                    )
+                )
 
         return [a.describe(context) for a in annotations], {
             analysis_identifier: {
@@ -318,14 +353,13 @@ class OnlineFit(DefaultAnalysis):
                     for name, obj in self.data.items()
                 },
                 "constants": self.constants,
-                "initial_values": self.initial_values
+                "initial_values": self.initial_values,
             }
         }
 
     def get_analysis_results(self) -> dict[str, ResultChannel]:
         ""
-        # Could return annotation locations in the future.
-        return {}
+        return self._result_channels
 
     def execute(
         self,
@@ -334,7 +368,57 @@ class OnlineFit(DefaultAnalysis):
         context: AnnotationContext,
     ) -> list[dict[str, Any]]:
         ""
-        # Nothing to do off-line for online fits.
+        if not self._save_fit_results:
+            return []
+
+        def _extract_data(data: ParamHandle | ResultChannel | None):
+            if data is None:
+                return None
+            elif isinstance(data, ParamHandle):
+                return axis_data[data._store.identity]
+            elif isinstance(data, ResultChannel):
+                return result_data[data]
+            else:
+                raise ValueError(f"Invalid data source: {data}")
+
+        x = _extract_data(self.data["x"])
+        y = _extract_data(self.data["y"])
+        y_err = _extract_data(self.data.get("y_err", None))
+
+        fitter: FitBase = FIT_OBJECTS[self.fit_type]
+
+        try:
+            p_dict, p_error_dict, residuals = fitter.fit(
+                x,
+                y,
+                y_err,
+                calculate_residuals=True,
+                constants=self.constants,
+                initialise=self.initial_values,
+            )
+        except FitError:
+            logger.warning("Fit failed for fit type '%s'", self.fit_type, exc_info=True)
+            return []
+
+        weights = 1 / (np.asarray(y_err) ** 2) if y_err is not None else np.ones_like(y)
+        num_free_fit_params = len(fitter.parameter_names) - len(self.constants)
+
+        reduced_chi_squared = np.sum(residuals**2 * weights) / (
+            len(y) - num_free_fit_params
+        )
+
+        for param, value in p_dict.items():
+            param_name = self._channel_prefix + param
+            if param_name not in self._result_channels:
+                continue
+            self._result_channels[param_name].push(value)
+            if param_name + "_err" in self._result_channels:
+                self._result_channels[param_name + "_err"].push(p_error_dict[param])
+
+        self._result_channels[f"{self._channel_prefix}reduced_chi_squared"].push(
+            reduced_chi_squared
+        )
+
         return []
 
 
@@ -345,6 +429,7 @@ class ResultPrefixAnalysisWrapper(DefaultAnalysis):
     This can be used to disambiguate potential conflicts between result names when
     programmatically collecting analyses from multiple sources.
     """
+
     def __init__(self, wrapped: DefaultAnalysis, prefix: str):
         """
         :param wrapped: The :class:`.DefaultAnalysis` instance to forward to.
@@ -365,8 +450,7 @@ class ResultPrefixAnalysisWrapper(DefaultAnalysis):
         # TODO: Prepend to ResultChannel.path as well? For now, nothing relies on the
         # path schema entry for analysis results, so it's a wash.
         return {
-            self._prefix + k: v
-            for k, v in self._wrapped.get_analysis_results().items()
+            self._prefix + k: v for k, v in self._wrapped.get_analysis_results().items()
         }
 
     def execute(

@@ -1,7 +1,9 @@
 from typing import Any
+
+import numpy
+
 from ...utils import strip_prefix
 from . import ScanModel, SinglePointModel
-import numpy
 
 
 class SelectPointFromScanModel(SinglePointModel):
@@ -12,7 +14,8 @@ class SelectPointFromScanModel(SinglePointModel):
         self._point = None
 
         self._source.points_rewritten.connect(
-            lambda: self._set_point(self._source_index, silently_fail=True))
+            lambda: self._set_point(self._source_index, silently_fail=True)
+        )
 
         # TODO: Invalidate point data (reset index?) on channel schema change.
         self._source.channel_schemata_changed.connect(self.channel_schemata_changed)
@@ -21,6 +24,9 @@ class SelectPointFromScanModel(SinglePointModel):
         if idx == self._source_index:
             return
         self._set_point(idx, silently_fail=False)
+
+    def get_source_index(self) -> int | None:
+        return self._source_index
 
     def get_channel_schemata(self) -> dict[str, Any]:
         return self._source.get_channel_schemata()
@@ -39,8 +45,9 @@ class SelectPointFromScanModel(SinglePointModel):
                 if silently_fail:
                     point = None
                 else:
-                    raise ValueError("Invalid source index {} for length {}".format(
-                        idx, num_values))
+                    raise ValueError(
+                        "Invalid source index {} for length {}".format(idx, num_values)
+                    )
             else:
                 point = {}
                 for key, values in points.items():

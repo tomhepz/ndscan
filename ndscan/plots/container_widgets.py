@@ -1,13 +1,14 @@
 import logging
-import pyqtgraph.dockarea as pgda
 from collections import OrderedDict
 
+import pyqtgraph.dockarea as pgda
+
+from .._qt import QtCore, QtWidgets
 from .image_2d import Image2DPlotWidget
-from .model import Context, Root, SinglePointModel, ScanModel
+from .model import Context, Root, ScanModel, SinglePointModel
 from .plot_widgets import VerticalPanesWidget
 from .rolling_1d import Rolling1DPlotWidget
 from .xy_1d import XY1DPlotWidget
-from .._qt import QtCore, QtWidgets
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,8 @@ def make_plot_for_dimensional_model(model: ScanModel) -> VerticalPanesWidget:
     if dim == 2:
         return Image2DPlotWidget(model)
     raise NotImplementedError(
-        f"Plots for {dim}-dimensional data are not yet implemented")
+        f"Plots for {dim}-dimensional data are not yet implemented"
+    )
 
 
 class PlotAreaWidget(pgda.DockArea):
@@ -27,8 +29,8 @@ class PlotAreaWidget(pgda.DockArea):
         super().__init__()
 
         self.root = root
+        self.root.title_changed.connect(self._set_window_title)
         self.context = context
-        self.context.title_changed.connect(self._set_window_title)
 
         self._root_widget = RootWidget(root)
         self._root_widget.new_dock_requested.connect(self._add_dock)
@@ -39,10 +41,13 @@ class PlotAreaWidget(pgda.DockArea):
 
         self._root_dock.addWidget(self._root_widget)
 
-    def _add_dock(self, widget: VerticalPanesWidget, title: str):
-        dock = pgda.Dock(title, autoOrientation=False, closable=True, widget=widget)
+    def _add_dock(self, widget: "RootWidget"):
+        dock = pgda.Dock(
+            widget.get_title(), autoOrientation=False, closable=True, widget=widget
+        )
         widget.was_closed.connect(lambda: self._was_closed_cb(dock))
         dock.sigClosed.connect(widget.close)
+        widget.title_changed.connect(dock.setTitle)
 
         _, docks = self.findAll()
         if len(docks) > 1:
@@ -68,14 +73,25 @@ class RootWidget(QtWidgets.QWidget):
     loading), the plot after that.
     """
 
-    new_dock_requested = QtCore.pyqtSignal(object, str)
+    #: Emitted when the user opened a subplot/… and the containing widget should show
+    #: the given widget in a new dock. Arguments are (RootWidget to show,
+    #: dock title).
+    new_dock_requested = QtCore.pyqtSignal(object)
+
+    #: Emitted after the dock containing this widget was closed by the user (if a
+    #: subplot/…), whether through a context menu or the docking area UI.
     was_closed = QtCore.pyqtSignal()
+
+    #: Emitted when the most informative title for the widget changes (to be displayed
+    #: in the dock header, etc.). Argument is the new title.
+    title_changed = QtCore.pyqtSignal(str)
 
     def __init__(self, root: Root):
         super().__init__()
 
         self.root = root
         self.root.model_changed.connect(self._change_model)
+        self.root.title_changed.connect(self.title_changed)
 
         self.layout = QtWidgets.QVBoxLayout()
         self.layout.setContentsMargins(0, 0, 0, 0)
@@ -93,6 +109,9 @@ class RootWidget(QtWidgets.QWidget):
 
         if self.root.get_model() is not None:
             self._change_model()
+
+    def get_title(self) -> str:
+        return self.root.get_title()
 
     def closeEvent(self, ev):
         if self.plot_widget is None:
@@ -146,11 +165,13 @@ class RootWidget(QtWidgets.QWidget):
 
 class PlotAreaTabWidget(QtWidgets.QWidget):
     """Window with tabs for multiple plot roots."""
+
     def __init__(self, roots, context):
         super().__init__()
 
         self.plot_area_widgets = OrderedDict(
-            (label, PlotAreaWidget(root, context)) for label, root in roots.items())
+            (label, PlotAreaWidget(root, context)) for label, root in roots.items()
+        )
 
         self.layout = QtWidgets.QVBoxLayout()
         self.layout.setContentsMargins(0, 0, 0, 0)

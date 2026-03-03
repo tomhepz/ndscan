@@ -1,7 +1,9 @@
 """Pseudocolor 2D plot for equidistant data."""
 
-from itertools import chain, repeat
 import logging
+from itertools import chain, repeat
+from typing import Any
+
 import numpy as np
 import pyqtgraph
 
@@ -9,10 +11,23 @@ from .._qt import QtCore, QtGui
 from . import colormaps
 from .cursor import CrosshairAxisLabel, CrosshairLabel, LabeledCrosshairCursor
 from .model import ScanModel
-from .plot_widgets import ContextMenuPanesWidget, add_source_id_label
-from .utils import (call_later, extract_linked_datasets, extract_scalar_channels,
-                    format_param_identity, get_axis_scaling_info, setup_axis_item,
-                    enum_to_numeric)
+from .model.select_point import SelectPointFromScanModel
+from .model.slice import create_slice_roots
+from .model.subscan import create_subscan_roots
+from .plot_widgets import SliceableMenuPanesWidget, add_source_id_label
+from .utils import (
+    CONTRASTING_COLOR_TO_HIGHLIGHT,
+    HIGHLIGHT_PEN,
+    call_later,
+    enum_to_numeric,
+    extract_linked_datasets,
+    extract_scalar_channels,
+    find_neighbour_index,
+    format_param_identity,
+    get_axis_scaling_info,
+    setup_axis_item,
+    slice_data_along_axis,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +68,8 @@ def _coords_to_indices(coords, range_spec):
 
 
 class CrosshairZDataLabel(CrosshairLabel):
-    """Crosshair label for the z value of a 2D image
-    """
+    """Crosshair label for the z value of a 2D image"""
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.x_range = None
@@ -62,8 +77,9 @@ class CrosshairZDataLabel(CrosshairLabel):
         self.image_data = None
         self.z_limits = None
 
-    def set_crosshair_info(self, unit_suffix: str, data_to_display_scale: float,
-                           _color):
+    def set_crosshair_info(
+        self, unit_suffix: str, data_to_display_scale: float, _color
+    ):
         """Update the unit/scale information of the underlying data.
 
         :param unit_suffix: The unit (including a leading space).
@@ -106,12 +122,31 @@ class CrosshairZDataLabel(CrosshairLabel):
             self.set_value(z, self.z_limits)
 
 
+class ClickableImageItem(pyqtgraph.ImageItem):
+    """An ImageItem that emits a signal when clicked."""
+
+    sigClicked = QtCore.pyqtSignal(QtCore.QPointF)
+
+    def mouseClickEvent(self, event):
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self.sigClicked.emit(event.pos())
+            event.accept()
+
+
 class _ImagePlot:
-    def __init__(self, image_item: pyqtgraph.ImageItem,
-                 colorbar: pyqtgraph.ColorBarItem, active_channel_name: str,
-                 x_min: float | None, x_max: float | None, x_increment: float | None,
-                 y_min: float | None, y_max: float | None, y_increment: float | None,
-                 channels: dict[str, dict]):
+    def __init__(
+        self,
+        image_item: ClickableImageItem,
+        colorbar: pyqtgraph.ColorBarItem,
+        active_channel_name: str,
+        x_min: float | None,
+        x_max: float | None,
+        x_increment: float | None,
+        y_min: float | None,
+        y_max: float | None,
+        y_increment: float | None,
+        channels: dict[str, dict],
+    ):
         self.image_item = image_item
         self.colorbar = colorbar
         self.channels = channels
@@ -124,7 +159,7 @@ class _ImagePlot:
         self.y_max = y_max
         self.y_increment = y_increment
 
-        self.points = None
+        self.points: dict[str, Any] | None = None
         self.num_shown = 0
         self.current_z_limits = None
         self.x_range = None
@@ -149,7 +184,8 @@ class _ImagePlot:
             label = channel["path"].split("/")[-1]
         crosshair_info = setup_axis_item(
             self.colorbar.getAxis("right"),
-            [(label, channel["path"], channel["type"], None, channel)])
+            [(label, channel["path"], channel["type"], None, channel)],
+        )
         # Update crosshair label.
         self.z_crosshair_label.set_crosshair_info(*crosshair_info[0])
 
@@ -188,15 +224,20 @@ class _ImagePlot:
 
         num_to_show = min(len(x_data), len(y_data), len(z_data))
 
-        if (num_to_show == self.num_shown
-                and averaging_enabled == self.averaging_enabled):
+        if (
+            num_to_show == self.num_shown
+            and averaging_enabled == self.averaging_enabled
+        ):
             return
         num_skip = self.num_shown
 
         # Update running averages.
-        for x, y, z in zip(x_data[num_skip:num_to_show], y_data[num_skip:num_to_show],
-                           z_data[num_skip:num_to_show]):
-            avg, num = self.averages_by_coords.get((x, y), (0., 0))
+        for x, y, z in zip(
+            x_data[num_skip:num_to_show],
+            y_data[num_skip:num_to_show],
+            z_data[num_skip:num_to_show],
+        ):
+            avg, num = self.averages_by_coords.get((x, y), (0.0, 0))
             num += 1
             avg += (z - avg) / num
             self.averages_by_coords[(x, y)] = (avg, num)
@@ -212,13 +253,17 @@ class _ImagePlot:
 
             # TODO: Splat old data for progressively less blurry look on refining scans?
             self.image_data = np.full(
-                (_num_points_in_range(x_range), _num_points_in_range(y_range)), np.nan)
+                (_num_points_in_range(x_range), _num_points_in_range(y_range)), np.nan
+            )
 
             self.image_rect = QtCore.QRectF(
-                QtCore.QPointF(x_range[0] - x_range[2] / 2,
-                               y_range[0] - y_range[2] / 2),
-                QtCore.QPointF(x_range[1] + x_range[2] / 2,
-                               y_range[1] + y_range[2] / 2))
+                QtCore.QPointF(
+                    x_range[0] - x_range[2] / 2, y_range[0] - y_range[2] / 2
+                ),
+                QtCore.QPointF(
+                    x_range[1] + x_range[2] / 2, y_range[1] + y_range[2] / 2
+                ),
+            )
 
             num_skip = 0
 
@@ -231,8 +276,9 @@ class _ImagePlot:
         for i, (x_idx, y_idx) in enumerate(zip(x_inds, y_inds)):
             data_idx = num_skip + i
             coords, z = (x_data[data_idx], y_data[data_idx]), z_data[data_idx]
-            self.image_data[x_idx, y_idx] = (self.averages_by_coords[coords][0]
-                                             if averaging_enabled else z)
+            self.image_data[x_idx, y_idx] = (
+                self.averages_by_coords[coords][0] if averaging_enabled else z
+            )
 
         cmap = colormaps.plasma
         channel = self.channels[self.active_channel_name]
@@ -249,8 +295,9 @@ class _ImagePlot:
         self.colorbar.setLevels(z_limits)
 
         self.image_item.setImage(self.image_data, autoLevels=False)
-        self.z_crosshair_label.set_image_data(self.image_data, self.x_range,
-                                              self.y_range, self.current_z_limits)
+        self.z_crosshair_label.set_image_data(
+            self.image_data, self.x_range, self.y_range, self.current_z_limits
+        )
         if num_skip == 0:
             # Image size has changed, set plot item size accordingly.
             self.image_item.setRect(self.image_rect)
@@ -259,14 +306,17 @@ class _ImagePlot:
         self.averaging_enabled = averaging_enabled
 
 
-class Image2DPlotWidget(ContextMenuPanesWidget):
+class Image2DPlotWidget(SliceableMenuPanesWidget):
     def __init__(self, model: ScanModel):
         super().__init__()
 
         self.model = model
+
         self.model.channel_schemata_changed.connect(self._initialise_series)
         self.model.points_appended.connect(lambda p: self._update_points(p, False))
         self.model.points_rewritten.connect(lambda p: self._update_points(p, True))
+
+        self.selected_point_model = SelectPointFromScanModel(self.model)
 
         self.data_names = []
 
@@ -274,8 +324,9 @@ class Image2DPlotWidget(ContextMenuPanesWidget):
 
         self.plot_item = self.add_pane()
         self.plot_item.showGrid(x=True, y=True)
-        self.plot = None
+        self.plot: _ImagePlot | None = None
         self.crosshair = None
+        self._highlighted_xy = (None, None)
 
         self.found_duplicate_coords = False
         self.unique_coords = set[tuple[float, float]]()
@@ -301,9 +352,18 @@ class Image2DPlotWidget(ContextMenuPanesWidget):
 
         def setup_axis(schema, location):
             param = schema["param"]
-            setup_axis_item(self.plot_item.getAxis(location),
-                            [(param["description"], format_param_identity(schema),
-                              param["type"], None, param["spec"])])
+            setup_axis_item(
+                self.plot_item.getAxis(location),
+                [
+                    (
+                        param["description"],
+                        format_param_identity(schema),
+                        param["type"],
+                        None,
+                        param["spec"],
+                    )
+                ],
+            )
 
         setup_axis(self.x_schema, "bottom")
         setup_axis(self.y_schema, "left")
@@ -311,26 +371,46 @@ class Image2DPlotWidget(ContextMenuPanesWidget):
         def bounds(schema):
             return (schema.get(n, None) for n in ("min", "max", "increment"))
 
-        image_item = pyqtgraph.ImageItem()
+        image_item = ClickableImageItem()
+        image_item.sigClicked.connect(self._point_clicked)
+
         self.plot_item.addItem(image_item)
         colorbar = self.plot_item.addColorBar(image_item, width=15.0, interactive=False)
-        self.plot = _ImagePlot(image_item, colorbar, self.data_names[0],
-                               *bounds(self.x_schema), *bounds(self.y_schema), channels)
+        self.plot = _ImagePlot(
+            image_item,
+            colorbar,
+            self.data_names[0],
+            *bounds(self.x_schema),
+            *bounds(self.y_schema),
+            channels,
+        )
+
+        highlight_pen = pyqtgraph.mkPen(**HIGHLIGHT_PEN)
+        brush = pyqtgraph.mkBrush(CONTRASTING_COLOR_TO_HIGHLIGHT)
+        self.highlight_point_item = pyqtgraph.ScatterPlotItem(
+            pen=highlight_pen, brush=brush, size=8, symbol="o"
+        )
+        self.highlight_point_item.setZValue(2)  # Show above all other points.
+        self.plot_item.addItem(self.highlight_point_item, ignoreBounds=True)
 
         x_scaling_info = get_axis_scaling_info(self.x_schema["param"]["spec"])
         y_scaling_info = get_axis_scaling_info(self.y_schema["param"]["spec"])
 
-        x_label = CrosshairAxisLabel(self.plot_item.getViewBox(),
-                                     *x_scaling_info,
-                                     is_x=True)
-        y_label = CrosshairAxisLabel(self.plot_item.getViewBox(),
-                                     *y_scaling_info,
-                                     is_x=False)
+        x_label = CrosshairAxisLabel(
+            self.plot_item.getViewBox(), *x_scaling_info, is_x=True
+        )
+        y_label = CrosshairAxisLabel(
+            self.plot_item.getViewBox(), *y_scaling_info, is_x=False
+        )
 
         self.crosshair = LabeledCrosshairCursor(
-            self, self.plot_item, [x_label, y_label, self.plot.z_crosshair_label])
+            self, self.plot_item, [x_label, y_label, self.plot.z_crosshair_label]
+        )
 
         add_source_id_label(self.plot_item.getViewBox(), self.model.context)
+
+        self.subscan_roots = create_subscan_roots(self.selected_point_model)
+        self.slice_roots = create_slice_roots(self.model, self.selected_point_model)
 
         self.ready.emit()
 
@@ -351,21 +431,27 @@ class Image2DPlotWidget(ContextMenuPanesWidget):
 
             if self.x_schema["param"]["type"] == "enum":
                 points["axis_0"] = enum_to_numeric(
-                    self.x_schema["param"]["spec"]["members"].keys(), points["axis_0"])
+                    self.x_schema["param"]["spec"]["members"].keys(), points["axis_0"]
+                )
             if self.y_schema["param"]["type"] == "enum":
                 points["axis_1"] = enum_to_numeric(
-                    self.y_schema["param"]["spec"]["members"].keys(), points["axis_1"])
+                    self.y_schema["param"]["spec"]["members"].keys(), points["axis_1"]
+                )
             self.plot.data_changed(points, invalidate_previous=invalidate)
 
     def build_context_menu(self, pane_idx: int | None, builder):
         if self.model.context.is_online_master():
             x_datasets = extract_linked_datasets(self.x_schema["param"])
             y_datasets = extract_linked_datasets(self.y_schema["param"])
-            for d, axis_idx in chain(zip(x_datasets, repeat(0)),
-                                     zip(y_datasets, repeat(1))):
+            for d, axis_idx in chain(
+                zip(x_datasets, repeat(0)), zip(y_datasets, repeat(1))
+            ):
                 action = builder.append_action(f"Set '{d}' from crosshair")
-                action.triggered.connect(lambda *a, axis_idx=axis_idx, d=d: (
-                    self._set_dataset_from_crosshair(d, axis_idx)))
+                action.triggered.connect(
+                    lambda *a, axis_idx=axis_idx, d=d: (
+                        self._set_dataset_from_crosshair(d, axis_idx)
+                    )
+                )
             if len(x_datasets) == 1 and len(y_datasets) == 1:
                 action = builder.append_action("Set both from crosshair")
 
@@ -381,7 +467,8 @@ class Image2DPlotWidget(ContextMenuPanesWidget):
             action.setCheckable(True)
             action.setChecked(self.plot.averaging_enabled)
             action.triggered.connect(
-                lambda *a: self.plot.update(not self.plot.averaging_enabled))
+                lambda *a: self.plot.update(not self.plot.averaging_enabled)
+            )
             builder.ensure_separator()
 
         self.channel_menu_group = QtGui.QActionGroup(self)
@@ -391,14 +478,136 @@ class Image2DPlotWidget(ContextMenuPanesWidget):
             action.setActionGroup(self.channel_menu_group)
             action.setChecked(name == self.plot.active_channel_name)
             action.triggered.connect(
-                lambda *a, name=name: self.plot.activate_channel(name))
+                lambda *a, name=name: self.plot.activate_channel(name)
+            )
+
         builder.ensure_separator()
 
         super().build_context_menu(pane_idx, builder)
+        builder.ensure_separator()
 
     def _set_dataset_from_crosshair(self, dataset, axis_idx):
         if not self.plot:
             logger.warning("Plot not initialised yet, ignoring set dataset request")
             return
-        self.model.context.set_dataset(dataset,
-                                       self.crosshair.labels[axis_idx].last_value)
+        self.model.context.set_dataset(
+            dataset, self.crosshair.labels[axis_idx].last_value
+        )
+
+    def _point_clicked(self, pos: QtCore.QPointF):
+        """Callback for when `self.plot` is clicked.
+
+        :param pos: Position of the click in `plot`'s coordinates.
+            Here, these are in units of the point indices
+        """
+        x_idx = np.floor(pos.x())
+        y_idx = np.floor(pos.y())
+        x = self.plot.x_range[0] + x_idx * self.plot.x_range[2]
+        y = self.plot.y_range[0] + y_idx * self.plot.y_range[2]
+
+        source_idx = self._xy_to_source_index(x, y)
+        if source_idx is not None:
+            self._highlight_point_at_index(source_idx)
+
+    def keyPressEvent(self, event):
+        """Handle arrow key presses to move the highlighted point."""
+        key = event.key()
+        is_left = key == QtCore.Qt.Key.Key_Left
+        is_right = key == QtCore.Qt.Key.Key_Right
+        is_up = key == QtCore.Qt.Key.Key_Up
+        is_down = key == QtCore.Qt.Key.Key_Down
+
+        if is_left or is_right:
+            axis = 0
+        elif is_up or is_down:
+            axis = 1
+        else:
+            return super().keyPressEvent(event)
+
+        step = -1 if is_left or is_down else 1
+        neighbour_idx = self._get_highlighted_neighbour_index(axis, step)
+        if neighbour_idx is not None:
+            self._highlight_point_at_index(neighbour_idx)
+        event.accept()
+
+    def _highlight_point_at_index(self, source_idx: int | None):
+        """Highlight the point at the given index of the source data."""
+        self.selected_point_model.set_source_index(source_idx)
+
+        if source_idx is None:
+            self._highlighted_xy = (None, None)
+            if self.highlight_point_item.parentItem():
+                self.plot_item.removeItem(self.highlight_point_item)
+            return
+
+        x = self.plot.points["axis_0"][source_idx]
+        y = self.plot.points["axis_1"][source_idx]
+
+        if source_idx is None:
+            return
+
+        self.highlight_point_item.setData([x], [y], data=source_idx)
+        self._highlighted_xy = (x, y)
+        if not self.highlight_point_item.parentItem():
+            self.plot_item.addItem(self.highlight_point_item, ignoreBounds=True)
+
+    def _xy_to_source_index(self, x, y) -> int | None:
+        """Get the source index of the point at the given coordinates."""
+        x_source = self.plot.points["axis_0"]
+        y_source = self.plot.points["axis_1"]
+
+        # KLUDGE: For some reason, the range spec/… calculation introduces more than the
+        # possibly expected few ulp roundoff error; use a relatively loose tolerance of
+        # 1e-14 (about 50 epsilon). A slightly cleaner solution would be to use an
+        # absolute tolerance based on the minimal spacing of source data points.
+        source_idx = np.flatnonzero(
+            np.isclose(x_source, x, atol=0.0, rtol=1e-14)
+            & np.isclose(y_source, y, atol=0.0, rtol=1e-14)
+        )
+
+        if source_idx.size == 0:
+            return None
+
+        # FIXME: Does not handle duplicate coordinates correctly.
+        return source_idx[0]
+
+    def _get_highlighted_neighbour_index(self, axis: int, step: int) -> int | None:
+        """Get the source index of the neighbouring point along the given axis."""
+        if not self.plot or self._highlighted_xy == (None, None):
+            return None
+
+        source = self.plot.points
+
+        sliced_idxs = slice_data_along_axis(
+            source, self.selected_point_model.get_source_index(), axis
+        )
+
+        sliced_axis_name = f"axis_{axis}"
+        fixed_axis_name = f"axis_{1 - axis}"
+
+        slicing_axis_source = np.asarray(source[sliced_axis_name])
+        fixed_axis_source = np.asarray(source[fixed_axis_name])
+
+        sliced_axis_source = slicing_axis_source[sliced_idxs]
+
+        # Coordinates of the point along and orthogonal to the slice axis.
+        sliced_axis_coord = self._highlighted_xy[axis]
+        fixed_axis_coord = self._highlighted_xy[1 - axis]
+
+        # Find index of the highlighted point along the slice.
+        try:
+            idx_along_slice = np.flatnonzero(sliced_axis_source == sliced_axis_coord)[0]
+        except IndexError:  # no matches found
+            return None
+
+        # Find coordinate of the neighbour along the slice.
+        neighbour_coord = sliced_axis_source[
+            find_neighbour_index(sliced_axis_source, idx_along_slice, step)
+        ]
+        # Map back to source index.
+        return np.argmax(
+            np.logical_and(
+                slicing_axis_source == neighbour_coord,
+                fixed_axis_source == fixed_axis_coord,
+            )
+        )

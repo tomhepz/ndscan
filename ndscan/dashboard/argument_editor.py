@@ -1,25 +1,35 @@
 import asyncio
-from collections import Counter, OrderedDict
-from enum import Enum, unique
-from functools import partial
 import logging
-import os
+from collections import Counter, OrderedDict
+from functools import partial
 from typing import Any
+
 from artiq.gui.entries import procdesc_to_entry
 from artiq.gui.fuzzy_select import FuzzySelectWidget
-from artiq.gui.scientific_spinbox import ScientificSpinBox
-from artiq.gui.tools import WheelFilter, LayoutWidget, disable_scroll_wheel
+from artiq.gui.tools import LayoutWidget, WheelFilter
 from sipyco import pyon
 
 from .._qt import QtCore, QtGui, QtWidgets
-from ..utils import (NoAxesMode, PARAMS_ARG_KEY, eval_param_default,
-                     shorten_to_unambiguous_suffixes)
+from ..utils import (
+    PARAMS_ARG_KEY,
+    NoAxesMode,
+    shorten_to_unambiguous_suffixes,
+)
+from .param_tree_dialog import OverrideProvider, OverrideStatus, ParamTreeDialog
+from .scan_options import list_scan_option_types
+from .utils import (
+    eval_default_using_local_datasets,
+    format_override_identity,
+    load_icon_cached,
+    set_column_resize_mode,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def _try_extract_ndscan_params(
-        arguments: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    arguments: dict[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """From a passed dictionary of upstream ARTIQ arguments, extracts the ndscan
     arguments, if there are any.
 
@@ -45,7 +55,22 @@ def _update_ndscan_params(arguments, params):
     arguments[PARAMS_ARG_KEY]["state"] = pyon.encode(params)
 
 
+# For simplicity, we realise infinite repeats as int32.max (rather than adding
+# special-case support for this on the scan runner side). This should take many days
+# even for very fast single-point scans, and in either case would produce many GiB of
+# data, to where it would be more practical to just schedule multiple experiments if for
+# whatever reason more repeats were required.
+NUM_REPEATS_INFINITE = 2**31 - 1
+
+
 class ScanOptions:
+    """Bundles together the widgets for the scan options section at the bottom of the
+    argument editor area.
+
+    This is not itself a QWidget, as the widgets will be added to the QTreeWidget used
+    to render the entire editor area.
+    """
+
     def __init__(self, current_scan: dict[str, Any]):
         self.num_repeats_container = QtWidgets.QWidget()
         num_repeats_layout = QtWidgets.QHBoxLayout()
@@ -60,17 +85,25 @@ class ScanOptions:
         self.num_repeats_box.setMinimum(1)
         # A gratuitous, but hopefully generous restriction
         self.num_repeats_box.setMaximum(2**16)
-        self.num_repeats_box.setValue(current_scan.get("num_repeats", 1))
         num_repeats_layout.addWidget(self.num_repeats_box)
         num_repeats_layout.setStretchFactor(self.num_repeats_box, 0)
 
         self.infinite_repeat_box = QtWidgets.QCheckBox("∞")
         self.infinite_repeat_box.setToolTip("Infinitely repeat scan (~2³¹ times)")
         self.infinite_repeat_box.stateChanged.connect(
-            lambda checked: self.num_repeats_box.setEnabled(not checked))
+            lambda checked: self.num_repeats_box.setEnabled(not checked)
+        )
         num_repeats_layout.addWidget(self.infinite_repeat_box)
         num_repeats_layout.setStretchFactor(self.infinite_repeat_box, 0)
         num_repeats_layout.addStretch()
+
+        num_repeats = current_scan.get("num_repeats", 1)
+        if num_repeats == NUM_REPEATS_INFINITE:
+            self.num_repeats_box.setValue(1)
+            self.infinite_repeat_box.setChecked(True)
+        else:
+            self.num_repeats_box.setValue(num_repeats)
+            self.infinite_repeat_box.setChecked(False)
 
         #
 
@@ -80,7 +113,8 @@ class ScanOptions:
         self.num_repeats_per_point_container.setLayout(num_repeats_per_point_layout)
 
         num_repeats_per_point_label = QtWidgets.QLabel(
-            "Number of consecutive repeats of each point: ")
+            "Number of consecutive repeats of each point: "
+        )
         num_repeats_per_point_layout.addWidget(num_repeats_per_point_label)
         num_repeats_per_point_layout.setStretchFactor(num_repeats_per_point_label, 0)
 
@@ -89,7 +123,8 @@ class ScanOptions:
         # A gratuitous, but hopefully generous restriction
         self.num_repeats_per_point_box.setMaximum(2**16)
         self.num_repeats_per_point_box.setValue(
-            current_scan.get("num_repeats_per_point", 1))
+            current_scan.get("num_repeats_per_point", 1)
+        )
         num_repeats_per_point_layout.addWidget(self.num_repeats_per_point_box)
         num_repeats_per_point_layout.setStretchFactor(self.num_repeats_per_point_box, 0)
         num_repeats_per_point_layout.addStretch()
@@ -122,13 +157,15 @@ class ScanOptions:
         self.randomise_globally_container.setLayout(randomise_globally_layout)
 
         randomise_globally_label = QtWidgets.QLabel(
-            "Randomise point order across axes: ")
+            "Randomise point order across axes: "
+        )
         randomise_globally_layout.addWidget(randomise_globally_label)
         randomise_globally_layout.setStretchFactor(randomise_globally_label, 0)
 
         self.randomise_globally_box = QtWidgets.QCheckBox()
         self.randomise_globally_box.setChecked(
-            current_scan.get("randomise_order_globally", False))
+            current_scan.get("randomise_order_globally", False)
+        )
         randomise_globally_layout.addWidget(self.randomise_globally_box)
         randomise_globally_layout.setStretchFactor(self.randomise_globally_box, 1)
 
@@ -138,48 +175,57 @@ class ScanOptions:
         skip_persistently_failing_layout = QtWidgets.QHBoxLayout()
         skip_persistently_failing_layout.setContentsMargins(5, 5, 5, 5)
         self.skip_persistently_failing_container.setLayout(
-            skip_persistently_failing_layout)
+            skip_persistently_failing_layout
+        )
 
         skip_persistently_failing_label = QtWidgets.QLabel(
-            "Skip point if transitory errors persist: ")
+            "Skip point if transitory errors persist: "
+        )
         skip_persistently_failing_layout.addWidget(skip_persistently_failing_label)
         skip_persistently_failing_layout.setStretchFactor(
-            skip_persistently_failing_label, 0)
+            skip_persistently_failing_label, 0
+        )
 
         self.skip_persistently_failing_box = QtWidgets.QCheckBox()
         self.skip_persistently_failing_box.setChecked(
-            current_scan.get("skip_on_persistent_transitory_error", False))
+            current_scan.get("skip_on_persistent_transitory_error", False)
+        )
         self.skip_persistently_failing_box.setToolTip(
-            "If more than the configured limit of transitory errors occur for a " +
-            "single scan point, skip it and attempt the next point instead of " +
-            "terminating the entire scan. Does not affect regular exceptions.")
+            "If more than the configured limit of transitory errors occur for a "
+            + "single scan point, skip it and attempt the next point instead of "
+            + "terminating the entire scan. Does not affect regular exceptions."
+        )
         skip_persistently_failing_layout.addWidget(self.skip_persistently_failing_box)
         skip_persistently_failing_layout.setStretchFactor(
-            self.skip_persistently_failing_box, 1)
+            self.skip_persistently_failing_box, 1
+        )
 
     def get_widgets(self) -> list[QtWidgets.QWidget]:
         return [
-            self.num_repeats_container, self.num_repeats_per_point_container,
-            self.no_axis_container, self.randomise_globally_container,
-            self.skip_persistently_failing_container
+            self.num_repeats_container,
+            self.num_repeats_per_point_container,
+            self.no_axis_container,
+            self.randomise_globally_container,
+            self.skip_persistently_failing_container,
         ]
 
     def write_to_params(self, params: dict[str, Any]) -> None:
         scan = params.setdefault("scan", {})
-        # For simplicity, we realise infinite repeats as int32.max, as this should take
-        # many days even for very fast single-point scans, and in either case would
-        # produce many GiB of data, to where it would be more practical to just schedule
-        # multiple experiments if for whatever reason more repeats were required.
-        scan["num_repeats"] = (2**31 - 1 if self.infinite_repeat_box.isChecked() else
-                               self.num_repeats_box.value())
+
+        scan["num_repeats"] = (
+            NUM_REPEATS_INFINITE
+            if self.infinite_repeat_box.isChecked()
+            else self.num_repeats_box.value()
+        )
         scan["num_repeats_per_point"] = self.num_repeats_per_point_box.value()
         scan["no_axes_mode"] = NoAxesMode(self.no_axes_box.currentText()).name
         scan["randomise_order_globally"] = self.randomise_globally_box.isChecked()
         scan["skip_on_persistent_transitory_error"] = (
-            self.skip_persistently_failing_box.isChecked())
+            self.skip_persistently_failing_box.isChecked()
+        )
 
 
-class ArgumentEditor(QtWidgets.QTreeWidget):
+class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
     def __init__(self, manager, dock, expurl):
         super().__init__()
 
@@ -189,27 +235,31 @@ class ArgumentEditor(QtWidgets.QTreeWidget):
 
         self.setColumnCount(3)
         self.header().setStretchLastSection(False)
-        if hasattr(self.header(), "setSectionResizeMode"):
-            set_resize_mode = self.header().setSectionResizeMode
-        else:
-            set_resize_mode = self.header().setResizeMode
-        set_resize_mode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        set_resize_mode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        set_resize_mode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+
+        set_column_resize_mode(
+            self, 0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        set_column_resize_mode(self, 1, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        set_column_resize_mode(
+            self, 2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
         self.header().setVisible(False)
         self.setSelectionMode(self.SelectionMode.NoSelection)
         self.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         self.setHorizontalScrollMode(self.ScrollMode.ScrollPerPixel)
         self.setVerticalScrollMode(self.ScrollMode.ScrollPerPixel)
 
-        self.setStyleSheet("QTreeWidget {background: " +
-                           self.palette().midlight().color().name() + " ;}")
+        self.setStyleSheet(
+            "QTreeWidget {background: "
+            + self.palette().midlight().color().name()
+            + " ;}"
+        )
 
         self.viewport().installEventFilter(WheelFilter(self.viewport()))
 
         self._bg_gradient = QtGui.QLinearGradient(
-            0, 0, 0,
-            QtGui.QFontMetrics(self.font()).lineSpacing())
+            0, 0, 0, QtGui.QFontMetrics(self.font()).lineSpacing()
+        )
         self._bg_gradient.setColorAt(0, self.palette().base().color())
         self._bg_gradient.setColorAt(1, self.palette().midlight().color())
 
@@ -221,25 +271,23 @@ class ArgumentEditor(QtWidgets.QTreeWidget):
         self._arg_to_widgets = dict()
         self._override_items = dict()
 
-        def icon_path(name):
-            return os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons",
-                                name)
-
-        self._add_override_icon = QtGui.QIcon(icon_path("list-add-32.png"))
-        self._remove_override_icon = QtGui.QIcon(icon_path("list-remove-32.png"))
-        self._randomise_scan_icon = QtGui.QIcon(
-            icon_path("media-playlist-shuffle-32.svg"))
+        self._add_override_icon = load_icon_cached("list-add-32.png")
+        self._open_param_tree_icon = load_icon_cached("view-list-tree-32.png")
+        self._remove_override_icon = load_icon_cached("list-remove-32.png")
         self._default_value_icon = self.style().standardIcon(
-            QtWidgets.QStyle.StandardPixmap.SP_BrowserReload)
+            QtWidgets.QStyle.StandardPixmap.SP_BrowserReload
+        )
         self._disable_scans_icon = self.style().standardIcon(
-            QtWidgets.QStyle.StandardPixmap.SP_DialogResetButton)
+            QtWidgets.QStyle.StandardPixmap.SP_DialogResetButton
+        )
 
         self._arguments = self.manager.get_submission_arguments(self.expurl)
         ndscan_params, vanilla_args = _try_extract_ndscan_params(self._arguments)
 
         if not ndscan_params:
             self.addTopLevelItem(
-                QtWidgets.QTreeWidgetItem(["Error: Parameter metadata not found."]))
+                QtWidgets.QTreeWidgetItem(["Error: Parameter metadata not found."])
+            )
         else:
             self._ndscan_params = ndscan_params
 
@@ -252,24 +300,24 @@ class ArgumentEditor(QtWidgets.QTreeWidget):
                 self.scan_options = ScanOptions(ndscan_params["scan"])
 
             for fqn, path in ndscan_params["always_shown"]:
-                self._make_param_items(fqn, path, True)
+                self._append_param_items(fqn, path, True)
 
             for name, argument in vanilla_args.items():
-                self._make_vanilla_argument_item(name, argument)
+                self._append_vanilla_argument_item(name, argument)
 
-            self.override_separator = self._make_line_separator()
+            self.override_separator = self._append_line_separator()
 
-            self._make_add_override_prompt_item()
+            self._append_add_override_prompt_item()
             self._set_override_line_idle()
 
             for ax in ndscan_params.get("scan", {}).get("axes", []):
-                self._make_override_item(ax["fqn"], ax["path"])
+                self._append_override_item(ax["fqn"], ax["path"])
 
             for fqn, overrides in ndscan_params["overrides"].items():
                 for o in overrides:
-                    self._make_override_item(fqn, o["path"])
+                    self._append_override_item(fqn, o["path"])
 
-            self._make_line_separator()
+            self._append_line_separator()
 
             if self.scan_options:
                 scan_options_group = self._make_group_header_item("Scan options")
@@ -278,6 +326,7 @@ class ArgumentEditor(QtWidgets.QTreeWidget):
                     twi = QtWidgets.QTreeWidgetItem()
                     scan_options_group.addChild(twi)
                     self.setItemWidget(twi, 1, widget)
+                scan_options_group.setExpanded(True)
 
         buttons_item = QtWidgets.QTreeWidgetItem()
         self.addTopLevelItem(buttons_item)
@@ -287,8 +336,11 @@ class ArgumentEditor(QtWidgets.QTreeWidget):
         recompute_arguments.clicked.connect(dock._recompute_arguments_clicked)
 
         load_hdf5 = QtWidgets.QPushButton("Load HDF5")
-        load_hdf5.setIcon(QtWidgets.QApplication.style().standardIcon(
-            QtWidgets.QStyle.StandardPixmap.SP_DialogOpenButton))
+        load_hdf5.setIcon(
+            QtWidgets.QApplication.style().standardIcon(
+                QtWidgets.QStyle.StandardPixmap.SP_DialogOpenButton
+            )
+        )
         load_hdf5.clicked.connect(dock._load_hdf5_clicked)
 
         disable_scans = QtWidgets.QPushButton("Disable all scans")
@@ -333,7 +385,22 @@ class ArgumentEditor(QtWidgets.QTreeWidget):
         for entry in self._param_entries.values():
             entry.disable_scan()
 
-    def _make_param_items(self, fqn, path, show_always, insert_at_idx=-1):
+    def override_status(self, fqn, path) -> OverrideStatus:
+        if (fqn, path) in self._ndscan_params["always_shown"]:
+            return OverrideStatus.always_shown
+        if (fqn, path) in self._override_items:
+            return OverrideStatus.overriden
+        return OverrideStatus.not_overridden
+
+    def add_override(self, fqn, path):
+        assert self.override_status(fqn, path) == OverrideStatus.not_overridden
+        self._append_override_item(fqn, path)
+
+    def remove_override(self, fqn, path):
+        assert self.override_status(fqn, path) == OverrideStatus.overriden
+        self._remove_override(fqn, path)
+
+    def _append_param_items(self, fqn, path, show_always, insert_at_idx=-1):
         if (fqn, path) in self._param_entries:
             return
         schema = self._schema_for_fqn(fqn)
@@ -347,8 +414,9 @@ class ArgumentEditor(QtWidgets.QTreeWidget):
                 if insert_at_idx == -1:
                     self.addTopLevelItem(widget_item)
                 else:
-                    self.insertTopLevelItem(insert_at_idx + added_item_count,
-                                            widget_item)
+                    self.insertTopLevelItem(
+                        insert_at_idx + added_item_count, widget_item
+                    )
                 added_item_count += 1
             else:
                 self._ensure_group_widget(group).addChild(widget_item)
@@ -408,8 +476,11 @@ class ArgumentEditor(QtWidgets.QTreeWidget):
 
         reset_default = QtWidgets.QToolButton()
         reset_default.setToolTip("Reset parameter to default value")
-        reset_default.setIcon(QtWidgets.QApplication.style().standardIcon(
-            QtWidgets.QStyle.StandardPixmap.SP_BrowserReload))
+        reset_default.setIcon(
+            QtWidgets.QApplication.style().standardIcon(
+                QtWidgets.QStyle.StandardPixmap.SP_BrowserReload
+            )
+        )
         reset_default.clicked.connect(partial(self._reset_entry_to_default, fqn, path))
         buttons.addWidget(reset_default, col=0)
 
@@ -429,7 +500,7 @@ class ArgumentEditor(QtWidgets.QTreeWidget):
 
         return id_item, main_item
 
-    def _make_vanilla_argument_item(self, name, argument):
+    def _append_vanilla_argument_item(self, name, argument):
         if name in self._arg_to_widgets:
             logger.warning("Argument with name '%s' already exists, skipping.", name)
             return
@@ -469,11 +540,13 @@ class ArgumentEditor(QtWidgets.QTreeWidget):
         buttons.layout.setContentsMargins(3, 3, 3, 3)
 
         recompute_argument = QtWidgets.QToolButton()
-        recompute_argument.setToolTip("Re-run the experiment's build "
-                                      "method and take the default value")
+        recompute_argument.setToolTip(
+            "Re-run the experiment's build method and take the default value"
+        )
         recompute_argument.setIcon(self._default_value_icon)
         recompute_argument.clicked.connect(
-            partial(self._recompute_vanilla_argument_clicked, name))
+            partial(self._recompute_vanilla_argument_clicked, name)
+        )
         buttons.addWidget(recompute_argument)
 
         # Even though there isn't actually a widget in the second column, this makes it
@@ -484,13 +557,15 @@ class ArgumentEditor(QtWidgets.QTreeWidget):
 
         self.setItemWidget(widget_item, 2, buttons)
 
-    def _make_line_separator(self):
+    def _append_line_separator(self):
         f = QtWidgets.QFrame(self)
         f.setMinimumHeight(15)
         f.setFrameShape(QtWidgets.QFrame.Shape.HLine)
         f.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
-        f.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
-                        QtWidgets.QSizePolicy.Policy.Preferred)
+        f.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
 
         wi = QtWidgets.QTreeWidgetItem()
         self.addTopLevelItem(wi)
@@ -498,9 +573,10 @@ class ArgumentEditor(QtWidgets.QTreeWidget):
         self.setItemWidget(wi, 1, f)
         return wi
 
-    def _make_override_item(self, fqn, path):
-        items = self._make_param_items(
-            fqn, path, False, self.indexOfTopLevelItem(self._override_prompt_item))
+    def _append_override_item(self, fqn, path):
+        items = self._append_param_items(
+            fqn, path, False, self.indexOfTopLevelItem(self._override_prompt_item)
+        )
         self._override_items[(fqn, path)] = items
         self._set_save_timer()
 
@@ -510,7 +586,7 @@ class ArgumentEditor(QtWidgets.QTreeWidget):
         geom = self.geometry()
         self.resize(geom.width(), geom.height())
 
-    def _make_add_override_prompt_item(self):
+    def _append_add_override_prompt_item(self):
         self._override_prompt_item = QtWidgets.QTreeWidgetItem()
         self.addTopLevelItem(self._override_prompt_item)
 
@@ -518,11 +594,19 @@ class ArgumentEditor(QtWidgets.QTreeWidget):
         left = LayoutWidget()
         left.layout.setContentsMargins(3, 3, 3, 3)
 
+        self._add_override_line = QtWidgets.QWidget()
+        self._add_override_line.setLayout(QtWidgets.QHBoxLayout())
         self._add_override_button = QtWidgets.QToolButton()
         self._add_override_button.setIcon(self._add_override_icon)
         self._add_override_button.clicked.connect(self._set_override_line_active)
         self._add_override_button.setShortcut("Ctrl+T")
-        left.addWidget(self._add_override_button, 0, 0)
+        self._add_override_line.layout().addWidget(self._add_override_button)
+        self._open_param_tree_button = QtWidgets.QToolButton()
+        self._open_param_tree_button.setIcon(self._open_param_tree_icon)
+        self._open_param_tree_button.clicked.connect(self._open_param_tree)
+        self._open_param_tree_button.setShortcut("Ctrl+Alt+T")
+        self._add_override_line.layout().addWidget(self._open_param_tree_button)
+        left.addWidget(self._add_override_line, 0, 0)
 
         self._add_override_prompt_label = QtWidgets.QLabel("Add parameter:")
         left.addWidget(self._add_override_prompt_label, 0, 0)
@@ -534,25 +618,39 @@ class ArgumentEditor(QtWidgets.QTreeWidget):
         prompt = LayoutWidget()
         self._add_override_prompt_box = FuzzySelectWidget([])
         self._add_override_prompt_box.finished.connect(
-            lambda a: self._make_override_item(*self._param_choice_map[a]))
+            lambda a: self._append_override_item(*self._param_choice_map[a])
+        )
         self._add_override_prompt_box.aborted.connect(self._set_override_line_idle)
         prompt.addWidget(self._add_override_prompt_box)
         self.setItemWidget(self._override_prompt_item, 1, prompt)
 
+    def _open_param_tree(self):
+        dialog = ParamTreeDialog(
+            instances=self._ndscan_params["instances"],
+            schemata=self._ndscan_params["schemata"],
+            override_provider=self,
+            manager_datasets=self.manager.datasets,
+            add_override_icon=self._add_override_icon,
+            remove_override_icon=self._remove_override_icon,
+            parent=self,
+        )
+        dialog.setWindowTitle(f"Parameters for {self.expurl}")
+        dialog.exec()
+
     def _set_override_line_idle(self):
-        self._add_override_button.setEnabled(True)
-        self._add_override_button.setVisible(True)
+        self._add_override_line.setEnabled(True)
+        self._add_override_line.setVisible(True)
         self._add_override_prompt_label.setVisible(False)
         self._add_override_prompt_box.setVisible(False)
 
     def _set_override_line_active(self):
         self._update_param_choice_map()
-        self._add_override_prompt_box.set_choices([
-            (s, 0) for s in self._param_choice_map.keys()
-        ])
+        self._add_override_prompt_box.set_choices(
+            [(s, 0) for s in self._param_choice_map.keys()]
+        )
 
-        self._add_override_button.setEnabled(False)
-        self._add_override_button.setVisible(False)
+        self._add_override_line.setEnabled(False)
+        self._add_override_line.setVisible(False)
         self._add_override_prompt_label.setVisible(True)
         self._add_override_prompt_box.setVisible(True)
 
@@ -574,8 +672,9 @@ class ArgumentEditor(QtWidgets.QTreeWidget):
             return self._groups[name]
         group = self._make_group_header_item(name)
         if self.override_separator:
-            self.insertTopLevelItem(self.indexOfTopLevelItem(self.override_separator),
-                                    group)
+            self.insertTopLevelItem(
+                self.indexOfTopLevelItem(self.override_separator), group
+            )
         else:
             self.addTopLevelItem(group)
         self._groups[name] = group
@@ -589,10 +688,12 @@ class ArgumentEditor(QtWidgets.QTreeWidget):
             class_desc, _ui_name = await self.manager.compute_expdesc(self.expurl)
             arginfo = class_desc["arginfo"]
         except Exception:
-            logger.error("Could not recompute argument '%s' of '%s'",
-                         name,
-                         self.expurl,
-                         exc_info=True)
+            logger.error(
+                "Could not recompute argument '%s' of '%s'",
+                name,
+                self.expurl,
+                exc_info=True,
+            )
             return
         argument = self.manager.get_submission_arguments(self.expurl)[name]
 
@@ -636,8 +737,9 @@ class ArgumentEditor(QtWidgets.QTreeWidget):
             if (fqn, path) in self._param_entries:
                 return
             schema = self._schema_for_fqn(fqn)
-            display_string = "{} – {}".format(self._param_display_name(fqn, path),
-                                              schema["description"])
+            display_string = "{} – {}".format(
+                self._param_display_name(fqn, path), schema["description"]
+            )
             self._param_choice_map[display_string] = (fqn, path)
 
         fqn_occurences = Counter()
@@ -654,12 +756,11 @@ class ArgumentEditor(QtWidgets.QTreeWidget):
     def _build_shortened_fqns(self):
         self.shortened_fqns = shorten_to_unambiguous_suffixes(
             self._ndscan_params["schemata"].keys(),
-            lambda fqn, n: ".".join(fqn.split(".")[-(n + 1):]))
+            lambda fqn, n: ".".join(fqn.split(".")[-(n + 1) :]),
+        )
 
     def _param_display_name(self, fqn, path):
-        if not path:
-            path = "/"
-        return self.shortened_fqns[fqn] + "@" + path
+        return format_override_identity(self.shortened_fqns[fqn], path)
 
     def _schema_for_fqn(self, fqn):
         return self._ndscan_params["schemata"][fqn]
@@ -690,29 +791,11 @@ class ArgumentEditor(QtWidgets.QTreeWidget):
     def _make_override_entry(self, fqn, path):
         schema = self._schema_for_fqn(fqn)
 
-        is_scannable = ((self.scan_options is not None)
-                        and schema.get("spec", {}).get("is_scannable", True))
-
-        options = OrderedDict([])
-        if schema["type"] == "string":
-            options["Fixed"] = StringFixedScanOption
-        elif schema["type"] == "bool":
-            options["Fixed"] = BoolFixedScanOption
-            if is_scannable:
-                options["Scanning"] = BoolScanOption
-        elif schema["type"] == "enum":
-            options["Fixed"] = EnumFixedScanOption
-            if is_scannable:
-                options["Scanning"] = EnumScanOption
-        else:
-            # TODO: Properly handle int, add errors (or default to PYON value).
-            options["Fixed"] = FixedScanOption
-            if is_scannable:
-                options["Min./Max."] = MinMaxScanOption
-                options["Centered"] = CentreSpanScanOption
-                options["Expanding"] = ExpandingScanOption
-                options["List"] = ListScanOption
-        return OverrideEntry(options, schema, path, self._randomise_scan_icon)
+        is_scannable = (self.scan_options is not None) and schema.get("spec", {}).get(
+            "is_scannable", True
+        )
+        options = list_scan_option_types(schema["type"], is_scannable)
+        return OverrideEntry(options, schema, path)
 
     def apply_color(self, *args, **kwargs):
         # TODO: In ARTIQ 9, the ability to colour-code entire argument editor windows
@@ -722,24 +805,14 @@ class ArgumentEditor(QtWidgets.QTreeWidget):
         pass
 
 
-def make_divider():
-    f = QtWidgets.QFrame()
-    f.setFrameShape(QtWidgets.QFrame.Shape.VLine)
-    f.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
-    f.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
-                    QtWidgets.QSizePolicy.Policy.Expanding)
-    return f
-
-
 class OverrideEntry(LayoutWidget):
     value_changed = QtCore.pyqtSignal()
 
-    def __init__(self, option_classes, schema, path, randomise_icon, *args):
+    def __init__(self, option_classes, schema, path, *args):
         super().__init__(*args)
 
         self.schema = schema
         self.path = path
-        self.randomise_icon = randomise_icon
 
         self.scan_type = QtWidgets.QComboBox()
         self.addWidget(self.scan_type, col=0)
@@ -756,7 +829,8 @@ class OverrideEntry(LayoutWidget):
         for name, option_cls in option_classes.items():
             self.scan_type.addItem(name)
 
-            option = option_cls(self)
+            option = option_cls(self.schema, self.path)
+            option.value_changed.connect(self.value_changed)
             container = QtWidgets.QWidget()
             layout = QtWidgets.QHBoxLayout()
             # For tight spacing, let other parts of entry line dominate margins.
@@ -770,11 +844,9 @@ class OverrideEntry(LayoutWidget):
         self.addWidget(self.widget_stack, col=1)
         self.sync_values = {}
 
-    def user_readable_name(self) -> str:
-        """Return a user-readable description of the entry for error messages."""
-        return self.schema["fqn"] + "@" + (self.path or "/")
-
     def read_from_params(self, params: dict, manager_datasets) -> None:
+        id_for_log = format_override_identity(self.schema["fqn"], self.path)
+
         # Check if this parameter is part of the scan axes
         for axis in params.get("scan", {}).get("axes", []):
             if axis["fqn"] == self.schema["fqn"] and axis["path"] == self.path:
@@ -784,35 +856,23 @@ class OverrideEntry(LayoutWidget):
                         self._current_index_changed(idx)
                         self.scan_type.setCurrentIndex(idx)
                         return
-                logger.warning(
-                    f"Failed to read scan params for {self.user_readable_name()}")
+                logger.warning(f"Failed to read scan params for {id_for_log}")
 
         for o in params.get("overrides", {}).get(self.schema["fqn"], []):
             if o["path"] == self.path:
                 self._set_fixed_value(o["value"])
                 return
         try:
-
-            def get_dataset(key, default=None):
-                try:
-                    bs = manager_datasets.backing_store
-                except AttributeError:
-                    logger.error(
-                        "Datasets still synchronising with master, " +
-                        "cannot access '%s'", key)
-                    bs = {}
-                try:
-                    return bs[key][1]
-                except KeyError:
-                    if default is None:
-                        raise KeyError(f"Could not read dataset '{key}', but no " +
-                                       "fallback default value given") from None
-                    return default
-
-            value = eval_param_default(self.schema["default"], get_dataset)
+            value = eval_default_using_local_datasets(
+                self.schema["default"], manager_datasets
+            )
         except Exception as e:
-            logger.error("Failed to evaluate defaults string \"%s\" for %s: %s",
-                         self.schema["default"], self.user_readable_name(), e)
+            logger.error(
+                'Failed to evaluate defaults string "%s" for %s: %s',
+                self.schema["default"],
+                id_for_log,
+                e,
+            )
             value = None
         self._set_fixed_value(value)
         self.disable_scan()
@@ -832,483 +892,3 @@ class OverrideEntry(LayoutWidget):
         self.options[new_idx].read_sync_values(self.sync_values)
         self.widget_stack.setCurrentIndex(new_idx)
         self.current_option_idx = new_idx
-
-    def make_randomise_box(self):
-        box = QtWidgets.QCheckBox()
-        box.setToolTip("Randomise scan point order")
-        box.setIcon(self.randomise_icon)
-        box.setChecked(True)
-        box.stateChanged.connect(self.value_changed)
-        return box
-
-
-def _parse_list_pyon(values: str) -> list[float]:
-    return pyon.decode("[" + values + "]")
-
-
-@unique
-class SyncValue(Enum):
-    """Equivalent values to be synchronised between similar scan types.
-
-    Not all values will have a meaning for all scan types; they should just be left
-    alone so that arguments for like scans are synchronised between each other.
-    """
-    centre = "centre"
-    lower = "lower"
-    upper = "upper"
-    num_points = "num_points"
-
-
-class ScanOption:
-    def __init__(self, entry: OverrideEntry):
-        self.entry = entry
-
-    def build_ui(self, layout: QtWidgets.QLayout) -> None:
-        raise NotImplementedError
-
-    def write_to_params(self, params: dict) -> None:
-        raise NotImplementedError
-
-    def read_sync_values(self, sync_values: dict) -> None:
-        pass
-
-    def write_sync_values(self, sync_values: dict) -> None:
-        pass
-
-    def attempt_read_from_axis(self, axis: dict) -> bool:
-        return False
-
-
-class StringFixedScanOption(ScanOption):
-    def build_ui(self, layout: QtWidgets.QLayout) -> None:
-        self.box = QtWidgets.QLineEdit()
-        layout.addWidget(self.box)
-
-    def write_to_params(self, params: dict) -> None:
-        o = {"path": self.entry.path, "value": self.box.text()}
-        params["overrides"].setdefault(self.entry.schema["fqn"], []).append(o)
-
-    def set_value(self, value) -> None:
-        self.box.setText(value)
-
-
-class BoolFixedScanOption(ScanOption):
-    def build_ui(self, layout: QtWidgets.QLayout) -> None:
-        self.box = QtWidgets.QCheckBox()
-        layout.addWidget(self.box)
-
-    def write_to_params(self, params: dict) -> None:
-        o = {"path": self.entry.path, "value": self.box.isChecked()}
-        params["overrides"].setdefault(self.entry.schema["fqn"], []).append(o)
-
-    def set_value(self, value) -> None:
-        self.box.setChecked(value)
-
-
-class EnumFixedScanOption(ScanOption):
-    def build_ui(self, layout: QtWidgets.QLayout) -> None:
-        self.box = QtWidgets.QComboBox()
-        self._members = self.entry.schema["spec"]["members"]
-        self._member_values_to_keys = {val: key for key, val in self._members.items()}
-        self.box.addItems(self._members.values())
-        layout.addWidget(self.box)
-
-    def write_to_params(self, params: dict) -> None:
-        o = {
-            "path": self.entry.path,
-            "value": self._member_values_to_keys[self.box.currentText()]
-        }
-        params["overrides"].setdefault(self.entry.schema["fqn"], []).append(o)
-
-    def set_value(self, value) -> None:
-        try:
-            text = self._members[value]
-        except KeyError:
-            text = next(iter(self._members.values()))
-            logger.warning(f"Stored value '{value}' not in schema for enum parameter "
-                           f"'{self.entry.user_readable_name()}', setting to '{text}'")
-        self.box.setCurrentText(text)
-
-
-class NumericScanOption(ScanOption):
-    def __init__(self, entry: OverrideEntry):
-        super().__init__(entry)
-        spec = entry.schema.get("spec", {})
-        self.scale = spec.get("scale", 1.0)
-        self.min = spec.get("min", float("-inf"))
-        self.max = spec.get("max", float("inf"))
-
-    def _make_spin_box(self, set_limits_from_spec=True):
-        box = ScientificSpinBox()
-        disable_scroll_wheel(box)
-        box.valueChanged.connect(self.entry.value_changed)
-
-        spec = self.entry.schema.get("spec", {})
-        step = spec.get("step", 1.0)
-
-        box.setDecimals(8)
-        # setPrecision() was renamed in ARTIQ 8.
-        if hasattr(box, "setPrecision"):
-            box.setPrecision()
-        else:
-            box.setSigFigs()
-        box.setSingleStep(step / self.scale)
-        box.setRelativeStep()
-
-        if set_limits_from_spec:
-            box.setMinimum(self.min / self.scale)
-            box.setMaximum(self.max / self.scale)
-
-        unit = spec.get("unit", "")
-        if unit:
-            box.setSuffix(" " + unit)
-        return box
-
-
-class FixedScanOption(NumericScanOption):
-    def build_ui(self, layout: QtWidgets.QLayout) -> None:
-        self.box = self._make_spin_box()
-        layout.addWidget(self.box)
-
-    def write_to_params(self, params: dict) -> None:
-        o = {"path": self.entry.path, "value": self.box.value() * self.scale}
-        params["overrides"].setdefault(self.entry.schema["fqn"], []).append(o)
-
-    def set_value(self, value) -> None:
-        if value is None:
-            # Error evaluating defaults, no better guess.
-            value = 0.0
-        self.box.setValue(float(value) / self.scale)
-
-    def read_sync_values(self, sync_values: dict) -> None:
-        if SyncValue.centre in sync_values:
-            self.box.setValue(sync_values[SyncValue.centre])
-
-    def write_sync_values(self, sync_values: dict) -> None:
-        sync_values[SyncValue.centre] = self.box.value()
-
-
-class RangeScanOption(NumericScanOption):
-    """Base class for different ways of specifying scans across a given numerical
-    range.
-    """
-    def _make_inf_points_box(self):
-        box = QtWidgets.QCheckBox()
-        box.setToolTip("Infinitely refine scan grid")
-        box.setText("∞")
-        box.setChecked(True)
-        box.stateChanged.connect(self.entry.value_changed)
-        return box
-
-    def _build_points_ui(self, layout):
-        self.check_infinite = self._make_inf_points_box()
-        layout.addWidget(self.check_infinite)
-        layout.setStretchFactor(self.check_infinite, 0)
-
-        self.box_points = QtWidgets.QSpinBox()
-        self.box_points.setMinimum(2)
-        self.box_points.setValue(21)
-
-        # Somewhat gratuitously restrict the number of scan points for sizing, and to
-        # avoid the user accidentally pasting in millions of points, etc.
-        self.box_points.setMaximum(0xffff)
-
-        self.box_points.setSuffix(" pts")
-        layout.addWidget(self.box_points)
-        layout.setStretchFactor(self.box_points, 0)
-
-        self.check_infinite.setChecked(True)
-        self.box_points.setEnabled(False)
-        self.check_infinite.stateChanged.connect(
-            lambda *_: self.box_points.setEnabled(not self.check_infinite.isChecked()))
-
-        self.check_randomise = self.entry.make_randomise_box()
-        layout.addWidget(self.check_randomise)
-        layout.setStretchFactor(self.check_randomise, 0)
-
-    def write_to_params(self, params: dict) -> None:
-        spec = {
-            "fqn": self.entry.schema["fqn"],
-            "path": self.entry.path,
-            "range": {
-                "randomise_order": self.check_randomise.isChecked(),
-            }
-        }
-        self.write_type_and_range(spec)
-        params["scan"].setdefault("axes", []).append(spec)
-
-
-class MinMaxScanOption(RangeScanOption):
-    def build_ui(self, layout: QtWidgets.QLayout) -> None:
-        self.box_start = self._make_spin_box()
-        layout.addWidget(self.box_start)
-        layout.setStretchFactor(self.box_start, 1)
-
-        layout.addWidget(make_divider())
-
-        self._build_points_ui(layout)
-
-        layout.addWidget(make_divider())
-
-        self.box_stop = self._make_spin_box()
-        layout.addWidget(self.box_stop)
-        layout.setStretchFactor(self.box_stop, 1)
-
-    def read_sync_values(self, sync_values: dict) -> None:
-        if SyncValue.lower in sync_values:
-            self.box_start.setValue(sync_values[SyncValue.lower])
-        if SyncValue.upper in sync_values:
-            self.box_stop.setValue(sync_values[SyncValue.upper])
-        if SyncValue.num_points in sync_values:
-            self.box_points.setValue(sync_values[SyncValue.num_points])
-
-    def write_sync_values(self, sync_values: dict) -> None:
-        sync_values[SyncValue.lower] = self.box_start.value()
-        sync_values[SyncValue.upper] = self.box_stop.value()
-        sync_values[SyncValue.num_points] = self.box_points.value()
-
-    def attempt_read_from_axis(self, axis: dict) -> bool:
-        if axis["type"] == "refining":
-            self.check_infinite.setChecked(True)
-            self.box_start.setValue(axis["range"].get("lower", 0.0) / self.scale)
-            self.box_stop.setValue(axis["range"].get("upper", 0.0) / self.scale)
-            self.check_randomise.setChecked(axis["range"].get("randomise_order", True))
-            return True
-        if axis["type"] == "linear":
-            self.check_infinite.setChecked(False)
-            self.box_start.setValue(axis["range"].get("start", 0.0) / self.scale)
-            self.box_stop.setValue(axis["range"].get("stop", 0.0) / self.scale)
-            self.box_points.setValue(axis["range"].get("num_points", 21))
-            self.check_randomise.setChecked(axis["range"].get("randomise_order", True))
-            return True
-        return False
-
-    def write_type_and_range(self, spec: dict) -> None:
-        start = self.box_start.value()
-        stop = self.box_stop.value()
-        if self.check_infinite.isChecked():
-            spec["type"] = "refining"
-            spec["range"] |= {
-                "lower": start * self.scale,
-                "upper": stop * self.scale,
-            }
-        else:
-            spec["type"] = "linear"
-            spec["range"] |= {
-                "start": start * self.scale,
-                "stop": stop * self.scale,
-                "num_points": self.box_points.value()
-            }
-
-
-class CentreSpanScanOption(RangeScanOption):
-    def build_ui(self, layout: QtWidgets.QLayout) -> None:
-        self.box_centre = self._make_spin_box()
-        layout.addWidget(self.box_centre)
-        layout.setStretchFactor(self.box_centre, 1)
-
-        self.plusminus = QtWidgets.QLabel("±")
-        layout.addWidget(self.plusminus)
-        layout.setStretchFactor(self.plusminus, 0)
-
-        self.box_half_span = self._make_spin_box(set_limits_from_spec=False)
-        layout.addWidget(self.box_half_span)
-        layout.setStretchFactor(self.box_half_span, 1)
-
-        layout.addWidget(make_divider())
-
-        self._build_points_ui(layout)
-
-    def read_sync_values(self, sync_values: dict) -> None:
-        if SyncValue.centre in sync_values:
-            self.box_centre.setValue(sync_values[SyncValue.centre])
-        if SyncValue.num_points in sync_values:
-            self.box_points.setValue(sync_values[SyncValue.num_points])
-
-    def write_sync_values(self, sync_values: dict) -> None:
-        sync_values[SyncValue.centre] = self.box_centre.value()
-        sync_values[SyncValue.num_points] = self.box_points.value()
-
-    def attempt_read_from_axis(self, axis: dict) -> bool:
-        if axis["type"] == "centre_span_refining":
-            self.check_infinite.setChecked(True)
-        elif axis["type"] == "centre_span":
-            self.check_infinite.setChecked(False)
-        else:
-            return False
-
-        # Common to both finite/refining:
-        self.box_half_span.setValue((axis["range"].get("half_span", 0.0) / self.scale))
-        self.box_centre.setValue((axis["range"].get("centre", 0.0) / self.scale))
-        self.check_randomise.setChecked(axis["range"].get("randomise_order", True))
-        return True
-
-    def write_type_and_range(self, spec: dict) -> None:
-        centre = self.box_centre.value()
-        half_span = self.box_half_span.value()
-        spec["range"] |= {
-            "centre": centre * self.scale,
-            "half_span": half_span * self.scale,
-            "limit_lower": self.min,
-            "limit_upper": self.max,
-        }
-        if self.check_infinite.isChecked():
-            spec["type"] = "centre_span_refining"
-        else:
-            spec["type"] = "centre_span"
-            spec["range"]["num_points"] = self.box_points.value()
-
-
-class ExpandingScanOption(NumericScanOption):
-    def build_ui(self, layout: QtWidgets.QLayout) -> None:
-        self.box_centre = self._make_spin_box()
-        layout.addWidget(self.box_centre)
-        layout.setStretchFactor(self.box_centre, 1)
-
-        layout.addWidget(make_divider())
-
-        self.check_randomise = self.entry.make_randomise_box()
-        layout.addWidget(self.check_randomise)
-        layout.setStretchFactor(self.check_randomise, 0)
-
-        layout.addWidget(make_divider())
-
-        self.box_spacing = self._make_spin_box()
-        self.box_spacing.setSuffix(self.box_spacing.suffix() + " steps")
-        layout.addWidget(self.box_spacing)
-        layout.setStretchFactor(self.box_spacing, 1)
-
-    def write_to_params(self, params: dict) -> None:
-        schema = self.entry.schema
-        spec = {
-            "fqn": schema["fqn"],
-            "path": self.entry.path,
-            "type": "expanding",
-            "range": {
-                "centre": self.box_centre.value() * self.scale,
-                "spacing": self.box_spacing.value() * self.scale,
-                "randomise_order": self.check_randomise.isChecked()
-            }
-        }
-        spec["range"]["limit_lower"] = self.min
-        spec["range"]["limit_upper"] = self.max
-        params["scan"].setdefault("axes", []).append(spec)
-
-    def read_sync_values(self, sync_values: dict) -> None:
-        if SyncValue.centre in sync_values:
-            self.box_centre.setValue(sync_values[SyncValue.centre])
-
-    def write_sync_values(self, sync_values: dict) -> None:
-        sync_values[SyncValue.centre] = self.box_centre.value()
-
-    def attempt_read_from_axis(self, axis: dict) -> bool:
-        if axis["type"] != "expanding":
-            return False
-        self.box_centre.setValue(axis["range"].get("centre", 0.0) / self.scale)
-        self.box_spacing.setValue(axis["range"].get("spacing", 0.0) / self.scale)
-        self.check_randomise.setChecked(axis["range"].get("randomise_order", True))
-        return True
-
-
-class ListScanOption(NumericScanOption):
-    def build_ui(self, layout: QtWidgets.QLayout) -> None:
-        class Validator(QtGui.QValidator):
-            def validate(self, input, pos):
-                try:
-                    [float(f) for f in _parse_list_pyon(input)]
-                    return QtGui.QValidator.State.Acceptable, input, pos
-                except Exception:
-                    return QtGui.QValidator.State.Intermediate, input, pos
-
-        self.box_pyon = QtWidgets.QLineEdit()
-        self.box_pyon.setValidator(Validator(self.entry))
-        layout.addWidget(self.box_pyon)
-
-        layout.addWidget(make_divider())
-
-        self.check_randomise = self.entry.make_randomise_box()
-        layout.addWidget(self.check_randomise)
-        layout.setStretchFactor(self.check_randomise, 0)
-
-    def write_to_params(self, params: dict) -> None:
-        try:
-            values = [v * self.scale for v in _parse_list_pyon(self.box_pyon.text())]
-        except Exception as e:
-            logger.info(e)
-            values = []
-        spec = {
-            "fqn": self.entry.schema["fqn"],
-            "path": self.entry.path,
-            "type": "list",
-            "range": {
-                "values": values,
-                "randomise_order": self.check_randomise.isChecked(),
-            }
-        }
-        params["scan"].setdefault("axes", []).append(spec)
-
-    def attempt_read_from_axis(self, axis: dict) -> bool:
-        if axis["type"] != "list":
-            return False
-        values = axis["range"].get("values", [])
-        list_str = ", ".join([str(v / self.scale) for v in values])
-        self.box_pyon.setText(list_str)
-        self.check_randomise.setChecked(axis["range"].get("randomise_order", True))
-        return True
-
-
-class BoolScanOption(ScanOption):
-    def build_ui(self, layout: QtWidgets.QLayout) -> None:
-        dummy_box = QtWidgets.QCheckBox()
-        dummy_box.setTristate()
-        dummy_box.setEnabled(False)
-        dummy_box.setChecked(True)
-        layout.addWidget(dummy_box)
-        layout.setStretchFactor(dummy_box, 0)
-        layout.addWidget(make_divider())
-        self.check_randomise = self.entry.make_randomise_box()
-        layout.addWidget(self.check_randomise)
-        layout.setStretchFactor(self.check_randomise, 1)
-
-    def write_to_params(self, params: dict) -> None:
-        spec = {
-            "fqn": self.entry.schema["fqn"],
-            "path": self.entry.path,
-            "type": "list",
-            "range": {
-                "values": [False, True],
-                "randomise_order": self.check_randomise.isChecked(),
-            }
-        }
-        params["scan"].setdefault("axes", []).append(spec)
-
-    def attempt_read_from_axis(self, axis: dict) -> bool:
-        if axis["type"] != "list":
-            return False
-        self.check_randomise.setChecked(axis["range"].get("randomise_order", True))
-        return True
-
-
-class EnumScanOption(ScanOption):
-    def build_ui(self, layout: QtWidgets.QLayout) -> None:
-        self.check_randomise = self.entry.make_randomise_box()
-        layout.addWidget(self.check_randomise)
-        layout.setStretchFactor(self.check_randomise, 0)
-
-    def write_to_params(self, params: dict) -> None:
-        spec = {
-            "fqn": self.entry.schema["fqn"],
-            "path": self.entry.path,
-            "type": "list",
-            "range": {
-                "values": list(self.entry.schema["spec"]["members"].keys()),
-                "randomise_order": self.check_randomise.isChecked(),
-            }
-        }
-        params["scan"].setdefault("axes", []).append(spec)
-
-    def attempt_read_from_axis(self, axis: dict) -> bool:
-        if axis["type"] != "list":
-            return False
-        self.check_randomise.setChecked(axis["range"].get("randomise_order", True))
-        return True

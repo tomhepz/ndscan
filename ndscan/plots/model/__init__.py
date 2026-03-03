@@ -24,9 +24,11 @@ situations.)
 """
 
 import logging
-import numpy
 from collections.abc import Callable
 from typing import Any, Optional
+
+import numpy
+
 from ..._qt import QtCore
 from .online_analysis import OnlineNamedFitAnalysis
 
@@ -41,21 +43,11 @@ class Context(QtCore.QObject):
     """
 
     source_id_changed = QtCore.pyqtSignal(str)
-    title_changed = QtCore.pyqtSignal(str)
 
     def __init__(self, set_dataset: Callable[[str, Any], None] = None):
         super().__init__()
         self._set_dataset = set_dataset
-        self._title = ""
         self._source_id = "<unknown>"
-
-    def get_title(self) -> str:
-        return self._title
-
-    def set_title(self, title: str) -> None:
-        if self._title != title:
-            self._title = title
-            self.title_changed.emit(title)
 
     def get_source_id(self):
         """Return a short string that helps the user to identify the data source.
@@ -121,9 +113,13 @@ class OnlineAnalysisDataSource(AnnotationDataSource):
 
 
 class Annotation:
-    def __init__(self, kind: str, parameters: dict[str, Any],
-                 coordinates: dict[str, AnnotationDataSource],
-                 data: dict[str, AnnotationDataSource]):
+    def __init__(
+        self,
+        kind: str,
+        parameters: dict[str, Any],
+        coordinates: dict[str, AnnotationDataSource],
+        data: dict[str, AnnotationDataSource],
+    ):
         self.kind = kind
         self.parameters = parameters
         self.coordinates = coordinates
@@ -142,8 +138,15 @@ class Root(QtCore.QObject):
     """
 
     model_changed = QtCore.pyqtSignal(object)
+    title_changed = QtCore.pyqtSignal(str)
 
     def get_model(self) -> Optional["Model"]:
+        raise NotImplementedError
+
+    def get_title(self) -> str:
+        """Return a human-readable title describing what this data tree represents,
+        suitable for window/dock/… title bars.
+        """
         raise NotImplementedError
 
 
@@ -171,8 +174,9 @@ class ScanModel(Model):
     points_appended = QtCore.pyqtSignal(dict)
     annotations_changed = QtCore.pyqtSignal(list)
 
-    def __init__(self, axes: list[dict[str, Any]], schema_revision: int,
-                 context: Context):
+    def __init__(
+        self, axes: list[dict[str, Any]], schema_revision: int, context: Context
+    ):
         super().__init__(schema_revision, context)
         self.axes = axes
         self._annotations = []
@@ -210,8 +214,9 @@ class ScanModel(Model):
 
             # `online_result` was called `analysis_result` prior to revision 2, with
             # identical semantics; analysis results proper didn't exit.
-            if kind == "online_result" or (self.schema_revision < 2
-                                           and kind == "analysis_result"):
+            if kind == "online_result" or (
+                self.schema_revision < 2 and kind == "analysis_result"
+            ):
                 analysis = self._online_analyses.get(spec["analysis_name"], None)
                 if analysis is None:
                     return None
@@ -235,11 +240,13 @@ class ScanModel(Model):
                 logger.warning("Ignoring analysis, not all data found: %s", schema)
                 continue
             self._annotations.append(
-                Annotation(schema["kind"], schema.get("parameters", {}), *sources))
+                Annotation(schema["kind"], schema.get("parameters", {}), *sources)
+            )
         self.annotations_changed.emit(self._annotations)
 
-    def _set_online_analyses(self, analysis_schemata: dict[str, dict[str,
-                                                                     Any]]) -> None:
+    def _set_online_analyses(
+        self, analysis_schemata: dict[str, dict[str, Any]]
+    ) -> None:
         """Create and hook up online analyses from the given schema.
 
         This will be called by concrete subclasses once/whenever they have received

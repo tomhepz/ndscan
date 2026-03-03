@@ -7,11 +7,13 @@
 # in.
 
 import logging
+from typing import Callable
+
 import pyqtgraph
 import pyqtgraph.exporters
+
 from .._qt import QtCore, QtGui, QtWidgets
 from .model import Context, Root
-from typing import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +24,7 @@ class MultiYAxisPlotItem(pyqtgraph.PlotItem):
 
     This is somewhat of a hack following the MultiplePlotAxes pyqtgraph example.
     """
+
     def __init__(self):
         super().__init__()
         self._num_y_axes = 0
@@ -30,7 +33,8 @@ class MultiYAxisPlotItem(pyqtgraph.PlotItem):
 
     def show_border(self):
         self.getViewBox().setBorder(
-            pyqtgraph.functions.mkPen(pyqtgraph.getConfigOption("foreground")))
+            pyqtgraph.functions.mkPen(pyqtgraph.getConfigOption("foreground"))
+        )
 
     def new_y_axis(self):
         self._num_y_axes += 1
@@ -97,9 +101,9 @@ class VerticalPanesWidget(pyqtgraph.GraphicsLayoutWidget):
     error = QtCore.pyqtSignal(str)
 
     #: Emitted when the user opened a subplot/… and the containing widget should show
-    #: the given widget in a new dock. Arguments are (VerticalPanesWidget to show,
+    #: the given widget in a new dock. Arguments are (RootWidget to show,
     #: dock title).
-    new_dock_requested = QtCore.pyqtSignal(object, str)
+    new_dock_requested = QtCore.pyqtSignal(object)
 
     #: Emitted after the dock containing this widget was closed by the user (if a
     #: subplot/…), whether through a context menu or the docking area UI.
@@ -119,8 +123,9 @@ class VerticalPanesWidget(pyqtgraph.GraphicsLayoutWidget):
         # We don't need any scroll gestures, etc., and this avoids "qt.pointer.dispatch:
         # skipping QEventPoint(…) : no target window" stderr spam on macOS from within
         # Qt itself.
-        self.viewport().setAttribute(QtCore.Qt.WidgetAttribute.WA_AcceptTouchEvents,
-                                     False)
+        self.viewport().setAttribute(
+            QtCore.Qt.WidgetAttribute.WA_AcceptTouchEvents, False
+        )
 
     def add_pane(self) -> MultiYAxisPlotItem:
         """Extend layout vertically by one :class:`.MultiYAxisPlotItem`."""
@@ -222,6 +227,7 @@ class ContextMenuBuilder:
 
     Elides multiple separators in a row.
     """
+
     def __init__(self, target_menu):
         self._last_was_no_separator = False
         self._entries = []
@@ -258,6 +264,7 @@ class ContextMenuBuilder:
 
 class ContextMenuPanesWidget(VerticalPanesWidget):
     """VerticalPanesWidget with support for dynamically populated context menus."""
+
     def __init__(self):
         super().__init__()
 
@@ -315,14 +322,15 @@ class ContextMenuPanesWidget(VerticalPanesWidget):
 
         return pane
 
-    def build_context_menu(self, pane_idx: int | None,
-                           builder: ContextMenuBuilder) -> None:
+    def build_context_menu(
+        self, pane_idx: int | None, builder: ContextMenuBuilder
+    ) -> None:
         pass
 
 
 class SubplotMenuPanesWidget(ContextMenuPanesWidget):
-    """PlotWidget with a context menu to open new windows for subplots.
-    """
+    """PlotWidget with a context menu to open new windows for subplots."""
+
     def __init__(self):
         super().__init__()
 
@@ -339,8 +347,9 @@ class SubplotMenuPanesWidget(ContextMenuPanesWidget):
             w.close()
         super().closeEvent(ev)
 
-    def build_context_menu(self, pane_idx: int | None,
-                           builder: ContextMenuBuilder) -> None:
+    def build_context_menu(
+        self, pane_idx: int | None, builder: ContextMenuBuilder
+    ) -> None:
         if len(self.subscan_roots) > 0:
             builder.ensure_separator()
             for name in self.subscan_roots.keys():
@@ -348,12 +357,16 @@ class SubplotMenuPanesWidget(ContextMenuPanesWidget):
                 action.setCheckable(True)
                 action.setChecked(name in self.subscan_plots)
                 action.triggered.connect(
-                    lambda *a, name=name: self._toggle_subscan_plot(name))
+                    lambda *a, name=name: self._toggle_subscan_plot(name)
+                )
+
         super().build_context_menu(pane_idx, builder)
 
     def _toggle_subscan_plot(self, name):
-        toggle_all = (QtWidgets.QApplication.keyboardModifiers()
-                      & QtCore.Qt.KeyboardModifier.ShiftModifier)
+        toggle_all = (
+            QtWidgets.QApplication.keyboardModifiers()
+            & QtCore.Qt.KeyboardModifier.ShiftModifier
+        )
         if name in self.subscan_plots:
             if toggle_all:
                 # This will also end up removing the plots from self.subscan_plots; take
@@ -375,14 +388,16 @@ class SubplotMenuPanesWidget(ContextMenuPanesWidget):
         assert name not in self.subscan_plots
         try:
             from .container_widgets import RootWidget
-            plot = RootWidget(self.subscan_roots[name])
+
+            root = self.subscan_roots[name]
+            plot = RootWidget(root)
         except NotImplementedError as err:
             logger.info("Ignoring subscan '%s': %s", name, str(err))
             return
         self.subscan_plots[name] = plot
         plot.new_dock_requested.connect(self.new_dock_requested)
         plot.was_closed.connect(lambda: self.subscan_plots.pop(name).deleteLater())
-        self.new_dock_requested.emit(plot, f"subscan '{name}'")
+        self.new_dock_requested.emit(plot)
 
     def close_subscan_plot(self, name):
         # This triggers the plot widget's closeEvent, which in turn emits was_closed(),
@@ -390,15 +405,99 @@ class SubplotMenuPanesWidget(ContextMenuPanesWidget):
         self.subscan_plots[name].close()
 
 
-def add_source_id_label(view_box: pyqtgraph.ViewBox,
-                        context: Context) -> pyqtgraph.TextItem:
+# TODO: Use metaprogramming to avoid code duplication with SubscanMenuPanesWidget.
+class SliceableMenuPanesWidget(SubplotMenuPanesWidget):
+    """
+    PlotWidget with a context menu to open new windows for slices for
+    multi-dimensional data.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+        #: Maps axis names to model Root instances. Populated once we have the
+        #: channel schemata; also keeps the Root objects alive.
+        self.slice_roots: dict[str, Root] = {}
+
+        #: Maps axis names to active plot widgets.
+        self.slice_plots: dict[str, VerticalPanesWidget] = {}
+
+    def closeEvent(self, ev):
+        # Hide subplots as well when hiding the parent plot (i.e. self).
+        for w in self.slice_plots.values():
+            w.close()
+        super().closeEvent(ev)
+
+    def build_context_menu(
+        self, pane_idx: int | None, builder: ContextMenuBuilder
+    ) -> None:
+        if len(self.slice_roots) > 0:
+            builder.ensure_separator()
+            for name in self.slice_roots.keys():
+                action = builder.append_action(f"Slice along '{name}'")
+                action.setCheckable(True)
+                action.setChecked(name in self.slice_plots)
+                action.triggered.connect(
+                    lambda *a, name=name: self._toggle_slice_plot(name)
+                )
+        super().build_context_menu(pane_idx, builder)
+
+    def _toggle_slice_plot(self, name):
+        toggle_all = (
+            QtWidgets.QApplication.keyboardModifiers()
+            & QtCore.Qt.KeyboardModifier.ShiftModifier
+        )
+        if name in self.slice_plots:
+            if toggle_all:
+                # This will also end up removing the plots from self.slice_plots; take
+                # list() to not depend on the details of the signal dispatch timing.
+                for key in list(self.slice_plots.keys()):
+                    self.close_slice_plot(key)
+            else:
+                # Just close the one plot.
+                self.close_slice_plot(name)
+        else:
+            if toggle_all:
+                for name in self.slice_roots.keys():
+                    if name not in self.slice_plots:
+                        self.open_slice_plot(name)
+            else:
+                self.open_slice_plot(name)
+
+    def open_slice_plot(self, name):
+        assert name not in self.slice_plots
+        try:
+            from .container_widgets import RootWidget
+
+            plot = RootWidget(self.slice_roots[name])
+        except NotImplementedError as err:
+            logger.info("Ignoring slice '%s': %s", name, str(err))
+            return
+        self.slice_plots[name] = plot
+        plot.new_dock_requested.connect(self.new_dock_requested)
+        plot.was_closed.connect(lambda: self.slice_plots.pop(name).deleteLater())
+        self.new_dock_requested.emit(plot)
+
+        # Creating a new dock shifts focus to the new slice plots;
+        # return focus to the original plot.
+        self.setFocus()
+
+    def close_slice_plot(self, name):
+        # This triggers the plot widget's closeEvent, which in turn emits was_closed(),
+        # which in causes the dock to be removed.
+        self.slice_plots[name].close()
+        self.setFocus()
+
+
+def add_source_id_label(
+    view_box: pyqtgraph.ViewBox, context: Context
+) -> pyqtgraph.TextItem:
     """Add a translucent TextItem pinned to the bottom left of the view box displaying
     the context source id string.
     """
-    text_item = pyqtgraph.TextItem(text="",
-                                   anchor=(0, 1),
-                                   color=(255, 255, 255),
-                                   fill=(0, 0, 0))
+    text_item = pyqtgraph.TextItem(
+        text="", anchor=(0, 1), color=(255, 255, 255), fill=(0, 0, 0)
+    )
     text_item.setZValue(1000)
     text_item.setOpacity(0.3)
     view_box.addItem(text_item, ignoreBounds=True)
@@ -419,10 +518,12 @@ def add_source_id_label(view_box: pyqtgraph.ViewBox,
     return text_item
 
 
-def build_channel_selection_context_menu(builder: ContextMenuBuilder,
-                                         state_changed_callback: Callable[[], None],
-                                         data_names: list[str],
-                                         hidden_channels: set[str]):
+def build_channel_selection_context_menu(
+    builder: ContextMenuBuilder,
+    state_changed_callback: Callable[[], None],
+    data_names: list[str],
+    hidden_channels: set[str],
+):
     """Create a submenu of checkboxes to control the set of `hidden_channels`.
 
     :param builder: Instance of ``ContextMenuBuilder``.
