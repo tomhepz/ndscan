@@ -353,7 +353,88 @@ class RaggedSubscanFragment(ExpFragment):
 RaggedSubscanFragmentScan = make_fragment_scan_exp(RaggedSubscanFragment)
 
 
+class NestedRaggedLeafFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("p", FloatParam, "p", default=0.0)
+        self.setattr_param("x", FloatParam, "x", default=0.0)
+        self.setattr_result("result")
+
+    def run_once(self):
+        self.result.push(self.p.use() + self.x.use())
+
+
+class NestedRaggedInnerSubscan(SubscanExpFragment):
+    def build_fragment(self):
+        self.setattr_fragment("leaf", NestedRaggedLeafFragment)
+        super().build_fragment(
+            self,
+            "leaf",
+            [(self.leaf, "x")],
+            expose_analysis_results=False,
+        )
+
+    def _configure(self):
+        p_now = self.leaf.p.use()
+        n = 2 + (int(p_now) % 3) * 2
+        self.configure(
+            [(self.leaf.x, LinearGenerator(0.0, 5.0, n, False))],
+            options=ScanOptions(),
+        )
+
+    def host_setup(self):
+        self._configure()
+        super().host_setup()
+
+    def device_setup(self):
+        self._configure()
+        self.device_setup_subfragments()
+
+
+class NestedRaggedOuterSubscan(SubscanExpFragment):
+    def build_fragment(self):
+        self.setattr_fragment("inner", NestedRaggedInnerSubscan)
+        super().build_fragment(
+            self,
+            "inner",
+            [(self.inner.leaf, "p")],
+            expose_analysis_results=False,
+        )
+
+    def host_setup(self):
+        self.configure(
+            [(self.inner.leaf.p, LinearGenerator(0.0, 5.0, 10, False))],
+            options=ScanOptions(),
+        )
+        super().host_setup()
+
+
+NestedRaggedOuterSubscanScan = make_fragment_scan_exp(NestedRaggedOuterSubscan)
+
+
 class RaggedSubscanDatasetCase(HasEnvironmentCase):
+    def test_nested_ragged_preview_is_broadcast_only(self):
+        exp = self.create(NestedRaggedOuterSubscanScan)
+        exp.prepare()
+        exp.run()
+
+        dataset_mgr = exp._HasEnvironment__dataset_mgr
+        preview_keys = [k for k in self.dataset_db.data.keys() if ".subscan_preview." in k]
+        self.assertTrue(preview_keys)
+
+        ragged_preview_keys = []
+        for key in preview_keys:
+            value = self.dataset_db.data[key][1]
+            if isinstance(value, list) and value and all(
+                isinstance(v, list) for v in value
+            ):
+                lengths = {len(v) for v in value}
+                if len(lengths) > 1:
+                    ragged_preview_keys.append(key)
+
+        self.assertTrue(ragged_preview_keys)
+        for key in ragged_preview_keys:
+            self.assertNotIn(key, dataset_mgr.local)
+
     def test_legacy_ragged_channels_are_not_archived(self):
         exp = self.create(RaggedSubscanFragmentScan)
         fragment_fqn = "test_experiment_subscan.RaggedSubscanFragment"

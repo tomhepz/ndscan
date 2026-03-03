@@ -92,6 +92,8 @@ Policy for new schemas (`subscan_preview`, `subscan_flat`):
 - Current chosen compromise: root IDs are `human_slug__stablehash`.
 - Legacy aggregate subscan channels (`scan_axis_*`, `scan_channel_*`) are kept for
   compatibility but are non-archived by default to avoid ragged HDF5 failures.
+- `subscan_preview.*` is broadcast-only (non-archived), because nested ragged
+  previews can otherwise fail HDF5 writes at end-of-run.
 
 This keeps names robust while preserving readability where needed.
 

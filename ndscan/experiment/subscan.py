@@ -144,7 +144,9 @@ class Subscan:
             generators.append(generator)
             array_sink = ArraySink()
             preview_sink = ResettableAppendingDatasetSink(
-                self._runner, self._preview_dataset_prefix + f"points.axis_{i}"
+                self._runner,
+                self._preview_dataset_prefix + f"points.axis_{i}",
+                archive=False,
             )
             flat_sink = self._flat_coordinate_sinks.get(i, None)
             if flat_sink is None:
@@ -207,6 +209,7 @@ class Subscan:
             self._preview_dataset_prefix + name,
             value,
             broadcast=True,
+            archive=False,
         )
 
     def _set_preview_completed(self):
@@ -556,7 +559,9 @@ def setup_subscan(
         short_child_channel_names[channel] = short_identifier
         child_sink = ArraySink()
         preview_sink = ResettableAppendingDatasetSink(
-            result_target, preview_dataset_prefix + "points.channel_" + short_identifier
+            result_target,
+            preview_dataset_prefix + "points.channel_" + short_identifier,
+            archive=False,
         )
         flat_sink = AppendingDatasetSink(
             result_target, flat_dataset_prefix + "points.channel_" + short_identifier

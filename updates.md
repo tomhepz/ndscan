@@ -65,6 +65,8 @@ Current implementation direction:
   - `starts` (flat offset per completed subscan invocation)
 - legacy `scan_axis_*`/`scan_channel_*` list-of-lists stay broadcast-visible but are
   non-archived by default to avoid ragged HDF5 write failures
+- `subscan_preview.*` datasets are also broadcast-only (non-archived), as nested
+  ragged previews can be list-of-lists during a run
 
 ### Future Scan Topology Requirements (Recorded)
 
