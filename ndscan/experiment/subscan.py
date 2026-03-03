@@ -380,7 +380,8 @@ def _make_preview_dataset_prefix(
         ]
     )
     preview_id = hashlib.sha1(site_id.encode("utf-8")).hexdigest()[:12]
-    rid = result_target.get_device("scheduler").rid
+    scheduler = result_target.get_device("scheduler")
+    rid = getattr(scheduler, "rid", 0)
     return f"ndscan.rid_{rid}.subscan_preview.{preview_id}."
 
 
