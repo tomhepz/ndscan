@@ -237,14 +237,25 @@ class SubscanFlatDatasetCase(ExpFragmentCase):
         def d(key):
             return self.dataset_db.get(parent.scan._flat_dataset_prefix + key)
 
-        self.assertEqual(d(SCHEMA_REVISION_KEY), SCHEMA_REVISION)
-        self.assertEqual(d("completed"), True)
-        self.assertEqual(d("source_id"), "rid_0")
-        self.assertEqual(d("fragment_fqn"), "fixtures.AddOneFragment")
         self.assertEqual(d("points.axis_0"), [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
-        self.assertEqual(d("points.channel_result"), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
-        self.assertEqual(d("segments.start"), [0, 4])
-        self.assertEqual(d("segments.len"), [4, 4])
+        self.assertEqual(
+            d("points.channel_result"),
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        )
+        self.assertEqual(d("starts"), [0, 4])
+
+        flat_prefix = parent.scan._flat_dataset_prefix
+        flat_keys = sorted(
+            key for key in self.dataset_db.data.keys() if key.startswith(flat_prefix)
+        )
+        self.assertEqual(
+            flat_keys,
+            [
+                flat_prefix + "points.axis_0",
+                flat_prefix + "points.channel_result",
+                flat_prefix + "starts",
+            ],
+        )
 
 
 class CharacteriseBulkPushFragment(ExpFragment):

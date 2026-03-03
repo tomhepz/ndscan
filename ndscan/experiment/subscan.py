@@ -62,7 +62,6 @@ class Subscan:
         flat_child_result_sinks: dict[ResultChannel, AppendingDatasetSink],
         flat_dataset_prefix: str,
         flat_segment_start_sink: AppendingDatasetSink,
-        flat_segment_len_sink: AppendingDatasetSink,
         aggregate_result_channels: dict[ResultChannel, ResultChannel],
         short_child_channel_names: dict[ResultChannel, str],
         analyses: list[DefaultAnalysis],
@@ -79,7 +78,6 @@ class Subscan:
         self._flat_child_result_sinks = flat_child_result_sinks
         self._flat_dataset_prefix = flat_dataset_prefix
         self._flat_segment_start_sink = flat_segment_start_sink
-        self._flat_segment_len_sink = flat_segment_len_sink
         self._aggregate_result_channels = aggregate_result_channels
         self._short_child_channel_names = short_child_channel_names
         self._analyses = analyses
@@ -190,7 +188,6 @@ class Subscan:
         coordinates = self._push_coordinates()
         values = self._push_values()
         self._set_flat_segment(coordinates, values)
-        self._set_flat_completed()
         self._set_preview_completed()
         return coordinates, values, analysis_results
 
@@ -201,7 +198,6 @@ class Subscan:
         for sink in self._preview_coordinate_sinks.values():
             sink.clear()
         self._broadcast_preview_metadata()
-        self._broadcast_flat_metadata()
 
     def _preview_push(self, name: str, value):
         self._runner.set_dataset(
@@ -213,16 +209,6 @@ class Subscan:
     def _set_preview_completed(self):
         self._preview_push("completed", True)
 
-    def _flat_push(self, name: str, value):
-        self._runner.set_dataset(
-            self._flat_dataset_prefix + name,
-            value,
-            broadcast=True,
-        )
-
-    def _set_flat_completed(self):
-        self._flat_push("completed", True)
-
     def _set_flat_segment(self, coordinates, values):
         if coordinates:
             num_points = len(next(iter(coordinates.values())))
@@ -232,7 +218,6 @@ class Subscan:
             num_points = 0
 
         self._flat_segment_start_sink.push(self._flat_next_point_index)
-        self._flat_segment_len_sink.push(num_points)
         self._flat_next_point_index += num_points
 
     def _broadcast_preview_metadata(self):
@@ -245,17 +230,6 @@ class Subscan:
         for name, value in scan_desc.items():
             ds_value = to_metadata_broadcast_type(value)
             self._preview_push(name, dump_json(value) if ds_value is None else ds_value)
-
-    def _broadcast_flat_metadata(self):
-        scan_desc = self._describe_current_scan_without_analysis_results()
-        self._flat_push(SCHEMA_REVISION_KEY, SCHEMA_REVISION)
-        source_prefix = self._runner.get_dataset("system_id", default="rid")
-        rid = getattr(self._runner.scheduler, "rid", 0)
-        self._flat_push("source_id", f"{source_prefix}_{rid}")
-        self._flat_push("completed", False)
-        for name, value in scan_desc.items():
-            ds_value = to_metadata_broadcast_type(value)
-            self._flat_push(name, dump_json(value) if ds_value is None else ds_value)
 
     def _describe_current_scan_without_analysis_results(self):
         def get_axis_index(handle):
@@ -577,10 +551,7 @@ def setup_subscan(
 
     runner = RunnerInstance(result_target)
     flat_segment_start_sink = AppendingDatasetSink(
-        result_target, flat_dataset_prefix + "segments.start"
-    )
-    flat_segment_len_sink = AppendingDatasetSink(
-        result_target, flat_dataset_prefix + "segments.len"
+        result_target, flat_dataset_prefix + "starts"
     )
 
     class SubscanInstance(Subscan):
@@ -599,7 +570,6 @@ def setup_subscan(
         flat_child_result_sinks,
         flat_dataset_prefix,
         flat_segment_start_sink,
-        flat_segment_len_sink,
         aggregate_result_channels,
         short_child_channel_names,
         analyses,
