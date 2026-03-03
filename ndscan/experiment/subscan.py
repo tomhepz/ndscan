@@ -63,7 +63,6 @@ class Subscan:
         flat_child_result_sinks: dict[ResultChannel, AppendingDatasetSink],
         flat_dataset_prefix: str,
         flat_segment_start_sink: AppendingDatasetSink,
-        flat_segment_outer_index_sink: AppendingDatasetSink,
         aggregate_result_channels: dict[ResultChannel, ResultChannel],
         short_child_channel_names: dict[ResultChannel, str],
         analyses: list[DefaultAnalysis],
@@ -80,7 +79,6 @@ class Subscan:
         self._flat_child_result_sinks = flat_child_result_sinks
         self._flat_dataset_prefix = flat_dataset_prefix
         self._flat_segment_start_sink = flat_segment_start_sink
-        self._flat_segment_outer_index_sink = flat_segment_outer_index_sink
         self._aggregate_result_channels = aggregate_result_channels
         self._short_child_channel_names = short_child_channel_names
         self._analyses = analyses
@@ -88,7 +86,6 @@ class Subscan:
         self._preview_coordinate_sinks = OrderedDict[ParamHandle, ResettableAppendingDatasetSink]()
         self._flat_coordinate_sinks = {}
         self._flat_next_point_index = 0
-        self._flat_outer_point_index = 0
         self._point_coordinate_sinks = []
 
     def run(
@@ -234,9 +231,7 @@ class Subscan:
             num_points = 0
 
         self._flat_segment_start_sink.push(self._flat_next_point_index)
-        self._flat_segment_outer_index_sink.push(self._flat_outer_point_index)
         self._flat_next_point_index += num_points
-        self._flat_outer_point_index += 1
 
     def _broadcast_preview_metadata(self):
         scan_desc = self._describe_current_scan_without_analysis_results()
@@ -263,7 +258,6 @@ class Subscan:
             "channels": scan_desc["channels"],
             "segment_fields": {
                 "starts": "starts",
-                "outer_index": "outer_index",
             },
         }
         for name, value in flat_desc.items():
@@ -620,9 +614,6 @@ def setup_subscan(
     flat_segment_start_sink = AppendingDatasetSink(
         result_target, flat_dataset_prefix + "starts"
     )
-    flat_segment_outer_index_sink = AppendingDatasetSink(
-        result_target, flat_dataset_prefix + "outer_index"
-    )
 
     class SubscanInstance(Subscan):
         # ARTIQ compiler needs a different type for each RunnerInstance.
@@ -640,7 +631,6 @@ def setup_subscan(
         flat_child_result_sinks,
         flat_dataset_prefix,
         flat_segment_start_sink,
-        flat_segment_outer_index_sink,
         aggregate_result_channels,
         short_child_channel_names,
         analyses,

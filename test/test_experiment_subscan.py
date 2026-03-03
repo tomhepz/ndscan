@@ -249,12 +249,11 @@ class SubscanFlatDatasetCase(ExpFragmentCase):
             [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
         )
         self.assertEqual(d("starts"), [0, 4])
-        self.assertEqual(d("outer_index"), [0, 1])
         self.assertEqual(d(SCHEMA_REVISION_KEY), SCHEMA_REVISION)
         self.assertEqual(d("source_id"), "rid_0")
         self.assertEqual(d("completed"), True)
         self.assertEqual(d("fragment_fqn"), "fixtures.AddOneFragment")
-        self.assertEqual(j("segment_fields"), {"starts": "starts", "outer_index": "outer_index"})
+        self.assertEqual(j("segment_fields"), {"starts": "starts"})
 
         axes = j("axes")
         self.assertEqual(len(axes), 1)
@@ -278,7 +277,6 @@ class SubscanFlatDatasetCase(ExpFragmentCase):
                 flat_prefix + "channels",
                 flat_prefix + "completed",
                 flat_prefix + "fragment_fqn",
-                flat_prefix + "outer_index",
                 flat_prefix + "points.axis_0",
                 flat_prefix + "points.channel_result",
                 flat_prefix + "seed",

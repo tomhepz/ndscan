@@ -63,7 +63,6 @@ Current implementation direction:
 - subscan roots use `human_slug__stablehash`
 - flat segment metadata includes:
   - `starts` (flat offset per completed subscan invocation)
-  - `outer_index` (invocation index to align with outer/top-level point order)
 
 ### Future Scan Topology Requirements (Recorded)
 
