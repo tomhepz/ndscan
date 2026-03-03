@@ -13,6 +13,7 @@ __all__ = [
     "SingleUseSink",
     "LastValueSink",
     "ArraySink",
+    "TeeSink",
     "AppendingDatasetSink",
     "ScalarDatasetSink",
     "ResultChannel",
@@ -105,6 +106,34 @@ class ArraySink(ResultSink):
     def clear(self) -> None:
         """Clear the list of previously pushed values."""
         self.data = []
+
+
+class TeeSink(ResultSink):
+    """Sink that forwards values to two underlying sinks.
+
+    Methods that introspect/clear sink state use ``primary`` as the canonical storage
+    and, where supported, also apply to ``secondary``.
+    """
+
+    def __init__(self, primary: ResultSink, secondary: ResultSink):
+        self.primary = primary
+        self.secondary = secondary
+
+    def push(self, value: Any) -> None:
+        self.primary.push(value)
+        self.secondary.push(value)
+
+    def get_last(self) -> Any:
+        return self.primary.get_last()
+
+    def get_all(self) -> list[Any]:
+        return self.primary.get_all()
+
+    def clear(self) -> None:
+        for sink in (self.primary, self.secondary):
+            clear = getattr(sink, "clear", None)
+            if clear is not None:
+                clear()
 
 
 class AppendingDatasetSink(ResultSink, HasEnvironment):
