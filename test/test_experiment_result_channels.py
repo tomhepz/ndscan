@@ -3,9 +3,11 @@ import unittest
 from mock_environment import HasEnvironmentCase
 
 from ndscan.experiment.result_channels import (
+    AppendingDatasetSink,
     ArraySink,
     LastValueSink,
     ResettableAppendingDatasetSink,
+    ScalarDatasetSink,
     TeeSink,
 )
 
@@ -105,3 +107,28 @@ class ResettableAppendingDatasetSinkTest(HasEnvironmentCase):
 
         sink.push(99)
         self.assertEqual(self.dataset_db.get("sink.values"), [99])
+
+
+class ArchiveReadbackSemanticsTest(HasEnvironmentCase):
+    def test_scalar_get_last_does_not_archive_when_archive_disabled(self):
+        sink = self.create(ScalarDatasetSink, "sink.scalar", archive=False)
+        sink.push(123)
+
+        dataset_mgr = sink._HasEnvironment__dataset_mgr
+        self.assertNotIn("sink.scalar", dataset_mgr.local)
+        self.assertNotIn("sink.scalar", dataset_mgr.archive)
+
+        self.assertEqual(sink.get_last(), 123)
+        self.assertNotIn("sink.scalar", dataset_mgr.archive)
+
+    def test_appending_get_all_does_not_archive_when_archive_disabled(self):
+        sink = self.create(AppendingDatasetSink, "sink.append", archive=False)
+        sink.push(1)
+        sink.push(2)
+
+        dataset_mgr = sink._HasEnvironment__dataset_mgr
+        self.assertNotIn("sink.append", dataset_mgr.local)
+        self.assertNotIn("sink.append", dataset_mgr.archive)
+
+        self.assertEqual(sink.get_all(), [1, 2])
+        self.assertNotIn("sink.append", dataset_mgr.archive)

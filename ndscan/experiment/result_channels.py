@@ -169,7 +169,12 @@ class AppendingDatasetSink(ResultSink, HasEnvironment):
 
     def get_all(self) -> list[Any]:
         """Read back the previously pushed values from the target dataset (if any)."""
-        return [] if (self.last_value is None) else self.get_dataset(self.key)
+        # Internal readback should never mark datasets for HDF5 archive.
+        return (
+            []
+            if (self.last_value is None)
+            else self.get_dataset(self.key, archive=False)
+        )
 
 
 class ResettableAppendingDatasetSink(AppendingDatasetSink):
@@ -211,7 +216,8 @@ class ScalarDatasetSink(ResultSink, HasEnvironment):
 
     def get_last(self) -> Any:
         """Return the last pushed value, or ``None`` if none yet."""
-        return self.get_dataset(self.key) if self.has_pushed else None
+        # Internal readback should never mark datasets for HDF5 archive.
+        return self.get_dataset(self.key, archive=False) if self.has_pushed else None
 
 
 class ResultChannel:
