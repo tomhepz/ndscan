@@ -229,6 +229,24 @@ class SubscanPreviewDatasetCase(ExpFragmentCase):
         self.assertEqual(d("points.channel_result"), [5.0, 6.0, 7.0, 8.0])
 
 
+class SubscanFlatDatasetCase(ExpFragmentCase):
+    def test_flat_stream_appends_across_subscan_runs_with_segments(self):
+        parent = self.create(RunSubscanTwiceFragment)
+        parent.run_once()
+
+        def d(key):
+            return self.dataset_db.get(parent.scan._flat_dataset_prefix + key)
+
+        self.assertEqual(d(SCHEMA_REVISION_KEY), SCHEMA_REVISION)
+        self.assertEqual(d("completed"), True)
+        self.assertEqual(d("source_id"), "rid_0")
+        self.assertEqual(d("fragment_fqn"), "fixtures.AddOneFragment")
+        self.assertEqual(d("points.axis_0"), [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
+        self.assertEqual(d("points.channel_result"), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+        self.assertEqual(d("segments.start"), [0, 4])
+        self.assertEqual(d("segments.len"), [4, 4])
+
+
 class CharacteriseBulkPushFragment(ExpFragment):
     def build_fragment(self):
         self.setattr_fragment("child", AddOneFragment)

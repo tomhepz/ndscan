@@ -20,6 +20,7 @@ from .default_analysis import AnnotationContext, DefaultAnalysis
 from .fragment import ExpFragment, Fragment, RestartKernelTransitoryError
 from .parameters import ParamHandle
 from .result_channels import (
+    AppendingDatasetSink,
     ArraySink,
     LastValueSink,
     OpaqueChannel,
@@ -58,6 +59,10 @@ class Subscan:
         child_result_sinks: dict[ResultChannel, ArraySink],
         preview_child_result_sinks: dict[ResultChannel, ResettableAppendingDatasetSink],
         preview_dataset_prefix: str,
+        flat_child_result_sinks: dict[ResultChannel, AppendingDatasetSink],
+        flat_dataset_prefix: str,
+        flat_segment_start_sink: AppendingDatasetSink,
+        flat_segment_len_sink: AppendingDatasetSink,
         aggregate_result_channels: dict[ResultChannel, ResultChannel],
         short_child_channel_names: dict[ResultChannel, str],
         analyses: list[DefaultAnalysis],
@@ -71,11 +76,17 @@ class Subscan:
         self._child_result_sinks = child_result_sinks
         self._preview_child_result_sinks = preview_child_result_sinks
         self._preview_dataset_prefix = preview_dataset_prefix
+        self._flat_child_result_sinks = flat_child_result_sinks
+        self._flat_dataset_prefix = flat_dataset_prefix
+        self._flat_segment_start_sink = flat_segment_start_sink
+        self._flat_segment_len_sink = flat_segment_len_sink
         self._aggregate_result_channels = aggregate_result_channels
         self._short_child_channel_names = short_child_channel_names
         self._analyses = analyses
         self._parent_analysis_result_channels = parent_analysis_result_channels
         self._preview_coordinate_sinks = OrderedDict[ParamHandle, ResettableAppendingDatasetSink]()
+        self._flat_coordinate_sinks = {}
+        self._flat_next_point_index = 0
         self._point_coordinate_sinks = []
 
     def run(
@@ -136,9 +147,17 @@ class Subscan:
             preview_sink = ResettableAppendingDatasetSink(
                 self._runner, self._preview_dataset_prefix + f"points.axis_{i}"
             )
+            flat_sink = self._flat_coordinate_sinks.get(i, None)
+            if flat_sink is None:
+                flat_sink = AppendingDatasetSink(
+                    self._runner, self._flat_dataset_prefix + f"points.axis_{i}"
+                )
+                self._flat_coordinate_sinks[i] = flat_sink
             self._coordinate_sinks[param_handle] = array_sink
             self._preview_coordinate_sinks[param_handle] = preview_sink
-            self._point_coordinate_sinks.append(TeeSink(array_sink, preview_sink))
+            self._point_coordinate_sinks.append(
+                TeeSink(array_sink, TeeSink(preview_sink, flat_sink))
+            )
 
         self._spec = ScanSpec(axes, generators, options)
         self._runner.setup(self._fragment, axes, self._point_coordinate_sinks)
@@ -170,6 +189,8 @@ class Subscan:
         self._push_schema(analysis_schema)
         coordinates = self._push_coordinates()
         values = self._push_values()
+        self._set_flat_segment(coordinates, values)
+        self._set_flat_completed()
         self._set_preview_completed()
         return coordinates, values, analysis_results
 
@@ -180,6 +201,7 @@ class Subscan:
         for sink in self._preview_coordinate_sinks.values():
             sink.clear()
         self._broadcast_preview_metadata()
+        self._broadcast_flat_metadata()
 
     def _preview_push(self, name: str, value):
         self._runner.set_dataset(
@@ -191,12 +213,51 @@ class Subscan:
     def _set_preview_completed(self):
         self._preview_push("completed", True)
 
+    def _flat_push(self, name: str, value):
+        self._runner.set_dataset(
+            self._flat_dataset_prefix + name,
+            value,
+            broadcast=True,
+        )
+
+    def _set_flat_completed(self):
+        self._flat_push("completed", True)
+
+    def _set_flat_segment(self, coordinates, values):
+        if coordinates:
+            num_points = len(next(iter(coordinates.values())))
+        elif values:
+            num_points = len(next(iter(values.values())))
+        else:
+            num_points = 0
+
+        self._flat_segment_start_sink.push(self._flat_next_point_index)
+        self._flat_segment_len_sink.push(num_points)
+        self._flat_next_point_index += num_points
+
     def _broadcast_preview_metadata(self):
+        scan_desc = self._describe_current_scan_without_analysis_results()
         self._preview_push(SCHEMA_REVISION_KEY, SCHEMA_REVISION)
         source_prefix = self._runner.get_dataset("system_id", default="rid")
-        self._preview_push("source_id", f"{source_prefix}_{self._runner.scheduler.rid}")
+        rid = getattr(self._runner.scheduler, "rid", 0)
+        self._preview_push("source_id", f"{source_prefix}_{rid}")
         self._preview_push("completed", False)
+        for name, value in scan_desc.items():
+            ds_value = to_metadata_broadcast_type(value)
+            self._preview_push(name, dump_json(value) if ds_value is None else ds_value)
 
+    def _broadcast_flat_metadata(self):
+        scan_desc = self._describe_current_scan_without_analysis_results()
+        self._flat_push(SCHEMA_REVISION_KEY, SCHEMA_REVISION)
+        source_prefix = self._runner.get_dataset("system_id", default="rid")
+        rid = getattr(self._runner.scheduler, "rid", 0)
+        self._flat_push("source_id", f"{source_prefix}_{rid}")
+        self._flat_push("completed", False)
+        for name, value in scan_desc.items():
+            ds_value = to_metadata_broadcast_type(value)
+            self._flat_push(name, dump_json(value) if ds_value is None else ds_value)
+
+    def _describe_current_scan_without_analysis_results(self):
         def get_axis_index(handle):
             for i, h in enumerate(self._coordinate_sinks.keys()):
                 if handle._store == h._store:
@@ -209,12 +270,12 @@ class Subscan:
             lambda channel: False,
         )
         analyses = filter_default_analyses(self._fragment, self._spec.axes)
-        scan_desc = describe_scan(self._spec, self._fragment, self._short_child_channel_names)
+        scan_desc = describe_scan(
+            self._spec, self._fragment, self._short_child_channel_names
+        )
         scan_desc.update(describe_analyses(analyses, context))
         scan_desc["analysis_results"] = {}
-        for name, value in scan_desc.items():
-            ds_value = to_metadata_broadcast_type(value)
-            self._preview_push(name, dump_json(value) if ds_value is None else ds_value)
+        return scan_desc
 
     def _push_schema(self, analysis_schema):
         scan_schema = describe_scan(
@@ -372,6 +433,24 @@ def setattr_subscan(
 def _make_preview_dataset_prefix(
     result_target: Fragment, name_prefix: str, scanned_fragment: ExpFragment
 ) -> str:
+    preview_id = _make_subscan_site_id(result_target, name_prefix, scanned_fragment)
+    scheduler = result_target.get_device("scheduler")
+    rid = getattr(scheduler, "rid", 0)
+    return f"ndscan.rid_{rid}.subscan_preview.{preview_id}."
+
+
+def _make_flat_dataset_prefix(
+    result_target: Fragment, name_prefix: str, scanned_fragment: ExpFragment
+) -> str:
+    flat_id = _make_subscan_site_id(result_target, name_prefix, scanned_fragment)
+    scheduler = result_target.get_device("scheduler")
+    rid = getattr(scheduler, "rid", 0)
+    return f"ndscan.rid_{rid}.subscan_flat.{flat_id}."
+
+
+def _make_subscan_site_id(
+    result_target: Fragment, name_prefix: str, scanned_fragment: ExpFragment
+) -> str:
     site_id = "|".join(
         [
             "/".join(result_target._fragment_path),
@@ -379,10 +458,7 @@ def _make_preview_dataset_prefix(
             scanned_fragment.fqn,
         ]
     )
-    preview_id = hashlib.sha1(site_id.encode("utf-8")).hexdigest()[:12]
-    scheduler = result_target.get_device("scheduler")
-    rid = getattr(scheduler, "rid", 0)
-    return f"ndscan.rid_{rid}.subscan_preview.{preview_id}."
+    return hashlib.sha1(site_id.encode("utf-8")).hexdigest()[:12]
 
 
 def setup_subscan(
@@ -425,6 +501,9 @@ def setup_subscan(
     preview_dataset_prefix = _make_preview_dataset_prefix(
         result_target, name_prefix, scanned_fragment
     )
+    flat_dataset_prefix = _make_flat_dataset_prefix(
+        result_target, name_prefix, scanned_fragment
+    )
 
     # … and re-export result channels that the collected data will be pushed to.
     channel_name_map = shorten_to_unambiguous_suffixes(
@@ -432,6 +511,7 @@ def setup_subscan(
     )
     child_result_sinks = {}
     preview_child_result_sinks = {}
+    flat_child_result_sinks = {}
     aggregate_result_channels = {}
     short_child_channel_names = {}
     for full_name, short_name in channel_name_map.items():
@@ -442,9 +522,13 @@ def setup_subscan(
         preview_sink = ResettableAppendingDatasetSink(
             result_target, preview_dataset_prefix + "points.channel_" + short_identifier
         )
-        channel.set_sink(TeeSink(child_sink, preview_sink))
+        flat_sink = AppendingDatasetSink(
+            result_target, flat_dataset_prefix + "points.channel_" + short_identifier
+        )
+        channel.set_sink(TeeSink(child_sink, TeeSink(preview_sink, flat_sink)))
         child_result_sinks[channel] = child_sink
         preview_child_result_sinks[channel] = preview_sink
+        flat_child_result_sinks[channel] = flat_sink
 
         # TODO: Implement ArrayChannel to represent a variable number of dimensions
         # around a scalar channel so we can keep the schema information here instead of
@@ -492,6 +576,12 @@ def setup_subscan(
             return super()._get_param_values_chunk()
 
     runner = RunnerInstance(result_target)
+    flat_segment_start_sink = AppendingDatasetSink(
+        result_target, flat_dataset_prefix + "segments.start"
+    )
+    flat_segment_len_sink = AppendingDatasetSink(
+        result_target, flat_dataset_prefix + "segments.len"
+    )
 
     class SubscanInstance(Subscan):
         # ARTIQ compiler needs a different type for each RunnerInstance.
@@ -506,6 +596,10 @@ def setup_subscan(
         child_result_sinks,
         preview_child_result_sinks,
         preview_dataset_prefix,
+        flat_child_result_sinks,
+        flat_dataset_prefix,
+        flat_segment_start_sink,
+        flat_segment_len_sink,
         aggregate_result_channels,
         short_child_channel_names,
         analyses,
