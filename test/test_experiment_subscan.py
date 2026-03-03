@@ -11,7 +11,7 @@ from fixtures import (
     TwoAnalysisAggregate,
     TwoAnalysisFragment,
 )
-from mock_environment import ExpFragmentCase
+from mock_environment import ExpFragmentCase, HasEnvironmentCase
 
 from ndscan.experiment import *
 
@@ -210,6 +210,105 @@ class RunSubscanTwiceCase(ExpFragmentCase):
             expected_results = [v + 1 for v in expected_values]
             self.assertEqual(coords, {parent.child.value: expected_values})
             self.assertEqual(values, {parent.child.result: expected_results})
+
+
+class CharacteriseBulkPushFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_fragment("child", AddOneFragment)
+        setattr_subscan(
+            self,
+            "scan",
+            self.child,
+            [(self.child, "value")],
+            expose_analysis_results=False,
+        )
+
+    def run_once(self):
+        self.scan.run(
+            [(self.child.value, LinearGenerator(0.0, 3.0, 4, False))],
+            execute_default_analyses=False,
+        )
+
+
+class BulkPushCharacterisationCase(ExpFragmentCase):
+    def test_aggregate_channels_receive_one_push_per_subscan(self):
+        parent = self.create(CharacteriseBulkPushFragment)
+
+        axis_sink = ArraySink()
+        result_sink = ArraySink()
+        parent.scan_axis_0.set_sink(axis_sink)
+        parent.scan_channel_result.set_sink(result_sink)
+
+        parent.run_once()
+        parent.run_once()
+
+        expected_axis_row = [0.0, 1.0, 2.0, 3.0]
+        expected_result_row = [1.0, 2.0, 3.0, 4.0]
+        self.assertEqual(axis_sink.get_all(), [expected_axis_row, expected_axis_row])
+        self.assertEqual(result_sink.get_all(), [expected_result_row, expected_result_row])
+
+
+class RaggedSubscanFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param(
+            "num_scan_points", IntParam, "Number of subscan points", default=2, min=2
+        )
+        self.setattr_fragment("child", AddOneFragment)
+        setattr_subscan(
+            self,
+            "scan",
+            self.child,
+            [(self.child, "value")],
+            expose_analysis_results=False,
+        )
+
+    def run_once(self):
+        n = self.num_scan_points.get()
+        self.scan.run(
+            [
+                (
+                    self.child.value,
+                    LinearGenerator(0.0, float(n - 1), n, False),
+                )
+            ],
+            execute_default_analyses=False,
+        )
+
+
+RaggedSubscanFragmentScan = make_fragment_scan_exp(RaggedSubscanFragment)
+
+
+class RaggedSubscanDatasetCase(HasEnvironmentCase):
+    def test_ragged_subscan_is_written_as_list_of_lists(self):
+        exp = self.create(RaggedSubscanFragmentScan)
+        fragment_fqn = "test_experiment_subscan.RaggedSubscanFragment"
+        exp.args._params["scan"]["axes"].append(
+            {
+                "fqn": fragment_fqn + ".num_scan_points",
+                "path": "*",
+                "type": "list",
+                "range": {
+                    "values": [2, 4, 3],
+                    "randomise_order": False,
+                },
+            }
+        )
+
+        exp.prepare()
+        exp.run()
+
+        def d(key):
+            return self.dataset_db.get("ndscan.rid_0." + key)
+
+        self.assertEqual(d("points.axis_0"), [2, 4, 3])
+        self.assertEqual(
+            d("points.channel_scan_axis_0"),
+            [[0.0, 1.0], [0.0, 1.0, 2.0, 3.0], [0.0, 1.0, 2.0]],
+        )
+        self.assertEqual(
+            d("points.channel_scan_channel_result"),
+            [[1.0, 2.0], [1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0]],
+        )
 
 
 class SubscanAnalysisFragment(ExpFragment):

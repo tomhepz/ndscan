@@ -41,3 +41,14 @@ class ShortenTest(unittest.TestCase):
         # Test repeated fqns.
         with self.assertRaises(ValueError):
             shorten_at_slash(["foo/bar", "foo/bar"])
+
+    def test_shorten_can_collide_after_slash_to_underscore(self):
+        # Characterises a known risk in dataset channel key naming code paths that map
+        # path separators to underscores.
+        names = ["foo/bar_baz", "foo_bar/baz", "qux/bar_baz", "qux/baz"]
+        shortened = shorten_to_unambiguous_suffixes(
+            names, lambda fqn, n: "/".join(fqn.split("/")[-n:])
+        )
+        flattened = [value.replace("/", "_") for value in shortened.values()]
+
+        self.assertNotEqual(len(flattened), len(set(flattened)))
