@@ -435,6 +435,28 @@ class RaggedSubscanDatasetCase(HasEnvironmentCase):
         for key in ragged_preview_keys:
             self.assertNotIn(key, dataset_mgr.local)
 
+    def test_nested_ragged_outputs_are_not_copied_into_parent_flat_root(self):
+        exp = self.create(NestedRaggedOuterSubscanScan)
+        exp.prepare()
+        exp.run()
+
+        dataset_mgr = exp._HasEnvironment__dataset_mgr
+        parent_flat_channel_keys = {
+            key
+            for key in dataset_mgr.local.keys()
+            if ".subscan_flat.root_subscan_nestedraggedinnersubscan" in key
+            and ".points.channel__" in key
+        }
+        self.assertFalse(
+            any(key.endswith(".points.channel__axis_0") for key in parent_flat_channel_keys)
+        )
+        self.assertFalse(
+            any(
+                key.endswith(".points.channel__channel_result")
+                for key in parent_flat_channel_keys
+            )
+        )
+
     def test_legacy_ragged_channels_are_not_archived(self):
         exp = self.create(RaggedSubscanFragmentScan)
         fragment_fqn = "test_experiment_subscan.RaggedSubscanFragment"

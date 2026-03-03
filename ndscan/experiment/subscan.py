@@ -563,13 +563,19 @@ def setup_subscan(
             preview_dataset_prefix + "points.channel_" + short_identifier,
             archive=False,
         )
-        flat_sink = AppendingDatasetSink(
-            result_target, flat_dataset_prefix + "points.channel_" + short_identifier
-        )
-        channel.set_sink(TeeSink(child_sink, TeeSink(preview_sink, flat_sink)))
+        # Channels flagged as non-archived (e.g. legacy aggregate subscan outputs)
+        # are intentionally kept out of the flat persistent stream to avoid
+        # re-introducing list-of-lists in nested subscan hierarchies.
+        if channel.archive_by_default:
+            flat_sink = AppendingDatasetSink(
+                result_target, flat_dataset_prefix + "points.channel_" + short_identifier
+            )
+            channel.set_sink(TeeSink(child_sink, TeeSink(preview_sink, flat_sink)))
+            flat_child_result_sinks[channel] = flat_sink
+        else:
+            channel.set_sink(TeeSink(child_sink, preview_sink))
         child_result_sinks[channel] = child_sink
         preview_child_result_sinks[channel] = preview_sink
-        flat_child_result_sinks[channel] = flat_sink
 
         # TODO: Implement ArrayChannel to represent a variable number of dimensions
         # around a scalar channel so we can keep the schema information here instead of
