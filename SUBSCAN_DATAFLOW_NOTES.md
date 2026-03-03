@@ -63,6 +63,25 @@ The current code path can produce doubled underscores and possible collisions:
 This is why names like `float_frag_scan__channel_result` appear in kernel tests,
 and why sanitization-only schemes are risky.
 
+## Delimiter Semantics and Naming Policy
+
+Why this keeps biting:
+
+- `.` is the ARTIQ dataset tree separator (dataset namespace hierarchy).
+- `/` is ndscan-internal path structure (fragment/channel/pathspec semantics).
+- `_` is just a normal character in user-facing names.
+
+So any projection like `"/" -> "_"` is lossy, and can collide with naturally
+occurring underscores in real names.
+
+Policy for new schemas (`subscan_preview`, `subscan_flat`):
+
+- Machine keys should use stable deterministic IDs, not path sanitization.
+- Human-readable labels/paths should live in metadata (`path`, schema maps, etc.).
+- Optional compromise for readability is `<slug>__<short_id>` (never slug alone).
+
+This keeps names robust while preserving readability where needed.
+
 This note captures the minimum context needed to understand where ndscan currently:
 
 1. runs subscans,

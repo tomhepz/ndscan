@@ -48,6 +48,17 @@ list-of-lists toward a flattened schema that is append-only and segment-indexed.
 - `SingleUseSink` constraints mean each channel can only be pushed once per point.
 - `AppendingDatasetSink` asserts on `None` values.
 
+### Delimiter Semantics and Naming Policy
+
+- `.` is the ARTIQ dataset namespace separator.
+- `/` is ndscan path structure.
+- `_` is a regular character in human names.
+
+Therefore sanitizing path delimiters into underscores is lossy and collision-prone.
+For new roots (`subscan_preview`, `subscan_flat`), prefer deterministic machine IDs
+for dataset keys and keep human-readable names in metadata. If readability in key
+names is needed, use `<slug>__<short_id>` rather than slug-only names.
+
 ### Test Commands (Host-side)
 
 From repository root:
