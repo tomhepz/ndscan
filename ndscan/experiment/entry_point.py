@@ -353,10 +353,16 @@ class TopLevelRunner(HasEnvironment):
 
             if self.spec.axes:
                 sink = AppendingDatasetSink(
-                    self, self.dataset_prefix + "points.channel_" + name
+                    self,
+                    self.dataset_prefix + "points.channel_" + name,
+                    archive=channel.archive_by_default,
                 )
             else:
-                sink = ScalarDatasetSink(self, self.dataset_prefix + "point." + name)
+                sink = ScalarDatasetSink(
+                    self,
+                    self.dataset_prefix + "point." + name,
+                    archive=channel.archive_by_default,
+                )
             channel.set_sink(sink)
             self._scan_result_sinks[channel] = sink
 

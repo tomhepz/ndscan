@@ -354,6 +354,39 @@ RaggedSubscanFragmentScan = make_fragment_scan_exp(RaggedSubscanFragment)
 
 
 class RaggedSubscanDatasetCase(HasEnvironmentCase):
+    def test_legacy_ragged_channels_are_not_archived(self):
+        exp = self.create(RaggedSubscanFragmentScan)
+        fragment_fqn = "test_experiment_subscan.RaggedSubscanFragment"
+        exp.args._params["scan"]["axes"].append(
+            {
+                "fqn": fragment_fqn + ".num_scan_points",
+                "path": "*",
+                "type": "list",
+                "range": {
+                    "values": [2, 4, 3],
+                    "randomise_order": False,
+                },
+            }
+        )
+
+        exp.prepare()
+        exp.run()
+
+        channel_by_path = {channel.path: channel for channel in exp.tlr._scan_result_sinks}
+        axis_channel = channel_by_path["scan_axis_0"]
+        value_channel = channel_by_path["scan_channel_result"]
+        self.assertFalse(axis_channel.archive_by_default)
+        self.assertFalse(value_channel.archive_by_default)
+
+        axis_sink = exp.tlr._scan_result_sinks[axis_channel]
+        value_sink = exp.tlr._scan_result_sinks[value_channel]
+        self.assertFalse(axis_sink.archive)
+        self.assertFalse(value_sink.archive)
+
+        dataset_mgr = exp._HasEnvironment__dataset_mgr
+        self.assertNotIn("ndscan.rid_0.points.channel_scan_axis_0", dataset_mgr.local)
+        self.assertNotIn("ndscan.rid_0.points.channel_scan_channel_result", dataset_mgr.local)
+
     def test_ragged_subscan_is_written_as_list_of_lists(self):
         exp = self.create(RaggedSubscanFragmentScan)
         fragment_fqn = "test_experiment_subscan.RaggedSubscanFragment"

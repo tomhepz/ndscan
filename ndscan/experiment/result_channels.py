@@ -138,20 +138,27 @@ class TeeSink(ResultSink):
 
 
 class AppendingDatasetSink(ResultSink, HasEnvironment):
-    def build(self, key: str, broadcast: bool = True) -> None:
+    def build(self, key: str, broadcast: bool = True, archive: bool = True) -> None:
         """
         :param key: Dataset key to store results in. Set to an array on the first push,
             and subsequently appended to.
         :param broadcast: Whether to set the dataset in broadcast mode.
+        :param archive: Whether to archive the dataset to HDF5.
         """
         self.key = key
         self.broadcast = broadcast
+        self.archive = archive
         self.last_value = None
 
     def push(self, value: Any) -> None:
         assert value is not None
         if self.last_value is None:
-            self.set_dataset(self.key, [value], broadcast=self.broadcast)
+            self.set_dataset(
+                self.key,
+                [value],
+                broadcast=self.broadcast,
+                archive=self.archive,
+            )
         else:
             self.append_to_dataset(self.key, value)
         self.last_value = value
@@ -169,7 +176,12 @@ class ResettableAppendingDatasetSink(AppendingDatasetSink):
     """Appending dataset sink that can be reset to an empty dataset."""
 
     def clear(self) -> None:
-        self.set_dataset(self.key, [], broadcast=self.broadcast)
+        self.set_dataset(
+            self.key,
+            [],
+            broadcast=self.broadcast,
+            archive=self.archive,
+        )
         self.last_value = None
 
 
@@ -177,17 +189,24 @@ class ScalarDatasetSink(ResultSink, HasEnvironment):
     """Sink that writes pushed results to a dataset, overwriting its previous value
     if any."""
 
-    def build(self, key: str, broadcast: bool = True) -> None:
+    def build(self, key: str, broadcast: bool = True, archive: bool = True) -> None:
         """
         :param key: Dataset key to write the value to.
         :param broadcast: Whether to set the dataset in broadcast mode.
+        :param archive: Whether to archive the dataset to HDF5.
         """
         self.key = key
         self.broadcast = broadcast
+        self.archive = archive
         self.has_pushed = False
 
     def push(self, value: Any) -> None:
-        self.set_dataset(self.key, value, broadcast=self.broadcast)
+        self.set_dataset(
+            self.key,
+            value,
+            broadcast=self.broadcast,
+            archive=self.archive,
+        )
         self.has_pushed = True
 
     def get_last(self) -> Any:
@@ -246,11 +265,13 @@ class ResultChannel:
         description: str = "",
         display_hints: dict[str, Any] | None = None,
         save_by_default: bool = True,
+        archive_by_default: bool = True,
     ):
         self.path = path
         self.description = description
         self.display_hints = {} if display_hints is None else display_hints
         self.save_by_default = save_by_default
+        self.archive_by_default = archive_by_default
         self.sink = None
 
     def __repr__(self) -> str:

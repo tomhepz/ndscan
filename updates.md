@@ -63,6 +63,8 @@ Current implementation direction:
 - subscan roots use `human_slug__stablehash`
 - flat segment metadata includes:
   - `starts` (flat offset per completed subscan invocation)
+- legacy `scan_axis_*`/`scan_channel_*` list-of-lists stay broadcast-visible but are
+  non-archived by default to avoid ragged HDF5 write failures
 
 ### Future Scan Topology Requirements (Recorded)
 

@@ -526,6 +526,7 @@ def setup_subscan(
                 name_prefix + f"axis_{i}",
                 OpaqueChannel,
                 save_by_default=save_results_by_default,
+                archive_by_default=False,
             )
         )
 
@@ -572,6 +573,7 @@ def setup_subscan(
             name_prefix + "channel_" + short_identifier,
             OpaqueChannel,
             save_by_default=save_results_by_default and channel.save_by_default,
+            archive_by_default=False,
         )
 
     spec_channel = result_target.setattr_result(name_prefix + "spec", SubscanChannel)
