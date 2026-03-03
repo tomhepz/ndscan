@@ -49,6 +49,16 @@ Baseline characterization is now in place (no behavior change yet):
   - append-only data across all outer points
   - reconstructed via segment metadata
 
+## Future Shape Constraints (Recorded)
+
+- Flattened storage must support non-grid scans and dynamic subscan lengths.
+- It must allow tandem scan traces (multiple handles advanced per point without
+  Cartesian expansion).
+- Segment indexing should delimit subscan spans for each outer-point context,
+  instead of assuming fixed-length rows.
+- Reconstruction should be done by slicing contiguous spans (`starts`) from
+  append-only arrays.
+
 ## Known Naming Trap
 
 The current code path can produce doubled underscores and possible collisions:

@@ -59,6 +59,23 @@ For new roots (`subscan_preview`, `subscan_flat`), prefer deterministic machine 
 for dataset keys and keep human-readable names in metadata. If readability in key
 names is needed, use `<slug>__<short_id>` rather than slug-only names.
 
+### Future Scan Topology Requirements (Recorded)
+
+- Scan points should not assume a rectilinear grid.
+- Handle subsets may be scanned in tandem as aligned per-point tuples, e.g.:
+  - `handle_a: [3, 5, 2, 4]`
+  - `handle_b: [4, 8, 2, 3]`
+  - `results:  [g, j, c, e]`
+- Dynamic subscans may produce variable-length traces for some handles, e.g.:
+  - `handle_c` defines outer points
+  - `handle_d` trace length varies by outer point
+  - flattened storage should remain append-only
+  - segment starts (`starts`) delineate per-outer-point subscan spans
+- This means flattened schemas should optimize for:
+  - append-only point/result arrays
+  - lightweight segment indexing (no rigid grid assumptions)
+  - reconstruction by slicing spans, not by N-D reshaping.
+
 ### Test Commands (Host-side)
 
 From repository root:
