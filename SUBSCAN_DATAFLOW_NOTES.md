@@ -89,6 +89,7 @@ Policy for new schemas (`subscan_preview`, `subscan_flat`):
 - Machine keys should use stable deterministic IDs, not path sanitization.
 - Human-readable labels/paths should live in metadata (`path`, schema maps, etc.).
 - Optional compromise for readability is `<slug>__<short_id>` (never slug alone).
+- Current chosen compromise: root IDs are `human_slug__stablehash`.
 
 This keeps names robust while preserving readability where needed.
 

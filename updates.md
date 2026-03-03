@@ -59,6 +59,12 @@ For new roots (`subscan_preview`, `subscan_flat`), prefer deterministic machine 
 for dataset keys and keep human-readable names in metadata. If readability in key
 names is needed, use `<slug>__<short_id>` rather than slug-only names.
 
+Current implementation direction:
+- subscan roots use `human_slug__stablehash`
+- flat segment metadata includes:
+  - `starts` (flat offset per completed subscan invocation)
+  - `outer_index` (invocation index to align with outer/top-level point order)
+
 ### Future Scan Topology Requirements (Recorded)
 
 - Scan points should not assume a rectilinear grid.

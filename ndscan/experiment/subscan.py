@@ -4,6 +4,7 @@ another child fragment as part of its execution.
 """
 
 import hashlib
+import re
 from collections import OrderedDict
 from copy import copy
 from functools import reduce
@@ -62,6 +63,7 @@ class Subscan:
         flat_child_result_sinks: dict[ResultChannel, AppendingDatasetSink],
         flat_dataset_prefix: str,
         flat_segment_start_sink: AppendingDatasetSink,
+        flat_segment_outer_index_sink: AppendingDatasetSink,
         aggregate_result_channels: dict[ResultChannel, ResultChannel],
         short_child_channel_names: dict[ResultChannel, str],
         analyses: list[DefaultAnalysis],
@@ -78,6 +80,7 @@ class Subscan:
         self._flat_child_result_sinks = flat_child_result_sinks
         self._flat_dataset_prefix = flat_dataset_prefix
         self._flat_segment_start_sink = flat_segment_start_sink
+        self._flat_segment_outer_index_sink = flat_segment_outer_index_sink
         self._aggregate_result_channels = aggregate_result_channels
         self._short_child_channel_names = short_child_channel_names
         self._analyses = analyses
@@ -85,6 +88,7 @@ class Subscan:
         self._preview_coordinate_sinks = OrderedDict[ParamHandle, ResettableAppendingDatasetSink]()
         self._flat_coordinate_sinks = {}
         self._flat_next_point_index = 0
+        self._flat_outer_point_index = 0
         self._point_coordinate_sinks = []
 
     def run(
@@ -188,6 +192,7 @@ class Subscan:
         coordinates = self._push_coordinates()
         values = self._push_values()
         self._set_flat_segment(coordinates, values)
+        self._set_flat_completed()
         self._set_preview_completed()
         return coordinates, values, analysis_results
 
@@ -198,6 +203,7 @@ class Subscan:
         for sink in self._preview_coordinate_sinks.values():
             sink.clear()
         self._broadcast_preview_metadata()
+        self._broadcast_flat_metadata()
 
     def _preview_push(self, name: str, value):
         self._runner.set_dataset(
@@ -209,6 +215,16 @@ class Subscan:
     def _set_preview_completed(self):
         self._preview_push("completed", True)
 
+    def _flat_push(self, name: str, value):
+        self._runner.set_dataset(
+            self._flat_dataset_prefix + name,
+            value,
+            broadcast=True,
+        )
+
+    def _set_flat_completed(self):
+        self._flat_push("completed", True)
+
     def _set_flat_segment(self, coordinates, values):
         if coordinates:
             num_points = len(next(iter(coordinates.values())))
@@ -218,7 +234,9 @@ class Subscan:
             num_points = 0
 
         self._flat_segment_start_sink.push(self._flat_next_point_index)
+        self._flat_segment_outer_index_sink.push(self._flat_outer_point_index)
         self._flat_next_point_index += num_points
+        self._flat_outer_point_index += 1
 
     def _broadcast_preview_metadata(self):
         scan_desc = self._describe_current_scan_without_analysis_results()
@@ -230,6 +248,27 @@ class Subscan:
         for name, value in scan_desc.items():
             ds_value = to_metadata_broadcast_type(value)
             self._preview_push(name, dump_json(value) if ds_value is None else ds_value)
+
+    def _broadcast_flat_metadata(self):
+        scan_desc = self._describe_current_scan_without_analysis_results()
+        self._flat_push(SCHEMA_REVISION_KEY, SCHEMA_REVISION)
+        source_prefix = self._runner.get_dataset("system_id", default="rid")
+        rid = getattr(self._runner.scheduler, "rid", 0)
+        self._flat_push("source_id", f"{source_prefix}_{rid}")
+        self._flat_push("completed", False)
+        flat_desc = {
+            "fragment_fqn": scan_desc["fragment_fqn"],
+            "seed": scan_desc["seed"],
+            "axes": _strip_param_defaults(scan_desc["axes"]),
+            "channels": scan_desc["channels"],
+            "segment_fields": {
+                "starts": "starts",
+                "outer_index": "outer_index",
+            },
+        }
+        for name, value in flat_desc.items():
+            ds_value = to_metadata_broadcast_type(value)
+            self._flat_push(name, dump_json(value) if ds_value is None else ds_value)
 
     def _describe_current_scan_without_analysis_results(self):
         def get_axis_index(handle):
@@ -408,18 +447,20 @@ def _make_preview_dataset_prefix(
     result_target: Fragment, name_prefix: str, scanned_fragment: ExpFragment
 ) -> str:
     preview_id = _make_subscan_site_id(result_target, name_prefix, scanned_fragment)
+    preview_slug = _make_subscan_site_slug(result_target, name_prefix, scanned_fragment)
     scheduler = result_target.get_device("scheduler")
     rid = getattr(scheduler, "rid", 0)
-    return f"ndscan.rid_{rid}.subscan_preview.{preview_id}."
+    return f"ndscan.rid_{rid}.subscan_preview.{preview_slug}__{preview_id}."
 
 
 def _make_flat_dataset_prefix(
     result_target: Fragment, name_prefix: str, scanned_fragment: ExpFragment
 ) -> str:
     flat_id = _make_subscan_site_id(result_target, name_prefix, scanned_fragment)
+    flat_slug = _make_subscan_site_slug(result_target, name_prefix, scanned_fragment)
     scheduler = result_target.get_device("scheduler")
     rid = getattr(scheduler, "rid", 0)
-    return f"ndscan.rid_{rid}.subscan_flat.{flat_id}."
+    return f"ndscan.rid_{rid}.subscan_flat.{flat_slug}__{flat_id}."
 
 
 def _make_subscan_site_id(
@@ -433,6 +474,32 @@ def _make_subscan_site_id(
         ]
     )
     return hashlib.sha1(site_id.encode("utf-8")).hexdigest()[:12]
+
+
+def _make_subscan_site_slug(
+    result_target: Fragment, name_prefix: str, scanned_fragment: ExpFragment
+) -> str:
+    target_path = "_".join(result_target._fragment_path) if result_target._fragment_path else "root"
+    scan_name = name_prefix.strip("_") if name_prefix else "subscan"
+    if not scan_name:
+        scan_name = "subscan"
+    fragment_name = scanned_fragment.fqn.split(".")[-1]
+    raw = f"{target_path}_{scan_name}_{fragment_name}"
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", raw).strip("_").lower()
+    return slug or "subscan"
+
+
+def _strip_param_defaults(axes: list[dict]) -> list[dict]:
+    result = []
+    for axis in axes:
+        axis_copy = copy(axis)
+        param = axis_copy.get("param", None)
+        if param is not None:
+            param_copy = copy(param)
+            param_copy.pop("default", None)
+            axis_copy["param"] = param_copy
+        result.append(axis_copy)
+    return result
 
 
 def setup_subscan(
@@ -553,6 +620,9 @@ def setup_subscan(
     flat_segment_start_sink = AppendingDatasetSink(
         result_target, flat_dataset_prefix + "starts"
     )
+    flat_segment_outer_index_sink = AppendingDatasetSink(
+        result_target, flat_dataset_prefix + "outer_index"
+    )
 
     class SubscanInstance(Subscan):
         # ARTIQ compiler needs a different type for each RunnerInstance.
@@ -570,6 +640,7 @@ def setup_subscan(
         flat_child_result_sinks,
         flat_dataset_prefix,
         flat_segment_start_sink,
+        flat_segment_outer_index_sink,
         aggregate_result_channels,
         short_child_channel_names,
         analyses,

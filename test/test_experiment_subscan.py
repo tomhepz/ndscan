@@ -237,24 +237,55 @@ class SubscanFlatDatasetCase(ExpFragmentCase):
         def d(key):
             return self.dataset_db.get(parent.scan._flat_dataset_prefix + key)
 
+        def j(key):
+            value = d(key)
+            if isinstance(value, str):
+                return json.loads(value)
+            return value
+
         self.assertEqual(d("points.axis_0"), [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
         self.assertEqual(
             d("points.channel_result"),
             [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
         )
         self.assertEqual(d("starts"), [0, 4])
+        self.assertEqual(d("outer_index"), [0, 1])
+        self.assertEqual(d(SCHEMA_REVISION_KEY), SCHEMA_REVISION)
+        self.assertEqual(d("source_id"), "rid_0")
+        self.assertEqual(d("completed"), True)
+        self.assertEqual(d("fragment_fqn"), "fixtures.AddOneFragment")
+        self.assertEqual(j("segment_fields"), {"starts": "starts", "outer_index": "outer_index"})
+
+        axes = j("axes")
+        self.assertEqual(len(axes), 1)
+        self.assertEqual(axes[0]["param"]["fqn"], "fixtures.AddOneFragment.value")
+        self.assertNotIn("default", axes[0]["param"])
+
+        channels = j("channels")
+        self.assertIn("result", channels)
+        self.assertEqual(channels["result"]["path"], "child/result")
 
         flat_prefix = parent.scan._flat_dataset_prefix
+        self.assertIn("__", flat_prefix)
         flat_keys = sorted(
             key for key in self.dataset_db.data.keys() if key.startswith(flat_prefix)
         )
         self.assertEqual(
-            flat_keys,
-            [
+            set(flat_keys),
+            {
+                flat_prefix + SCHEMA_REVISION_KEY,
+                flat_prefix + "axes",
+                flat_prefix + "channels",
+                flat_prefix + "completed",
+                flat_prefix + "fragment_fqn",
+                flat_prefix + "outer_index",
                 flat_prefix + "points.axis_0",
                 flat_prefix + "points.channel_result",
+                flat_prefix + "seed",
+                flat_prefix + "segment_fields",
+                flat_prefix + "source_id",
                 flat_prefix + "starts",
-            ],
+            },
         )
 
 
