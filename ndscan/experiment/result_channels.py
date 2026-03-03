@@ -15,6 +15,7 @@ __all__ = [
     "ArraySink",
     "TeeSink",
     "AppendingDatasetSink",
+    "ResettableAppendingDatasetSink",
     "ScalarDatasetSink",
     "ResultChannel",
     "NumericChannel",
@@ -162,6 +163,14 @@ class AppendingDatasetSink(ResultSink, HasEnvironment):
     def get_all(self) -> list[Any]:
         """Read back the previously pushed values from the target dataset (if any)."""
         return [] if (self.last_value is None) else self.get_dataset(self.key)
+
+
+class ResettableAppendingDatasetSink(AppendingDatasetSink):
+    """Appending dataset sink that can be reset to an empty dataset."""
+
+    def clear(self) -> None:
+        self.set_dataset(self.key, [], broadcast=self.broadcast)
+        self.last_value = None
 
 
 class ScalarDatasetSink(ResultSink, HasEnvironment):
