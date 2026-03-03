@@ -14,6 +14,7 @@ from fixtures import (
 from mock_environment import ExpFragmentCase, HasEnvironmentCase
 
 from ndscan.experiment import *
+from ndscan.utils import SCHEMA_REVISION, SCHEMA_REVISION_KEY
 
 
 class Scan1DFragment(ExpFragment):
@@ -210,6 +211,22 @@ class RunSubscanTwiceCase(ExpFragmentCase):
             expected_results = [v + 1 for v in expected_values]
             self.assertEqual(coords, {parent.child.value: expected_values})
             self.assertEqual(values, {parent.child.result: expected_results})
+
+
+class SubscanPreviewDatasetCase(ExpFragmentCase):
+    def test_preview_stream_is_reset_between_subscan_runs(self):
+        parent = self.create(RunSubscanTwiceFragment)
+        parent.run_once()
+
+        def d(key):
+            return self.dataset_db.get(parent.scan._preview_dataset_prefix + key)
+
+        self.assertEqual(d(SCHEMA_REVISION_KEY), SCHEMA_REVISION)
+        self.assertEqual(d("completed"), True)
+        self.assertEqual(d("source_id"), "rid_0")
+        self.assertEqual(d("fragment_fqn"), "fixtures.AddOneFragment")
+        self.assertEqual(d("points.axis_0"), [4.0, 5.0, 6.0, 7.0])
+        self.assertEqual(d("points.channel_result"), [5.0, 6.0, 7.0, 8.0])
 
 
 class CharacteriseBulkPushFragment(ExpFragment):

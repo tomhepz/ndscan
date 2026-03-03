@@ -3,13 +3,19 @@ Implements subscans, that is, the ability for an :class:`.ExpFragment` to scan
 another child fragment as part of its execution.
 """
 
+import hashlib
 from collections import OrderedDict
 from copy import copy
 from functools import reduce
 
 from artiq.language import kernel, portable, rpc
 
-from ..utils import merge_no_duplicates, shorten_to_unambiguous_suffixes
+from ..utils import (
+    SCHEMA_REVISION,
+    SCHEMA_REVISION_KEY,
+    merge_no_duplicates,
+    shorten_to_unambiguous_suffixes,
+)
 from .default_analysis import AnnotationContext, DefaultAnalysis
 from .fragment import ExpFragment, Fragment, RestartKernelTransitoryError
 from .parameters import ParamHandle
@@ -17,8 +23,10 @@ from .result_channels import (
     ArraySink,
     LastValueSink,
     OpaqueChannel,
+    ResettableAppendingDatasetSink,
     ResultChannel,
     SubscanChannel,
+    TeeSink,
 )
 from .scan_generator import ScanGenerator, ScanOptions, generate_points
 from .scan_runner import (
@@ -30,7 +38,7 @@ from .scan_runner import (
     filter_default_analyses,
     select_runner_class,
 )
-from .utils import is_kernel
+from .utils import dump_json, is_kernel, to_metadata_broadcast_type
 
 __all__ = ["setattr_subscan", "Subscan", "SubscanExpFragment"]
 
@@ -48,8 +56,10 @@ class Subscan:
         schema_channel: SubscanChannel,
         coordinate_channels: list[ResultChannel],
         child_result_sinks: dict[ResultChannel, ArraySink],
+        preview_child_result_sinks: dict[ResultChannel, ResettableAppendingDatasetSink],
+        preview_dataset_prefix: str,
         aggregate_result_channels: dict[ResultChannel, ResultChannel],
-        short_child_channel_names: dict[str, ResultChannel],
+        short_child_channel_names: dict[ResultChannel, str],
         analyses: list[DefaultAnalysis],
         parent_analysis_result_channels: dict[str, ResultChannel],
     ):
@@ -59,10 +69,14 @@ class Subscan:
         self._schema_channel = schema_channel
         self._coordinate_channels = coordinate_channels
         self._child_result_sinks = child_result_sinks
+        self._preview_child_result_sinks = preview_child_result_sinks
+        self._preview_dataset_prefix = preview_dataset_prefix
         self._aggregate_result_channels = aggregate_result_channels
         self._short_child_channel_names = short_child_channel_names
         self._analyses = analyses
         self._parent_analysis_result_channels = parent_analysis_result_channels
+        self._preview_coordinate_sinks = OrderedDict[ParamHandle, ResettableAppendingDatasetSink]()
+        self._point_coordinate_sinks = []
 
     def run(
         self,
@@ -92,10 +106,9 @@ class Subscan:
         for sink in self._child_result_sinks.values():
             sink.clear()
         self.set_scan_spec(axis_generators, options)
+        self._prepare_preview()
         self._fragment.prepare()
-        self._runner.run(
-            self._fragment, self._spec, list(self._coordinate_sinks.values())
-        )
+        self._runner.run(self._fragment, self._spec, self._point_coordinate_sinks)
         return self._push_results(execute_default_analyses)
 
     def set_scan_spec(
@@ -103,19 +116,32 @@ class Subscan:
         axis_generators: list[tuple[ParamHandle, ScanGenerator]],
         options: ScanOptions = ScanOptions(),
     ):
+        for sink in self._preview_coordinate_sinks.values():
+            sink.clear()
+
         axes: list[ScanAxis] = []
         generators: list[ScanGenerator] = []
         self._coordinate_sinks = OrderedDict[ParamHandle, ArraySink]()
+        self._preview_coordinate_sinks = OrderedDict[
+            ParamHandle, ResettableAppendingDatasetSink
+        ]()
+        self._point_coordinate_sinks = []
 
-        for param_handle, generator in axis_generators:
+        for i, (param_handle, generator) in enumerate(axis_generators):
             axis = self._possible_axes.get(param_handle, None)
             assert axis is not None, "Axis not registered in setattr_subscan()"
             axes.append(axis)
             generators.append(generator)
-            self._coordinate_sinks[param_handle] = ArraySink()
+            array_sink = ArraySink()
+            preview_sink = ResettableAppendingDatasetSink(
+                self._runner, self._preview_dataset_prefix + f"points.axis_{i}"
+            )
+            self._coordinate_sinks[param_handle] = array_sink
+            self._preview_coordinate_sinks[param_handle] = preview_sink
+            self._point_coordinate_sinks.append(TeeSink(array_sink, preview_sink))
 
         self._spec = ScanSpec(axes, generators, options)
-        self._runner.setup(self._fragment, axes, list(self._coordinate_sinks.values()))
+        self._runner.setup(self._fragment, axes, self._point_coordinate_sinks)
         self._regenerate_points()
 
     def _regenerate_points(self):
@@ -125,6 +151,7 @@ class Subscan:
 
     @portable
     def acquire(self, execute_default_analyses=False):
+        self._prepare_preview()
         if not self._runner.acquire(device_cleanup=False):
             raise RestartKernelTransitoryError("Subscan interrupted by pause request")
         self._finalize(execute_default_analyses)
@@ -143,7 +170,51 @@ class Subscan:
         self._push_schema(analysis_schema)
         coordinates = self._push_coordinates()
         values = self._push_values()
+        self._set_preview_completed()
         return coordinates, values, analysis_results
+
+    @rpc
+    def _prepare_preview(self):
+        for sink in self._preview_child_result_sinks.values():
+            sink.clear()
+        for sink in self._preview_coordinate_sinks.values():
+            sink.clear()
+        self._broadcast_preview_metadata()
+
+    def _preview_push(self, name: str, value):
+        self._runner.set_dataset(
+            self._preview_dataset_prefix + name,
+            value,
+            broadcast=True,
+        )
+
+    def _set_preview_completed(self):
+        self._preview_push("completed", True)
+
+    def _broadcast_preview_metadata(self):
+        self._preview_push(SCHEMA_REVISION_KEY, SCHEMA_REVISION)
+        source_prefix = self._runner.get_dataset("system_id", default="rid")
+        self._preview_push("source_id", f"{source_prefix}_{self._runner.scheduler.rid}")
+        self._preview_push("completed", False)
+
+        def get_axis_index(handle):
+            for i, h in enumerate(self._coordinate_sinks.keys()):
+                if handle._store == h._store:
+                    return i
+            assert False
+
+        context = AnnotationContext(
+            get_axis_index,
+            lambda channel: self._short_child_channel_names[channel],
+            lambda channel: False,
+        )
+        analyses = filter_default_analyses(self._fragment, self._spec.axes)
+        scan_desc = describe_scan(self._spec, self._fragment, self._short_child_channel_names)
+        scan_desc.update(describe_analyses(analyses, context))
+        scan_desc["analysis_results"] = {}
+        for name, value in scan_desc.items():
+            ds_value = to_metadata_broadcast_type(value)
+            self._preview_push(name, dump_json(value) if ds_value is None else ds_value)
 
     def _push_schema(self, analysis_schema):
         scan_schema = describe_scan(
@@ -298,6 +369,21 @@ def setattr_subscan(
     return subscan
 
 
+def _make_preview_dataset_prefix(
+    result_target: Fragment, name_prefix: str, scanned_fragment: ExpFragment
+) -> str:
+    site_id = "|".join(
+        [
+            "/".join(result_target._fragment_path),
+            name_prefix,
+            scanned_fragment.fqn,
+        ]
+    )
+    preview_id = hashlib.sha1(site_id.encode("utf-8")).hexdigest()[:12]
+    rid = result_target.get_device("scheduler").rid
+    return f"ndscan.rid_{rid}.subscan_preview.{preview_id}."
+
+
 def setup_subscan(
     result_target: Fragment,
     name_prefix: str,
@@ -335,23 +421,29 @@ def setup_subscan(
     # we redirect the results to ArraySinks…
     original_channels = {}
     scanned_fragment._collect_result_channels(original_channels)
-
-    child_result_sinks = {}
-    for channel in original_channels.values():
-        sink = ArraySink()
-        channel.set_sink(sink)
-        child_result_sinks[channel] = sink
+    preview_dataset_prefix = _make_preview_dataset_prefix(
+        result_target, name_prefix, scanned_fragment
+    )
 
     # … and re-export result channels that the collected data will be pushed to.
     channel_name_map = shorten_to_unambiguous_suffixes(
         original_channels.keys(), lambda fqn, n: "/".join(fqn.split("/")[-n:])
     )
+    child_result_sinks = {}
+    preview_child_result_sinks = {}
     aggregate_result_channels = {}
     short_child_channel_names = {}
     for full_name, short_name in channel_name_map.items():
         short_identifier = short_name.replace("/", "_")
         channel = original_channels[full_name]
         short_child_channel_names[channel] = short_identifier
+        child_sink = ArraySink()
+        preview_sink = ResettableAppendingDatasetSink(
+            result_target, preview_dataset_prefix + "points.channel_" + short_identifier
+        )
+        channel.set_sink(TeeSink(child_sink, preview_sink))
+        child_result_sinks[channel] = child_sink
+        preview_child_result_sinks[channel] = preview_sink
 
         # TODO: Implement ArrayChannel to represent a variable number of dimensions
         # around a scalar channel so we can keep the schema information here instead of
@@ -411,6 +503,8 @@ def setup_subscan(
         spec_channel,
         coordinate_channels,
         child_result_sinks,
+        preview_child_result_sinks,
+        preview_dataset_prefix,
         aggregate_result_channels,
         short_child_channel_names,
         analyses,
