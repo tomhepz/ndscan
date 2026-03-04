@@ -192,7 +192,7 @@ class _XYSeries(QtCore.QObject):
         self._last_x_data = np.array(x_data, copy=True)
         self._last_y_data = np.array(y_data, copy=True)
         self._last_y_err = None if y_err is None else np.array(y_err, copy=True)
-        self._last_source_idxs = np.array(source_idxs, copy=True, dtype=object)
+        self._last_source_idxs = np.array(source_idxs, copy=True)
 
     def highlight_index(self, index):
         """

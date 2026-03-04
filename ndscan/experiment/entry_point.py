@@ -180,12 +180,6 @@ class FragmentScanExperiment(EnvExperiment):
 
     def analyze(self):
         self.tlr.analyze()
-        # Run one more explicit check at the experiment wrapper level, as this is the
-        # last point before ARTIQ writes HDF5 results.
-        self.tlr._raise_on_non_rectangular_archived_data(
-            stage="FragmentScanExperiment.analyze",
-            raise_on_error=False,
-        )
 
 
 class ArgumentInterface(HasEnvironment):

@@ -208,21 +208,23 @@ class SubscanModel(ScanModel):
 
     def _update(self, parent_data: dict[str, Any] | None) -> None:
         source_index = self._get_selected_source_index()
-        # Selected-point mode: prefer exact embedded point payload from the parent.
-        # This avoids mixing a selected parent point with a globally indexed flat
-        # subscan segment in nested subscan trees.
-        point_data = None
-        if source_index is not None and parent_data is not None:
-            point_data = self._extract_embedded_point_data(parent_data)
-        if point_data is None:
-            # Live-preview mode (no selection): read preview stream from datasets.
-            # Selected-point mode (if embedded data is unavailable): try flat segment.
-            point_data = self._extract_dataset_point_data(source_index)
-        if point_data is None and parent_data is not None:
-            # No selection or no dataset-backed data yet; fall back to embedded payload.
-            # For selected mode this only applies when embedded data was unavailable on
-            # the first pass and source index is None.
-            point_data = self._extract_embedded_point_data(parent_data)
+        if source_index is not None:
+            # Selected-point mode: prefer exact embedded point payload from the parent
+            # to avoid mixing a selected parent point with a globally indexed flat
+            # subscan segment in nested subscan trees.
+            point_data = (
+                self._extract_embedded_point_data(parent_data)
+                if parent_data is not None
+                else None
+            )
+            if point_data is None:
+                point_data = self._extract_dataset_point_data(source_index)
+        else:
+            # Live mode (no selected point): use preview stream, then embedded payload
+            # if dataset-backed preview is not available yet.
+            point_data = self._extract_dataset_point_data(None)
+            if point_data is None and parent_data is not None:
+                point_data = self._extract_embedded_point_data(parent_data)
         if point_data is not None:
             self._set_point_data(point_data)
 

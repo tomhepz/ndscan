@@ -349,7 +349,7 @@ class SubplotMenuPanesWidget(ContextMenuPanesWidget):
         # Hide subplots as well when hiding the parent plot (i.e. self).
         # Closing children triggers callbacks that remove entries from the live dict.
         # Iterate over a detached snapshot to avoid mutation during iteration.
-        for w in tuple(self.subscan_plots.copy().values()):
+        for w in list(self.subscan_plots.values()):
             w.close()
         super().closeEvent(ev)
 
@@ -468,7 +468,7 @@ class SliceableMenuPanesWidget(SubplotMenuPanesWidget):
         # Hide subplots as well when hiding the parent plot (i.e. self).
         # Closing children triggers callbacks that remove entries from the live dict.
         # Iterate over a detached snapshot to avoid mutation during iteration.
-        for w in tuple(self.slice_plots.copy().values()):
+        for w in list(self.slice_plots.values()):
             w.close()
         super().closeEvent(ev)
 
