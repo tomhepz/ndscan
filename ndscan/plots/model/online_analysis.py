@@ -81,6 +81,10 @@ class OnlineNamedFitAnalysis(OnlineAnalysis):
         num_points = min(len(v) for v in self._source_data.values())
         if num_points < len(self._fit_obj.parameter_names):
             # Not enough points yet for the given number of degrees of freedom.
+            if self._last_fit_params is not None or self._last_fit_errors is not None:
+                self._last_fit_params = None
+                self._last_fit_errors = None
+                self.updated.emit()
             return
 
         for key, value in self._source_data.items():

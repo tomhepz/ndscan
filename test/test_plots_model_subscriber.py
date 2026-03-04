@@ -4,7 +4,7 @@ import unittest
 from sipyco.sync_struct import Notifier
 
 from ndscan.plots.model import Context
-from ndscan.plots.model.subscriber import SubscriberRoot
+from ndscan.plots.model.subscriber import SubscriberRoot, SubscriberScanModel
 from ndscan.utils import SCHEMA_REVISION, SCHEMA_REVISION_KEY
 
 
@@ -112,3 +112,64 @@ class SinglePointTest(unittest.TestCase):
         self.datasets["ndscan.completed"] = (False, True, {})
         self.init()
         self.assertEqual(self.root.get_model().get_point(), {"foo": 42, "bar": 23})
+
+
+class ScanModelTest(unittest.TestCase):
+    def test_in_place_list_growth_emits_appended(self):
+        context = Context()
+        model = SubscriberScanModel(
+            axes=[
+                {
+                    "param": {
+                        "fqn": "test.x",
+                        "description": "x",
+                        "type": "float",
+                        "spec": {},
+                    },
+                    "path": "",
+                }
+            ],
+            prefix="ndscan.",
+            schema_revision=SCHEMA_REVISION,
+            context=context,
+        )
+
+        appended_count = 0
+
+        def on_appended(*_args):
+            nonlocal appended_count
+            appended_count += 1
+
+        model.points_appended.connect(on_appended)
+
+        axis_values = []
+        channel_values = []
+        values = {
+            "ndscan.channels": json.dumps(
+                {
+                    "y": {
+                        "description": "y",
+                        "path": "root/y",
+                        "type": "float",
+                        "unit": "",
+                    }
+                }
+            ),
+            "ndscan.online_analyses": "{}",
+            "ndscan.points.axis_0": axis_values,
+            "ndscan.points.channel_y": channel_values,
+            "ndscan.completed": False,
+        }
+
+        model.data_changed(values, [])
+        self.assertEqual(appended_count, 0)
+
+        axis_values.append(1.0)
+        channel_values.append(2.0)
+        model.data_changed(values, [])
+        self.assertEqual(appended_count, 1)
+
+        axis_values.append(2.0)
+        channel_values.append(4.0)
+        model.data_changed(values, [])
+        self.assertEqual(appended_count, 2)

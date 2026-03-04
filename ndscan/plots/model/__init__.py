@@ -198,6 +198,14 @@ class ScanModel(Model):
     def get_point_data(self) -> dict[str, Any]:
         raise NotImplementedError
 
+    def is_completed(self) -> bool | None:
+        """Return whether the represented acquisition is complete.
+
+        Returns ``None`` if the completion state is unknown (e.g. static/offline
+        contexts that do not track run lifecycle).
+        """
+        return None
+
     def get_annotations(self) -> list[Annotation]:
         return self._annotations
 

@@ -146,18 +146,20 @@ class RootWidget(QtWidgets.QWidget):
         return self.root.get_title()
 
     def closeEvent(self, ev):
-        if self.plot_widget is None:
-            self.was_closed.emit()
-        else:
-            # This will also cause plot_widget to emit was_closed, which we then
-            # forward.
+        if self.plot_widget is not None:
+            # Close the contained plot so it can close any nested subplots.
             self.plot_widget.close()
+        self.was_closed.emit()
         super().closeEvent(ev)
 
     def _change_model(self):
         if self.plot_widget is not None:
+            old_plot_widget = self.plot_widget
             self._show_message("No data.")
-            self.widget_stack.removeWidget(self.plot_widget)
+            # Ensure nested subscan/slice docks owned by the old plot are closed when
+            # the model is swapped out.
+            old_plot_widget.close()
+            self.widget_stack.removeWidget(old_plot_widget)
 
             # Ensure that the C++ object is deleted, which will also disconnect any of
             # the signals the plot used to track the model. Without this, we would
@@ -165,7 +167,7 @@ class RootWidget(QtWidgets.QWidget):
             # between subplot points. (For subplots, this is slightly suboptimal still,
             # as the old model will still catch the rewrite; could optimise by
             # explicitly disconnecting all the signals here and now.)
-            self.plot_widget.deleteLater()
+            old_plot_widget.deleteLater()
 
             self.plot_widget = None
 
@@ -185,7 +187,6 @@ class RootWidget(QtWidgets.QWidget):
             self.plot_widget.error.connect(self._show_message)
             self.plot_widget.ready.connect(lambda: self._show(self.plot_widget))
             self.plot_widget.new_dock_requested.connect(self._forward_new_dock_request)
-            self.plot_widget.was_closed.connect(self.was_closed)
 
     def _forward_new_dock_request(self, request):
         if (

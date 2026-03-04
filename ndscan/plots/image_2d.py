@@ -413,6 +413,7 @@ class Image2DPlotWidget(SliceableMenuPanesWidget):
         self.slice_roots = create_slice_roots(self.model, self.selected_point_model)
 
         self.ready.emit()
+        call_later(self.sync_subscan_plot_state)
 
     def _update_points(self, points, invalidate):
         if self.plot:
@@ -438,6 +439,9 @@ class Image2DPlotWidget(SliceableMenuPanesWidget):
                     self.y_schema["param"]["spec"]["members"].keys(), points["axis_1"]
                 )
             self.plot.data_changed(points, invalidate_previous=invalidate)
+
+            if len(points["axis_0"]) > 0:
+                self._highlight_point_at_index(len(points["axis_0"]) - 1)
 
     def build_context_menu(self, pane_idx: int | None, builder):
         if self.model.context.is_online_master():
@@ -533,12 +537,6 @@ class Image2DPlotWidget(SliceableMenuPanesWidget):
     def _highlight_point_at_index(self, source_idx: int | None):
         """Highlight the point at the given index of the source data."""
         self.selected_point_model.set_source_index(source_idx)
-        if (
-            source_idx is not None
-            and self.auto_open_subscan_plots_on_selection
-            and self.subscan_roots
-        ):
-            self.open_all_subscan_plots()
 
         if source_idx is None:
             self._highlighted_xy = (None, None)

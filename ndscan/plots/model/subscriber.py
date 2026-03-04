@@ -2,6 +2,7 @@ import json
 from collections.abc import Iterable
 from typing import Any
 
+import numpy
 from sipyco.sync_struct import ModAction
 
 from ...utils import SCHEMA_REVISION_KEY, strip_prefix
@@ -175,6 +176,7 @@ class SubscriberScanModel(ScanModel):
         self._analysis_results_json = None
         self._analysis_result_sources = {}
         self._point_data = {}
+        self._completed = False
 
     def data_changed(
         self, values: dict[str, Any], mods: Iterable[dict[str, Any]]
@@ -212,21 +214,34 @@ class SubscriberScanModel(ScanModel):
         for name, source in self._analysis_result_sources.items():
             source.set(values.get(self._prefix + "analysis_result." + name))
 
-        point_data_changed = False
+        self._completed = values.get(self._prefix + "completed", False)
+
+        point_data_rewritten = False
+        point_data_appended = False
         for name in [f"axis_{i}" for i in range(len(self.axes))] + [
             "channel_" + c for c in self._channel_schemata.keys()
         ]:
-            point_values = values.get(self._prefix + "points." + name, [])
-            if not point_data_changed:
-                # Check if points were appended or rewritten.
-                if name in self._point_data:
-                    imax = min(len(point_values), len(self._point_data[name]))
-                    if point_values[:imax] != self._point_data[name][:imax]:
-                        point_data_changed = True
+            point_values = _snapshot_point_values(
+                values.get(self._prefix + "points." + name, [])
+            )
+            previous = self._point_data.get(name, None)
+            if previous is None:
+                if len(point_values) > 0:
+                    point_data_appended = True
+            else:
+                prev_len = len(previous)
+                new_len = len(point_values)
+                imax = min(prev_len, new_len)
+                if not _prefix_equal(previous, point_values, imax):
+                    point_data_rewritten = True
+                elif new_len < prev_len:
+                    point_data_rewritten = True
+                elif new_len > prev_len:
+                    point_data_appended = True
             self._point_data[name] = point_values
-        if point_data_changed:
+        if point_data_rewritten:
             self.points_rewritten.emit(self._point_data)
-        else:
+        elif point_data_appended:
             self.points_appended.emit(self._point_data)
 
     def get_annotations(self) -> list[Annotation]:
@@ -238,7 +253,55 @@ class SubscriberScanModel(ScanModel):
     def get_point_data(self) -> dict[str, Any]:
         return self._point_data
 
+    def is_completed(self) -> bool | None:
+        return self._completed
+
     def get_analysis_result_source(self, name: str) -> FixedDataSource | None:
         if name not in self._analysis_result_sources:
             self._analysis_result_sources[name] = FixedDataSource(None)
         return self._analysis_result_sources[name]
+
+
+def _prefix_equal(left, right, n: int) -> bool:
+    if n == 0:
+        return True
+    try:
+        return _value_equal(left[:n], right[:n])
+    except Exception:
+        return False
+
+
+def _snapshot_point_values(values):
+    # SyncStruct updates can mutate list values in place. Keep model snapshots detached
+    # so length/content deltas are observed on subsequent updates.
+    if isinstance(values, numpy.ndarray):
+        return values.copy()
+    if isinstance(values, list):
+        return list(values)
+    if isinstance(values, tuple):
+        return tuple(values)
+    return values
+
+
+def _value_equal(left, right) -> bool:
+    if isinstance(left, numpy.ndarray) or isinstance(right, numpy.ndarray):
+        return numpy.array_equal(left, right)
+    if isinstance(left, list) and isinstance(right, list):
+        if len(left) != len(right):
+            return False
+        return all(
+            _value_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    if isinstance(left, tuple) and isinstance(right, tuple):
+        if len(left) != len(right):
+            return False
+        return all(
+            _value_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    if isinstance(left, dict) and isinstance(right, dict):
+        if left.keys() != right.keys():
+            return False
+        return all(_value_equal(left[k], right[k]) for k in left.keys())
+    return left == right

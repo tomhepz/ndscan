@@ -70,6 +70,15 @@ def combined_uncertainty(points: list[SourcePoint], num_samples_per_point=1):
     return np.sqrt(total_var)
 
 
+def _array_values_equal(left, right) -> bool:
+    if left is None or right is None:
+        return left is None and right is None
+    try:
+        return np.array_equal(left, right, equal_nan=True)
+    except TypeError:
+        return np.array_equal(left, right)
+
+
 class _XYSeries(QtCore.QObject):
     def __init__(
         self,
@@ -94,6 +103,10 @@ class _XYSeries(QtCore.QObject):
         self.error_bar_bounds_ignored = False
         self.series_idx = series_idx
         self.pane_idx = pane_idx
+        self._last_x_data = None
+        self._last_y_data = None
+        self._last_y_err = None
+        self._last_source_idxs = None
 
         #: Whether to average points with the same x coordinate.
         self.averaging_enabled = False
@@ -116,13 +129,6 @@ class _XYSeries(QtCore.QObject):
             y_err = channel(self.error_bar_name)
             num_to_show = min(num_to_show, len(y_err))
 
-        # If nothing has changed, skip the update.
-        if (
-            num_to_show == self.num_current_points
-            and averaging_enabled == self.averaging_enabled
-        ):
-            return
-
         # Combine points with same coordinates if enabled.
         if averaging_enabled:
             x_data, y_data, y_err, source_idxs = self._average_add_points(
@@ -134,6 +140,16 @@ class _XYSeries(QtCore.QObject):
             if y_err is not None:
                 y_err = y_err[:num_to_show]
             source_idxs = np.arange(num_to_show)
+
+        # If content and rendering mode are unchanged, skip the update.
+        if (
+            averaging_enabled == self.averaging_enabled
+            and _array_values_equal(x_data, self._last_x_data)
+            and _array_values_equal(y_data, self._last_y_data)
+            and _array_values_equal(y_err, self._last_y_err)
+            and _array_values_equal(source_idxs, self._last_source_idxs)
+        ):
+            return
 
         # source_idxs can be queried later via spot.data().
         self.data_item.setData(x_data, y_data, data=source_idxs)
@@ -173,6 +189,10 @@ class _XYSeries(QtCore.QObject):
 
         self.averaging_enabled = averaging_enabled
         self.num_current_points = num_to_show
+        self._last_x_data = np.array(x_data, copy=True)
+        self._last_y_data = np.array(y_data, copy=True)
+        self._last_y_err = None if y_err is None else np.array(y_err, copy=True)
+        self._last_source_idxs = np.array(source_idxs, copy=True, dtype=object)
 
     def highlight_index(self, index):
         """
@@ -233,6 +253,10 @@ class _XYSeries(QtCore.QObject):
             self.view_box.removeItem(self.highlight_item)
         self.source_points_by_x.clear()
         self.num_current_points = 0
+        self._last_x_data = None
+        self._last_y_data = None
+        self._last_y_err = None
+        self._last_source_idxs = None
 
     def get_highlight_x_neighbour_index(self, step: int) -> int | None:
         if not self.highlight_item.parentItem():
@@ -387,45 +411,47 @@ class XY1DPlotWidget(SubplotMenuPanesWidget):
         if len(self.panes) > 1:
             self.link_x_axes()
 
-        add_source_id_label(self.panes[-1].getViewBox(), self.model.context)
+        if self.panes:
+            add_source_id_label(self.panes[-1].getViewBox(), self.model.context)
 
-        setup_axis_item(
-            self.panes[-1].getAxis("bottom"),
-            [
-                (
-                    self.x_schema["param"]["description"],
-                    format_param_identity(self.x_schema),
-                    self.x_schema["param"]["type"],
-                    None,
-                    self.x_param_spec,
-                )
-            ],
-        )
+            setup_axis_item(
+                self.panes[-1].getAxis("bottom"),
+                [
+                    (
+                        self.x_schema["param"]["description"],
+                        format_param_identity(self.x_schema),
+                        self.x_schema["param"]["type"],
+                        None,
+                        self.x_param_spec,
+                    )
+                ],
+            )
 
         # Make sure we put back annotations (if they haven't changed but the points
         # have been rewritten, there might not be an annotations_changed event).
         self._update_annotations()
 
         self.ready.emit()
+        call_later(self.sync_subscan_plot_state)
 
     def _update_points(self, points):
-        x_data = points["axis_0"]
-        # Compare length to zero instead of using `not x_data` for NumPy array
-        # compatibility.
-        if len(x_data) == 0:
+        if points is None or "axis_0" not in points:
             return
+        source_x_data = points["axis_0"]
 
         # If all points were unique so far, check if we have duplicates now.
         if not self.found_duplicate_x_data:
-            for x in x_data[len(self.unique_x_data) :]:
+            for x in source_x_data[len(self.unique_x_data) :]:
                 if x in self.unique_x_data:
                     self.found_duplicate_x_data = True
                     break
                 else:
                     self.unique_x_data.add(x)
 
+        x_data = source_x_data
         if self.x_schema["param"]["type"] == "enum":
             x_data = enum_to_numeric(self.x_param_spec["members"].keys(), x_data)
+        x_data = np.asarray(x_data)
         for s in self.series:
             s.update(x_data, points, self.averaging_enabled)
 
@@ -591,12 +617,6 @@ class XY1DPlotWidget(SubplotMenuPanesWidget):
         for series in self.series:
             series.highlight_index(index)
         self.selected_point_model.set_source_index(index)
-        if (
-            index is not None
-            and self.auto_open_subscan_plots_on_selection
-            and self.subscan_roots
-        ):
-            self.open_all_subscan_plots()
 
     def _background_clicked(self):
         for series in self.series:

@@ -179,8 +179,7 @@ class Rolling1DPlotWidget(SubplotMenuPanesWidget):
             # quantities implemented using TopLevelRunners, where the useful plot shows
             # the data acquisition subscan(s), but the top-level fragment does not have
             # any non-opaque channels besides that.
-            for name in self.subscan_roots:
-                self.open_subscan_plot(name)
+            call_later(self.sync_subscan_plot_state)
 
             # KLUDGE: Reach into dock area to hide the useless empty plot widget where
             # the top-level series (if any) would show up.
@@ -188,6 +187,8 @@ class Rolling1DPlotWidget(SubplotMenuPanesWidget):
             while not isinstance(dock, pyqtgraph.dockarea.Dock):
                 dock = dock.parent()
             dock.setStretch(0, 0)
+        else:
+            call_later(self.sync_subscan_plot_state)
 
         self.ready.emit()
 

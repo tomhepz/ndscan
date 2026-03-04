@@ -189,6 +189,9 @@ class SliceForScanModel(ScanModel):
     def get_point_data(self) -> dict[str, Any]:
         return self._sliced_data
 
+    def is_completed(self) -> bool | None:
+        return self._parent.is_completed()
+
     def quit(self) -> None:
         self._parent.points_appended.disconnect(self._update)
         self._parent.points_rewritten.disconnect(self._update)

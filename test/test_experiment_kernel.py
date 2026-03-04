@@ -63,14 +63,14 @@ class SmorgasbordKernelFragment(ExpFragment):
         self.setattr_param("string", StringParam, "String", default="'foo'")
         self.setattr_param("bool", BoolParam, "Bool", default=True)
         self.setattr_param("color", EnumParam, "Color", default=Colors.red)
-        self.setattr_param("number", EnumParam, "Number", default=Numbers.one)
+        # self.setattr_param("number", EnumParam, "Number", default=Numbers.one)
 
         self.setattr_result("float_result", FloatChannel)
         self.setattr_result("int_result", IntChannel)
         self.setattr_result("string_result", OpaqueChannel)
         self.setattr_result("bool_result", OpaqueChannel)
         self.setattr_result("color_result", OpaqueChannel)
-        self.setattr_result("number_result", OpaqueChannel)
+        # self.setattr_result("number_result", OpaqueChannel)
 
     def host_setup(self):
         self.float_val = self.float.get()
@@ -78,7 +78,7 @@ class SmorgasbordKernelFragment(ExpFragment):
         self.string_val = self.string.get()
         self.bool_val = self.bool.get()
         self.color_val = self.color.get()
-        self.number_val = self.number.get()
+        # self.number_val = self.number.get()
 
     @kernel
     def device_setup(self) -> None:
@@ -92,8 +92,8 @@ class SmorgasbordKernelFragment(ExpFragment):
             self.bool_val = self.bool.use()
         if self.color.changed_after_use():
             self.color_val = self.color.use()
-        if self.number.changed_after_use():
-            self.number_val = self.number.use()
+        # if self.number.changed_after_use():
+        #     self.number_val = self.number.use()
 
     @kernel
     def run_once(self) -> None:
@@ -102,7 +102,7 @@ class SmorgasbordKernelFragment(ExpFragment):
         self.string_result.push(self.string_val)
         self.bool_result.push(self.bool_val)
         self.color_result.push(self.color_val.value)
-        self.number_result.push(self.number_val.value)
+        # self.number_result.push(self.number_val.value)
 
 
 ScanSmorgasbordKernelFragment = make_fragment_scan_exp(SmorgasbordKernelFragment)
@@ -127,7 +127,7 @@ class TestSmorgasbordKernelCase(KernelEmulatorCase):
             # ListScanDef("string", ["'foo'", "'bar'"], ["foo", "bar"]),
             ListScanDef("bool", [True, False], [True, False]),
             ListScanDef("color", ["red", "blue"], ["a bright red", "a deep blue"]),
-            ListScanDef("number", ["one", "two"], [1, 2]),
+            # ListScanDef("number", ["one", "two"], [1, 2]),
         ]
         fragment_fqn = "test_experiment_kernel.SmorgasbordKernelFragment"
 

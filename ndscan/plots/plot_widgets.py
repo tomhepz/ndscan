@@ -341,13 +341,15 @@ class SubplotMenuPanesWidget(ContextMenuPanesWidget):
         #: Maps subplot names to active plot widgets.
         self.subscan_plots: dict[str, VerticalPanesWidget] = {}
 
-        # If enabled, selecting a point in this plot automatically opens all subscan
-        # panes available for that selected point.
-        self.auto_open_subscan_plots_on_selection = True
+        # Desired visibility state for subscan panes. New roots default to enabled.
+        self._subscan_enabled: dict[str, bool] = {}
+        self._subscan_default_enabled = True
 
     def closeEvent(self, ev):
         # Hide subplots as well when hiding the parent plot (i.e. self).
-        for w in self.subscan_plots.values():
+        # Closing children triggers callbacks that remove entries from the live dict.
+        # Iterate over a detached snapshot to avoid mutation during iteration.
+        for w in tuple(self.subscan_plots.copy().values()):
             w.close()
         super().closeEvent(ev)
 
@@ -359,7 +361,9 @@ class SubplotMenuPanesWidget(ContextMenuPanesWidget):
             for name in self.subscan_roots.keys():
                 action = builder.append_action(f"Subscan '{name}'")
                 action.setCheckable(True)
-                action.setChecked(name in self.subscan_plots)
+                action.setChecked(
+                    self._subscan_enabled.get(name, self._subscan_default_enabled)
+                )
                 action.triggered.connect(
                     lambda *a, name=name: self._toggle_subscan_plot(name)
                 )
@@ -371,22 +375,45 @@ class SubplotMenuPanesWidget(ContextMenuPanesWidget):
             QtWidgets.QApplication.keyboardModifiers()
             & QtCore.Qt.KeyboardModifier.ShiftModifier
         )
-        if name in self.subscan_plots:
+        enabled = self._subscan_enabled.get(name, self._subscan_default_enabled)
+        if enabled:
             if toggle_all:
-                # This will also end up removing the plots from self.subscan_plots; take
-                # list() to not depend on the details of the signal dispatch timing.
-                for key in list(self.subscan_plots.keys()):
-                    self.close_subscan_plot(key)
+                for key in self.subscan_roots.keys():
+                    self._set_subscan_enabled(key, False)
             else:
-                # Just close the one plot.
-                self.close_subscan_plot(name)
+                self._set_subscan_enabled(name, False)
         else:
             if toggle_all:
                 for name in self.subscan_roots.keys():
-                    if name not in self.subscan_plots:
-                        self.open_subscan_plot(name)
+                    self._set_subscan_enabled(name, True)
             else:
+                self._set_subscan_enabled(name, True)
+
+    def _set_subscan_enabled(self, name: str, enabled: bool) -> None:
+        self._subscan_enabled[name] = enabled
+        if enabled:
+            if name in self.subscan_roots and name not in self.subscan_plots:
                 self.open_subscan_plot(name)
+        else:
+            if name in self.subscan_plots:
+                self.close_subscan_plot(name)
+
+    def sync_subscan_plot_state(self) -> None:
+        """Synchronize open subscan panes with current roots and visibility state."""
+        stale_open = [name for name in self.subscan_plots if name not in self.subscan_roots]
+        for name in stale_open:
+            self.close_subscan_plot(name)
+
+        for name in self.subscan_roots.keys():
+            self._subscan_enabled.setdefault(name, self._subscan_default_enabled)
+
+        for name in self.subscan_roots.keys():
+            enabled = self._subscan_enabled[name]
+            is_open = name in self.subscan_plots
+            if enabled and not is_open:
+                self.open_subscan_plot(name)
+            elif not enabled and is_open:
+                self.close_subscan_plot(name)
 
     def open_subscan_plot(self, name):
         assert name not in self.subscan_plots
@@ -400,7 +427,13 @@ class SubplotMenuPanesWidget(ContextMenuPanesWidget):
             return
         self.subscan_plots[name] = plot
         plot.new_dock_requested.connect(self.new_dock_requested)
-        plot.was_closed.connect(lambda: self.subscan_plots.pop(name).deleteLater())
+
+        def remove_plot():
+            widget = self.subscan_plots.pop(name, None)
+            if widget is not None:
+                widget.deleteLater()
+
+        plot.was_closed.connect(remove_plot)
         self.new_dock_requested.emit(plot)
 
     def close_subscan_plot(self, name):
@@ -411,8 +444,7 @@ class SubplotMenuPanesWidget(ContextMenuPanesWidget):
     def open_all_subscan_plots(self):
         """Open all subscan panes declared for the current point model."""
         for name in self.subscan_roots.keys():
-            if name not in self.subscan_plots:
-                self.open_subscan_plot(name)
+            self._set_subscan_enabled(name, True)
 
 
 # TODO: Use metaprogramming to avoid code duplication with SubscanMenuPanesWidget.
@@ -434,7 +466,9 @@ class SliceableMenuPanesWidget(SubplotMenuPanesWidget):
 
     def closeEvent(self, ev):
         # Hide subplots as well when hiding the parent plot (i.e. self).
-        for w in self.slice_plots.values():
+        # Closing children triggers callbacks that remove entries from the live dict.
+        # Iterate over a detached snapshot to avoid mutation during iteration.
+        for w in tuple(self.slice_plots.copy().values()):
             w.close()
         super().closeEvent(ev)
 

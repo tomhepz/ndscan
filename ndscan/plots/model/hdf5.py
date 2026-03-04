@@ -109,6 +109,9 @@ class HDF5ScanModel(ScanModel):
     def get_point_data(self) -> dict[str, Any]:
         return self._point_data
 
+    def is_completed(self) -> bool | None:
+        return True
+
     def get_analysis_result_source(self, name: str) -> FixedDataSource | None:
         if name not in self._analysis_result_sources:
             return None
