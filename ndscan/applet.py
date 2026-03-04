@@ -52,6 +52,7 @@ class _MainWidget(PlotAreaWidget):
         persist: dict[str, bool],
         mods: Iterable[dict[str, Any]],
     ):
+        self.context.update_datasets(values, mods)
         self.root.data_changed(values, mods)
 
 

@@ -24,7 +24,7 @@ situations.)
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any, Optional
 
 import numpy
@@ -43,11 +43,13 @@ class Context(QtCore.QObject):
     """
 
     source_id_changed = QtCore.pyqtSignal(str)
+    datasets_changed = QtCore.pyqtSignal(object, object)
 
     def __init__(self, set_dataset: Callable[[str, Any], None] = None):
         super().__init__()
         self._set_dataset = set_dataset
         self._source_id = "<unknown>"
+        self._dataset_values: dict[str, Any] = {}
 
     def get_source_id(self):
         """Return a short string that helps the user to identify the data source.
@@ -74,6 +76,16 @@ class Context(QtCore.QObject):
         See: :meth:`is_online_master`.
         """
         self._set_dataset(key, value)
+
+    def update_datasets(
+        self, values: dict[str, Any], mods: Iterable[dict[str, Any]]
+    ) -> None:
+        """Update the latest known dataset view and notify listeners."""
+        self._dataset_values = values
+        self.datasets_changed.emit(values, mods)
+
+    def get_dataset_values(self) -> dict[str, Any]:
+        return self._dataset_values
 
 
 class AnnotationDataSource(QtCore.QObject):

@@ -591,6 +591,12 @@ class XY1DPlotWidget(SubplotMenuPanesWidget):
         for series in self.series:
             series.highlight_index(index)
         self.selected_point_model.set_source_index(index)
+        if (
+            index is not None
+            and self.auto_open_subscan_plots_on_selection
+            and self.subscan_roots
+        ):
+            self.open_all_subscan_plots()
 
     def _background_clicked(self):
         for series in self.series:

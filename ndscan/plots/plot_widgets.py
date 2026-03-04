@@ -101,8 +101,8 @@ class VerticalPanesWidget(pyqtgraph.GraphicsLayoutWidget):
     error = QtCore.pyqtSignal(str)
 
     #: Emitted when the user opened a subplot/… and the containing widget should show
-    #: the given widget in a new dock. Arguments are (RootWidget to show,
-    #: dock title).
+    #: the given widget in a new dock. Payload is either a RootWidget, or a tuple of
+    #: (parent RootWidget, child RootWidget) to request parent-aware placement.
     new_dock_requested = QtCore.pyqtSignal(object)
 
     #: Emitted after the dock containing this widget was closed by the user (if a
@@ -341,6 +341,10 @@ class SubplotMenuPanesWidget(ContextMenuPanesWidget):
         #: Maps subplot names to active plot widgets.
         self.subscan_plots: dict[str, VerticalPanesWidget] = {}
 
+        # If enabled, selecting a point in this plot automatically opens all subscan
+        # panes available for that selected point.
+        self.auto_open_subscan_plots_on_selection = True
+
     def closeEvent(self, ev):
         # Hide subplots as well when hiding the parent plot (i.e. self).
         for w in self.subscan_plots.values():
@@ -403,6 +407,12 @@ class SubplotMenuPanesWidget(ContextMenuPanesWidget):
         # This triggers the plot widget's closeEvent, which in turn emits was_closed(),
         # which in causes the dock to be removed.
         self.subscan_plots[name].close()
+
+    def open_all_subscan_plots(self):
+        """Open all subscan panes declared for the current point model."""
+        for name in self.subscan_roots.keys():
+            if name not in self.subscan_plots:
+                self.open_subscan_plot(name)
 
 
 # TODO: Use metaprogramming to avoid code duplication with SubscanMenuPanesWidget.

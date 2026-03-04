@@ -68,6 +68,23 @@ Current implementation direction:
 - `subscan_preview.*` datasets are also broadcast-only (non-archived), as nested
   ragged previews can be list-of-lists during a run
 
+### Ragged Archive Failure Summary
+
+- Intended ragged structures exist during execution:
+  - legacy aggregate subscan outputs (`scan_axis_*`, `scan_channel_*`)
+  - nested subscan previews (`subscan_preview.*`)
+- These must stay broadcast-visible for live inspection, but must not be archived.
+- A separate unintended path also existed: sink readbacks called `get_dataset(...)`
+  without `archive=False`, which caused non-archived datasets to be inserted into
+  ARTIQ's archive bucket during internal reads.
+- This showed up as archive keys like `point._channel__axis_0` /
+  `point._channel__channel_y` becoming ragged at HDF5 write time.
+- Current mitigation set:
+  - mark legacy aggregate channels as `archive_by_default=False`
+  - keep `subscan_preview.*` broadcast-only (`archive=False`)
+  - avoid copying non-archived child channels into parent `subscan_flat`
+  - force sink internal readbacks to use `get_dataset(..., archive=False)`.
+
 ### Future Scan Topology Requirements (Recorded)
 
 - Scan points should not assume a rectilinear grid.

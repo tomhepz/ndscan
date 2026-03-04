@@ -95,6 +95,24 @@ Policy for new schemas (`subscan_preview`, `subscan_flat`):
 - `subscan_preview.*` is broadcast-only (non-archived), because nested ragged
   previews can otherwise fail HDF5 writes at end-of-run.
 
+## Ragged Failure Root Cause Notes
+
+- Not all ragged values are bugs: some are intentional live/runtime structures.
+- Intentional ragged streams:
+  - legacy aggregate subscan channels (`scan_axis_*`, `scan_channel_*`)
+  - nested preview streams (`subscan_preview.*`)
+- Bug class we hit: unintended archive insertion from internal readbacks.
+- Mechanism: sink helper methods called `get_dataset(...)` without
+  `archive=False`, so ARTIQ `DatasetManager.get(..., archive=True)` pulled values
+  into `archive` even when channel write path was configured non-archived.
+- Symptom: HDF5 write-time failures with ragged keys in `archive/`, notably
+  `point._channel__axis_0` and `point._channel__channel_y`.
+- Mitigation now in code:
+  - readbacks in sinks use `get_dataset(..., archive=False)`
+  - preview stream is broadcast-only
+  - legacy aggregate channels are non-archived
+  - non-archived child channels are excluded from parent `subscan_flat`.
+
 This keeps names robust while preserving readability where needed.
 
 This note captures the minimum context needed to understand where ndscan currently:

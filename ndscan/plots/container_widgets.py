@@ -40,27 +40,59 @@ class PlotAreaWidget(pgda.DockArea):
         self.addDock(self._root_dock)
 
         self._root_dock.addWidget(self._root_widget)
+        self._widget_docks = {self._root_widget: self._root_dock}
+        self._child_widgets = {self._root_widget: []}
 
-    def _add_dock(self, widget: "RootWidget"):
+    def _add_dock(self, request):
+        if (
+            isinstance(request, tuple)
+            and len(request) == 2
+            and isinstance(request[0], RootWidget)
+        ):
+            parent_widget, widget = request
+        else:
+            parent_widget, widget = self._root_widget, request
+
         dock = pgda.Dock(
             widget.get_title(), autoOrientation=False, closable=True, widget=widget
         )
-        widget.was_closed.connect(lambda: self._was_closed_cb(dock))
+        widget.was_closed.connect(
+            lambda widget=widget, parent=parent_widget, dock=dock: self._was_closed_cb(
+                widget, parent, dock
+            )
+        )
         dock.sigClosed.connect(widget.close)
         widget.title_changed.connect(dock.setTitle)
 
-        _, docks = self.findAll()
-        if len(docks) > 1:
-            self.addDock(dock, position="bottom", relativeTo=next(reversed(docks)))
+        siblings = [
+            w
+            for w in self._child_widgets.get(parent_widget, [])
+            if w in self._widget_docks and self._widget_docks[w].container()
+        ]
+        if siblings:
+            self.addDock(
+                dock, position="bottom", relativeTo=self._widget_docks[siblings[-1]]
+            )
         else:
-            self.addDock(dock, position="right")
+            self.addDock(
+                dock,
+                position="right",
+                relativeTo=self._widget_docks.get(parent_widget, self._root_dock),
+            )
+        self._widget_docks[widget] = dock
+        self._child_widgets.setdefault(parent_widget, []).append(widget)
+        self._child_widgets.setdefault(widget, [])
 
-    def _was_closed_cb(self, dock):
+    def _was_closed_cb(self, widget, parent_widget, dock):
         # If container() is not None, then the dock is still open (e.g. when the dock
         # was closed from a context menu). Close it in that case. If it is already None,
         # the dock was closed with the close button, so we don't need to do anything.
         if dock.container():
             dock.close()
+
+        self._widget_docks.pop(widget, None)
+        children = self._child_widgets.get(parent_widget, [])
+        self._child_widgets[parent_widget] = [w for w in children if w is not widget]
 
     def _set_window_title(self, title):
         self.setWindowTitle(f"{title} – ndscan")
@@ -74,8 +106,8 @@ class RootWidget(QtWidgets.QWidget):
     """
 
     #: Emitted when the user opened a subplot/… and the containing widget should show
-    #: the given widget in a new dock. Arguments are (RootWidget to show,
-    #: dock title).
+    #: the given widget in a new dock. Payload is either a RootWidget, or a tuple of
+    #: (parent RootWidget, child RootWidget) to request parent-aware placement.
     new_dock_requested = QtCore.pyqtSignal(object)
 
     #: Emitted after the dock containing this widget was closed by the user (if a
@@ -152,8 +184,18 @@ class RootWidget(QtWidgets.QWidget):
             self.widget_stack.addWidget(self.plot_widget)
             self.plot_widget.error.connect(self._show_message)
             self.plot_widget.ready.connect(lambda: self._show(self.plot_widget))
-            self.plot_widget.new_dock_requested.connect(self.new_dock_requested)
+            self.plot_widget.new_dock_requested.connect(self._forward_new_dock_request)
             self.plot_widget.was_closed.connect(self.was_closed)
+
+    def _forward_new_dock_request(self, request):
+        if (
+            isinstance(request, tuple)
+            and len(request) == 2
+            and isinstance(request[0], RootWidget)
+        ):
+            self.new_dock_requested.emit(request)
+            return
+        self.new_dock_requested.emit((self, request))
 
     def _show(self, widget):
         self.widget_stack.setCurrentIndex(self.widget_stack.indexOf(widget))

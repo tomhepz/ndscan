@@ -533,6 +533,12 @@ class Image2DPlotWidget(SliceableMenuPanesWidget):
     def _highlight_point_at_index(self, source_idx: int | None):
         """Highlight the point at the given index of the source data."""
         self.selected_point_model.set_source_index(source_idx)
+        if (
+            source_idx is not None
+            and self.auto_open_subscan_plots_on_selection
+            and self.subscan_roots
+        ):
+            self.open_all_subscan_plots()
 
         if source_idx is None:
             self._highlighted_xy = (None, None)
