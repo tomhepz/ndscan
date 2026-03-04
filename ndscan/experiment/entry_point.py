@@ -180,6 +180,12 @@ class FragmentScanExperiment(EnvExperiment):
 
     def analyze(self):
         self.tlr.analyze()
+        # Run one more explicit check at the experiment wrapper level, as this is the
+        # last point before ARTIQ writes HDF5 results.
+        self.tlr._raise_on_non_rectangular_archived_data(
+            stage="FragmentScanExperiment.analyze",
+            raise_on_error=False,
+        )
 
 
 class ArgumentInterface(HasEnvironment):
@@ -438,33 +444,40 @@ class TopLevelRunner(HasEnvironment):
         return {c: s.get_all() for c, s in self._scan_result_sinks.items()}
 
     def analyze(self):
-        if self._coordinate_sinks is None:
-            # Continuous scan or got an exception early on, so there is no data to
-            # analyse – gracefully ignore this to keep FragmentScanExperiment
-            # implementation simple.
-            return
-        if not self._analyses:
-            return
+        try:
+            if self._coordinate_sinks is None:
+                # Continuous scan or got an exception early on, so there is no data to
+                # analyse – gracefully ignore this to keep FragmentScanExperiment
+                # implementation simple.
+                return
+            if not self._analyses:
+                return
 
-        annotations = []
-        coordinates = self._make_coordinate_dict()
-        values = self._make_value_dict()
-        for a in self._analyses:
-            annotations += a.execute(coordinates, values, self._annotation_context)
+            annotations = []
+            coordinates = self._make_coordinate_dict()
+            values = self._make_value_dict()
+            for a in self._analyses:
+                annotations += a.execute(coordinates, values, self._annotation_context)
 
-        if annotations:
-            # Replace existing (online-fit) annotations if any analysis produced custom
-            # ones. This could be made configurable in the future.
-            self.set_dataset(
-                self.dataset_prefix + "annotations",
-                dump_json(annotations),
-                broadcast=True,
+            if annotations:
+                # Replace existing (online-fit) annotations if any analysis produced custom
+                # ones. This could be made configurable in the future.
+                self.set_dataset(
+                    self.dataset_prefix + "annotations",
+                    dump_json(annotations),
+                    broadcast=True,
+                )
+
+            return {
+                name: channel.sink.get_last()
+                for name, channel in self._analysis_results.items()
+            }
+        finally:
+            # Always run this check, even if there are no analyses.
+            self._raise_on_non_rectangular_archived_data(
+                stage="TopLevelRunner.analyze",
+                raise_on_error=False,
             )
-
-        return {
-            name: channel.sink.get_last()
-            for name, channel in self._analysis_results.items()
-        }
 
     def _run_continuous(self):
         self._point_phase = False
@@ -571,7 +584,95 @@ class TopLevelRunner(HasEnvironment):
             )
 
     def _set_completed(self):
+        self._raise_on_non_rectangular_archived_data(stage="_set_completed")
         self.set_dataset(self.dataset_prefix + "completed", True, broadcast=True)
+
+    def _raise_on_non_rectangular_archived_data(
+        self,
+        stage: str = "",
+        raise_on_error: bool = True,
+    ) -> None:
+        dataset_mgr = getattr(self, "_HasEnvironment__dataset_mgr", None)
+        if dataset_mgr is None:
+            return
+
+        offenders = []
+        for bucket_name, bucket in (
+            ("datasets", dataset_mgr.local),
+            ("archive", dataset_mgr.archive),
+        ):
+            for key, value in bucket.items():
+                reason = self._describe_non_rectangular_sequence(value)
+                if reason is not None:
+                    offenders.append((bucket_name, key, reason))
+
+        if not offenders:
+            return
+
+        max_examples = 8
+        summary = "; ".join(
+            f"{bucket}/{key}: {reason}"
+            for bucket, key, reason in offenders[:max_examples]
+        )
+        if len(offenders) > max_examples:
+            summary += f"; ... {len(offenders) - max_examples} more"
+        if stage:
+            logger.error(
+                "Non-rectangular archived dataset(s) at %s: %s", stage, summary
+            )
+        else:
+            logger.error("Non-rectangular archived dataset(s): %s", summary)
+        if raise_on_error:
+            raise ValueError(
+                "Cannot archive non-rectangular datasets to HDF5. "
+                + "Offending dataset(s): "
+                + summary
+            )
+
+    def _describe_non_rectangular_sequence(self, value: Any) -> str | None:
+        if isinstance(value, (str, bytes, bytearray, dict)):
+            return None
+
+        if not self._is_sequence_like(value):
+            return None
+
+        try:
+            elements = list(value)
+        except TypeError:
+            return None
+
+        if not elements:
+            return None
+
+        element_is_sequence = [self._is_sequence_like(e) for e in elements]
+        if any(element_is_sequence) and not all(element_is_sequence):
+            return "mix of scalar and sequence elements"
+        if not all(element_is_sequence):
+            return None
+
+        lengths = []
+        for element in elements:
+            try:
+                lengths.append(len(element))
+            except TypeError:
+                return "contains non-sized nested element"
+        unique_lengths = sorted(set(lengths))
+        if len(unique_lengths) > 1:
+            return f"ragged nested lengths {unique_lengths}"
+
+        for element in elements:
+            reason = self._describe_non_rectangular_sequence(element)
+            if reason is not None:
+                return reason
+        return None
+
+    @staticmethod
+    def _is_sequence_like(value: Any) -> bool:
+        if isinstance(value, (str, bytes, bytearray, dict)):
+            return False
+        if isinstance(value, (list, tuple)):
+            return True
+        return hasattr(value, "__iter__") and hasattr(value, "__len__")
 
     def _broadcast_metadata(self):
         def push(name, value):

@@ -101,6 +101,32 @@ class FragmentScanExpCase(HasEnvironmentCase):
         self.assertEqual(d("fragment_fqn"), "fixtures.AddOneFragment")
         self.assertEqual(d("source_id"), "system_0")
 
+    def test_reports_offending_non_rectangular_archive_key(self):
+        exp = self.create(ScanAddOneExp)
+        exp.prepare()
+
+        dataset_mgr = exp._HasEnvironment__dataset_mgr
+        dataset_mgr.local["ndscan.rid_0.debug_bad"] = [[0.0], [0.0, 1.0]]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"datasets/ndscan\.rid_0\.debug_bad",
+        ):
+            exp.tlr._raise_on_non_rectangular_archived_data()
+
+    def test_reports_offending_non_rectangular_archive_bucket_key(self):
+        exp = self.create(ScanAddOneExp)
+        exp.prepare()
+
+        dataset_mgr = exp._HasEnvironment__dataset_mgr
+        dataset_mgr.archive["ndscan.rid_0.debug_bad_archive"] = [[0.0], [0.0, 1.0]]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"archive/ndscan\.rid_0\.debug_bad_archive",
+        ):
+            exp.tlr._raise_on_non_rectangular_archived_data()
+
     def test_run_time_series_scan(self):
         # Make fragment that fails device_setup() as many times as allowed to test
         # whether counters are correctly reset between points in time series scan.
