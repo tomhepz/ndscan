@@ -56,6 +56,20 @@ class KernelRelationFragment(ExpFragment):
 ScanKernelRelationExp = make_fragment_scan_exp(KernelRelationFragment)
 
 
+class OptionalRelationFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("p", FloatParam, "p", default=0.0)
+        self.setattr_param("q", FloatParam, "q", default=0.0)
+        self.register_param_relation("q", [self.p], lambda p: p**2 + 4.0)
+        self.setattr_result("result", FloatChannel)
+
+    def run_once(self):
+        self.result.push(self.q.get())
+
+
+ScanOptionalRelationExp = make_fragment_scan_exp(OptionalRelationFragment)
+
+
 class TestAggregateExpFragment(HasEnvironmentCase):
     def test_aggregate(self):
         parent = self.create(AddOneAggregate, [])
@@ -122,6 +136,77 @@ class FragmentScanExpCase(HasEnvironmentCase):
         exp.prepare()
         with self.assertRaisesRegex(NotImplementedError, "bind_param_relation"):
             exp.run()
+
+    def test_run_1d_scan_with_optional_relation_inactive(self):
+        exp = self.create(ScanOptionalRelationExp)
+        exp.args._params["scan"]["axes"].append(
+            {
+                "type": "list",
+                "range": {
+                    "values": [1.0, 2.0, 3.0],
+                    "randomise_order": False,
+                },
+                "fqn": "test_experiment_entrypoint.OptionalRelationFragment.q",
+                "path": "*",
+            }
+        )
+
+        exp.prepare()
+        exp.run()
+
+        def d(key):
+            return self.dataset_db.get("ndscan.rid_0." + key)
+
+        self.assertEqual(d("points.axis_0"), [1.0, 2.0, 3.0])
+        self.assertEqual(d("points.channel_result"), [1.0, 2.0, 3.0])
+        self.assertNotIn("ndscan.rid_0.points.param_q", self.dataset_db.data)
+
+    def test_run_1d_scan_with_optional_relation_active(self):
+        exp = self.create(ScanOptionalRelationExp)
+        exp.args._params["scan"]["axes"].append(
+            {
+                "type": "list",
+                "range": {
+                    "values": [3.0, 6.0, 7.0],
+                    "randomise_order": False,
+                },
+                "fqn": "test_experiment_entrypoint.OptionalRelationFragment.p",
+                "path": "*",
+            }
+        )
+
+        exp.prepare()
+        exp.run()
+
+        def d(key):
+            return self.dataset_db.get("ndscan.rid_0." + key)
+
+        self.assertEqual(d("points.axis_0"), [3.0, 6.0, 7.0])
+        self.assertEqual(d("points.channel_result"), [13.0, 40.0, 53.0])
+        self.assertEqual(d("points.param_q"), [13.0, 40.0, 53.0])
+
+    def test_optional_relation_conflict_when_target_is_explicit(self):
+        exp = self.create(ScanOptionalRelationExp)
+        exp.args._params["scan"]["axes"].append(
+            {
+                "type": "list",
+                "range": {"values": [3.0], "randomise_order": False},
+                "fqn": "test_experiment_entrypoint.OptionalRelationFragment.p",
+                "path": "*",
+            }
+        )
+        exp.args._params["scan"]["axes"].append(
+            {
+                "type": "list",
+                "range": {"values": [1.0], "randomise_order": False},
+                "fqn": "test_experiment_entrypoint.OptionalRelationFragment.q",
+                "path": "*",
+            }
+        )
+        with self.assertRaisesRegex(
+            ValueError, "Optional relation target is explicitly driven"
+        ):
+            exp.prepare()
 
 
     def test_wrong_fqn_override(self):
@@ -446,6 +531,14 @@ class RunOnceCase(HasEnvironmentCase):
         fragment = self.create(KernelRelationFragment, [])
         with self.assertRaisesRegex(NotImplementedError, "bind_param_relation"):
             run_fragment_once(fragment)
+
+    def test_run_once_host_with_optional_relation_active(self):
+        fragment = self.create(OptionalRelationFragment, [])
+        store = FloatParamStore("...", 6.0)
+        results = run_fragment_once(
+            fragment, overrides={fragment.fqn + ".p": [("*", store)]}
+        )
+        self.assertEqual(results, {fragment.result: 40.0})
 
 
     def test_run_once_host(self):

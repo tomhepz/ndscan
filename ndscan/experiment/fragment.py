@@ -46,6 +46,14 @@ class _ParamRelation:
     deps: tuple[ParamHandle, ...] # Which parameters are the inputs to the function
     fn: Callable[..., Any] # The function.
 
+
+@dataclass
+class _OptionalParamRelation:
+    target: ParamHandle
+    deps: tuple[ParamHandle, ...]
+    fn: Callable[..., Any]
+    activation_deps: tuple[ParamHandle, ...]
+
 class Fragment(HasEnvironment):
     """Main building block."""
 
@@ -81,6 +89,8 @@ class Fragment(HasEnvironment):
 
         #: Per-shot computed parameter relations
         self._param_relations: list[_ParamRelation] = []
+        self._optional_param_relations: list[_OptionalParamRelation] = []
+        self._active_optional_param_relations: list[_OptionalParamRelation] = []
 
         #: Maps full path of own result channels to ResultChannel instances.
         self._result_channels = {}
@@ -640,6 +650,76 @@ class Fragment(HasEnvironment):
         # Add to list of param relations to evaluate later (at runtime in scan_runner)
         self._param_relations.append(_ParamRelation(target, deps_tuple, fn))
 
+    def register_param_relation(
+        self,
+        param_name: str,
+        deps: list[ParamHandle] | tuple[ParamHandle, ...],
+        fn: Callable[..., Any],
+        *,
+        activation_deps: list[ParamHandle] | tuple[ParamHandle, ...] | None = None,
+    ) -> None:
+        """Register an optional computed parameter relation.
+
+        Unlike :meth:`bind_param_relation`, this does not remove the target from the
+        free-parameter set at build time. The relation is activated per run via
+        :meth:`_activate_optional_param_relations`.
+        """
+        assert self._building, (
+            "Can only call register_param_relation during build_fragment"
+        )
+        assert isinstance(param_name, str), "param_name must be a string"
+        assert param_name.isidentifier(), "Parameter name must be valid Python identifier"
+        assert callable(fn), "fn must be callable"
+
+        deps_tuple = tuple(deps)
+        assert deps_tuple, "Requires at least one dependency handle"
+
+        assert self._free_params.get(param_name, None) is not None, (
+            f"Not a free parameter: '{param_name}'"
+        )
+        target = getattr(self, param_name)
+        assert target not in deps_tuple, "Target cannot be a dependency"
+
+        for dep in deps_tuple:
+            assert isinstance(dep, ParamHandle), (
+                "All dependencies must be ParamHandle instances"
+            )
+
+        if activation_deps is None:
+            activation_deps_tuple = deps_tuple
+        else:
+            activation_deps_tuple = tuple(activation_deps)
+            assert activation_deps_tuple, "activation_deps must not be empty"
+        for dep in activation_deps_tuple:
+            assert isinstance(dep, ParamHandle), (
+                "All activation dependencies must be ParamHandle instances"
+            )
+
+        for rel in self._optional_param_relations:
+            assert rel.target is not target, "Optional relation for target already registered."
+
+        self._optional_param_relations.append(
+            _OptionalParamRelation(target, deps_tuple, fn, activation_deps_tuple)
+        )
+
+    def _activate_optional_param_relations(self, explicit_fqns: set[str]) -> None:
+        self._active_optional_param_relations.clear()
+        for rel in self._optional_param_relations:
+            is_active = any(
+                dep.parameter.fqn in explicit_fqns for dep in rel.activation_deps
+            )
+            if not is_active:
+                continue
+            if rel.target.parameter.fqn in explicit_fqns:
+                raise ValueError(
+                    "Optional relation target is explicitly driven in the same run: "
+                    + rel.target.parameter.fqn
+                )
+            self._active_optional_param_relations.append(rel)
+        for s in self._subfragments:
+            if s in self._detached_subfragments:
+                continue
+            s._activate_optional_param_relations(explicit_fqns)
 
     def _apply_param_relations(self) -> None:
         """
@@ -661,6 +741,20 @@ class Fragment(HasEnvironment):
             # Perform the function evaluation and set target store to output
             rel.target._store.set_value(rel.fn(*args))
 
+        for rel in self._active_optional_param_relations:
+            if rel.target._store is None:
+                raise RuntimeError(
+                    f"Target store not initialised for relation target '{rel.target}'"
+                )
+            args = []
+            for dep in rel.deps:
+                if dep._store is None:
+                    raise RuntimeError(
+                        f"Dependency store not initialised for relation dependency '{dep}'"
+                    )
+                args.append(dep.get())
+            rel.target._store.set_value(rel.fn(*args))
+
         # recursively apply to all subfragments of this fragment
         for s in self._subfragments:
             if s in self._detached_subfragments:
@@ -668,7 +762,7 @@ class Fragment(HasEnvironment):
             s._apply_param_relations()
 
     def _has_param_relations(self) -> bool:
-        if self._param_relations:
+        if self._param_relations or self._active_optional_param_relations:
             return True
         for s in self._subfragments:
             if s in self._detached_subfragments:
@@ -681,6 +775,9 @@ class Fragment(HasEnvironment):
         self, targets: dict[str, ParamHandle]
     ) -> None:
         for rel in self._param_relations:
+            key = "/".join(rel.target.owner._fragment_path + [rel.target.name])
+            targets[key] = rel.target
+        for rel in self._active_optional_param_relations:
             key = "/".join(rel.target.owner._fragment_path + [rel.target.name])
             targets[key] = rel.target
         for s in self._subfragments:

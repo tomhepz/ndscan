@@ -161,6 +161,9 @@ class FragmentScanExperiment(EnvExperiment):
                         + "since made to the experiment code; try "
                         + "Recompute All Arguments)."
                     )
+        self.fragment._activate_optional_param_relations(
+            _collect_explicit_param_fqns(param_stores)
+        )
 
         self.tlr = TopLevelRunner(
             self,
@@ -288,6 +291,16 @@ class ArgumentInterface(HasEnvironment):
             "skip_on_persistent_transitory_error", False
         )
         return spec, no_axes_mode, skip_on_persistent_transitory_error
+
+
+def _collect_explicit_param_fqns(
+    param_stores: dict[str, list[tuple[str, ParamStore]]]
+) -> set[str]:
+    explicit = set[str]()
+    for fqn, pairs in param_stores.items():
+        if any(store._handles for _path, store in pairs):
+            explicit.add(fqn)
+    return explicit
 
 
 class TopLevelRunner(HasEnvironment):
@@ -902,6 +915,9 @@ def run_fragment_once(
         fragment, fragment, max_rtio_underflow_retries, max_transitory_error_retries
     )
     fragment.init_params(overrides=overrides)
+    fragment._activate_optional_param_relations(
+        _collect_explicit_param_fqns(overrides)
+    )
     fragment.prepare()
     try:
         while True:
