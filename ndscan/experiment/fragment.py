@@ -53,6 +53,7 @@ class _OptionalParamRelation:
     deps: tuple[ParamHandle, ...]
     fn: Callable[..., Any]
     activation_deps: tuple[ParamHandle, ...]
+    activation_mode: str
 
 class Fragment(HasEnvironment):
     """Main building block."""
@@ -657,6 +658,7 @@ class Fragment(HasEnvironment):
         fn: Callable[..., Any],
         *,
         activation_deps: list[ParamHandle] | tuple[ParamHandle, ...] | None = None,
+        activation_mode: str = "any",
     ) -> None:
         """Register an optional computed parameter relation.
 
@@ -670,6 +672,9 @@ class Fragment(HasEnvironment):
         assert isinstance(param_name, str), "param_name must be a string"
         assert param_name.isidentifier(), "Parameter name must be valid Python identifier"
         assert callable(fn), "fn must be callable"
+        assert activation_mode in ("any", "all"), (
+            "activation_mode must be 'any' or 'all'"
+        )
 
         deps_tuple = tuple(deps)
         assert deps_tuple, "Requires at least one dependency handle"
@@ -699,15 +704,22 @@ class Fragment(HasEnvironment):
             assert rel.target is not target, "Optional relation for target already registered."
 
         self._optional_param_relations.append(
-            _OptionalParamRelation(target, deps_tuple, fn, activation_deps_tuple)
+            _OptionalParamRelation(
+                target, deps_tuple, fn, activation_deps_tuple, activation_mode
+            )
         )
 
     def _activate_optional_param_relations(self, explicit_fqns: set[str]) -> None:
         self._active_optional_param_relations.clear()
         for rel in self._optional_param_relations:
-            is_active = any(
-                dep.parameter.fqn in explicit_fqns for dep in rel.activation_deps
-            )
+            if rel.activation_mode == "all":
+                is_active = all(
+                    dep.parameter.fqn in explicit_fqns for dep in rel.activation_deps
+                )
+            else:
+                is_active = any(
+                    dep.parameter.fqn in explicit_fqns for dep in rel.activation_deps
+                )
             if not is_active:
                 continue
             if rel.target.parameter.fqn in explicit_fqns:

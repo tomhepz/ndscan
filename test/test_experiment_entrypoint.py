@@ -70,6 +70,23 @@ class OptionalRelationFragment(ExpFragment):
 ScanOptionalRelationExp = make_fragment_scan_exp(OptionalRelationFragment)
 
 
+class OptionalRelationAllFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("p", FloatParam, "p", default=0.0)
+        self.setattr_param("r", FloatParam, "r", default=0.0)
+        self.setattr_param("q", FloatParam, "q", default=0.0)
+        self.register_param_relation(
+            "q", [self.p, self.r], lambda p, r: p + r, activation_mode="all"
+        )
+        self.setattr_result("result", FloatChannel)
+
+    def run_once(self):
+        self.result.push(self.q.get())
+
+
+ScanOptionalRelationAllExp = make_fragment_scan_exp(OptionalRelationAllFragment)
+
+
 class TestAggregateExpFragment(HasEnvironmentCase):
     def test_aggregate(self):
         parent = self.create(AddOneAggregate, [])
@@ -207,6 +224,49 @@ class FragmentScanExpCase(HasEnvironmentCase):
             ValueError, "Optional relation target is explicitly driven"
         ):
             exp.prepare()
+
+    def test_run_1d_scan_with_optional_relation_all_inactive(self):
+        exp = self.create(ScanOptionalRelationAllExp)
+        exp.args._params["scan"]["axes"].append(
+            {
+                "type": "list",
+                "range": {"values": [3.0, 6.0], "randomise_order": False},
+                "fqn": "test_experiment_entrypoint.OptionalRelationAllFragment.p",
+                "path": "*",
+            }
+        )
+
+        exp.prepare()
+        exp.run()
+
+        def d(key):
+            return self.dataset_db.get("ndscan.rid_0." + key)
+
+        self.assertEqual(d("points.channel_result"), [0.0, 0.0])
+        self.assertNotIn("ndscan.rid_0.points.param_q", self.dataset_db.data)
+
+    def test_run_1d_scan_with_optional_relation_all_active_via_override(self):
+        exp = self.create(ScanOptionalRelationAllExp)
+        exp.args._params["scan"]["axes"].append(
+            {
+                "type": "list",
+                "range": {"values": [3.0, 6.0], "randomise_order": False},
+                "fqn": "test_experiment_entrypoint.OptionalRelationAllFragment.p",
+                "path": "*",
+            }
+        )
+        exp.args._params["overrides"][
+            "test_experiment_entrypoint.OptionalRelationAllFragment.r"
+        ] = [{"path": "*", "value": 2.0}]
+
+        exp.prepare()
+        exp.run()
+
+        def d(key):
+            return self.dataset_db.get("ndscan.rid_0." + key)
+
+        self.assertEqual(d("points.channel_result"), [5.0, 8.0])
+        self.assertEqual(d("points.param_q"), [5.0, 8.0])
 
 
     def test_wrong_fqn_override(self):
@@ -539,6 +599,31 @@ class RunOnceCase(HasEnvironmentCase):
             fragment, overrides={fragment.fqn + ".p": [("*", store)]}
         )
         self.assertEqual(results, {fragment.result: 40.0})
+
+    def test_run_once_host_with_optional_relation_all(self):
+        fragment = self.create(OptionalRelationAllFragment, [])
+        p_store = FloatParamStore("...", 6.0)
+        r_store = FloatParamStore("...", 4.0)
+
+        # With only one explicit dependency, relation stays inactive.
+        self.assertEqual(
+            run_fragment_once(
+                fragment, overrides={fragment.fqn + ".p": [("*", p_store)]}
+            ),
+            {fragment.result: 0.0},
+        )
+
+        # With both dependencies explicit, relation activates.
+        self.assertEqual(
+            run_fragment_once(
+                fragment,
+                overrides={
+                    fragment.fqn + ".p": [("*", p_store)],
+                    fragment.fqn + ".r": [("*", r_store)],
+                },
+            ),
+            {fragment.result: 10.0},
+        )
 
 
     def test_run_once_host(self):
