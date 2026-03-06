@@ -710,29 +710,32 @@ class Fragment(HasEnvironment):
             )
         )
 
-    def _activate_optional_param_relations(self, explicit_fqns: set[str]) -> None:
+    def _activate_optional_param_relations(
+        self, explicit_param_targets: set[tuple[str, str]]
+    ) -> None:
+        def is_explicit(handle: ParamHandle) -> bool:
+            return (handle.parameter.fqn, handle.owner._stringize_path()) in explicit_param_targets
+
         self._active_optional_param_relations.clear()
         for rel in self._optional_param_relations:
             if rel.activation_mode == "all":
-                is_active = all(
-                    dep.parameter.fqn in explicit_fqns for dep in rel.activation_deps
-                )
+                is_active = all(is_explicit(dep) for dep in rel.activation_deps)
             else:
-                is_active = any(
-                    dep.parameter.fqn in explicit_fqns for dep in rel.activation_deps
-                )
+                is_active = any(is_explicit(dep) for dep in rel.activation_deps)
             if not is_active:
                 continue
-            if rel.target.parameter.fqn in explicit_fqns:
+            if is_explicit(rel.target):
                 raise ValueError(
                     "Optional relation target is explicitly driven in the same run: "
                     + rel.target.parameter.fqn
+                    + "@"
+                    + rel.target.owner._stringize_path()
                 )
             self._active_optional_param_relations.append(rel)
         for s in self._subfragments:
             if s in self._detached_subfragments:
                 continue
-            s._activate_optional_param_relations(explicit_fqns)
+            s._activate_optional_param_relations(explicit_param_targets)
 
     def _clear_runtime_param_relations(self) -> None:
         self._runtime_param_relations.clear()

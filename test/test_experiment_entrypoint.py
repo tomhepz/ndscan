@@ -88,6 +88,25 @@ class OptionalRelationAllFragment(ExpFragment):
 ScanOptionalRelationAllExp = make_fragment_scan_exp(OptionalRelationAllFragment)
 
 
+class SiblingOptionalRelationChild(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("p", FloatParam, "p", default=0.0)
+        self.setattr_param("q", FloatParam, "q", default=0.0)
+        self.register_param_relation("q", [self.p], lambda p: p + 1.0)
+
+
+class SiblingOptionalRelationParent(ExpFragment):
+    def build_fragment(self):
+        self.setattr_fragment("a", SiblingOptionalRelationChild)
+        self.setattr_fragment("b", SiblingOptionalRelationChild)
+        self.setattr_result("a_q", FloatChannel)
+        self.setattr_result("b_q", FloatChannel)
+
+    def run_once(self):
+        self.a_q.push(self.a.q.get())
+        self.b_q.push(self.b.q.get())
+
+
 class UiRelationFragment(ExpFragment):
     def build_fragment(self):
         self.setattr_param("p", FloatParam, "p", default=0.0)
@@ -815,6 +834,32 @@ class RunOnceCase(HasEnvironmentCase):
             ),
             {fragment.result: 10.0},
         )
+
+    def test_run_once_optional_relation_activation_is_path_specific(self):
+        fragment = self.create(SiblingOptionalRelationParent, [])
+        p_fqn = "test_experiment_entrypoint.SiblingOptionalRelationChild.p"
+        results = run_fragment_once(
+            fragment,
+            overrides={
+                p_fqn: [("a", FloatParamStore(("id", "a"), 6.0))],
+            },
+        )
+        self.assertEqual(results[fragment.a_q], 7.0)
+        self.assertEqual(results[fragment.b_q], 0.0)
+
+    def test_run_once_optional_relation_target_conflict_is_path_specific(self):
+        fragment = self.create(SiblingOptionalRelationParent, [])
+        p_fqn = "test_experiment_entrypoint.SiblingOptionalRelationChild.p"
+        q_fqn = "test_experiment_entrypoint.SiblingOptionalRelationChild.q"
+        results = run_fragment_once(
+            fragment,
+            overrides={
+                p_fqn: [("a", FloatParamStore(("id", "a"), 6.0))],
+                q_fqn: [("b", FloatParamStore(("id", "b"), 9.0))],
+            },
+        )
+        self.assertEqual(results[fragment.a_q], 7.0)
+        self.assertEqual(results[fragment.b_q], 9.0)
 
 
     def test_run_once_host(self):

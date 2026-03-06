@@ -169,10 +169,10 @@ class FragmentScanExperiment(EnvExperiment):
                         + "since made to the experiment code; try "
                         + "Recompute All Arguments)."
                     )
-        explicit_fqns = _collect_explicit_param_fqns(param_stores)
-        self.fragment._activate_optional_param_relations(explicit_fqns)
+        explicit_param_targets = _collect_explicit_param_targets(param_stores)
+        self.fragment._activate_optional_param_relations(explicit_param_targets)
         _activate_scan_arg_param_relations(
-            self.fragment, self.args.get_scan_relation_specs(), explicit_fqns
+            self.fragment, self.args.get_scan_relation_specs(), explicit_param_targets
         )
 
         self.tlr = TopLevelRunner(
@@ -308,13 +308,14 @@ class ArgumentInterface(HasEnvironment):
         return scan.get("relations", [])
 
 
-def _collect_explicit_param_fqns(
+def _collect_explicit_param_targets(
     param_stores: dict[str, list[tuple[str, ParamStore]]]
-) -> set[str]:
-    explicit = set[str]()
-    for fqn, pairs in param_stores.items():
-        if any(store._handles for _path, store in pairs):
-            explicit.add(fqn)
+) -> set[tuple[str, str]]:
+    explicit = set[tuple[str, str]]()
+    for pairs in param_stores.values():
+        for _path, store in pairs:
+            for handle in store._handles:
+                explicit.add((handle.parameter.fqn, handle.owner._stringize_path()))
     return explicit
 
 
@@ -487,11 +488,19 @@ def _extract_relation_deps_and_expr(
 def _is_relation_active(
     activation_refs: list[_RelationParamRef],
     activation_mode: str,
-    explicit_fqns: set[str],
+    explicit_param_targets: set[tuple[str, str]],
 ) -> bool:
+    def ref_matches_explicit(ref: _RelationParamRef) -> bool:
+        for fqn, path in explicit_param_targets:
+            if fqn != ref.fqn:
+                continue
+            if path_matches_spec(path.split("/"), ref.path):
+                return True
+        return False
+
     if not activation_refs:
         return True
-    matches = [ref.fqn in explicit_fqns for ref in activation_refs]
+    matches = [ref_matches_explicit(ref) for ref in activation_refs]
     if activation_mode == "all":
         return all(matches)
     return any(matches)
@@ -500,7 +509,7 @@ def _is_relation_active(
 def _activate_scan_arg_param_relations(
     fragment: Fragment,
     relation_specs: list[dict[str, Any]],
-    explicit_fqns: set[str],
+    explicit_param_targets: set[tuple[str, str]],
 ) -> None:
     if not relation_specs:
         return
@@ -544,12 +553,19 @@ def _activate_scan_arg_param_relations(
                 for j, s in enumerate(activation_dep_specs)
             ]
 
-        if not _is_relation_active(activation_refs, activation_mode, explicit_fqns):
+        if not _is_relation_active(
+            activation_refs, activation_mode, explicit_param_targets
+        ):
             continue
-        if target.fqn in explicit_fqns:
+        if any(
+            fqn == target.fqn and path_matches_spec(path.split("/"), target.path)
+            for fqn, path in explicit_param_targets
+        ):
             raise ValueError(
                 "Optional relation target is explicitly driven in the same run: "
                 + target.fqn
+                + "@"
+                + target.path
             )
 
         try:
@@ -1185,7 +1201,7 @@ def run_fragment_once(
     )
     fragment.init_params(overrides=overrides)
     fragment._activate_optional_param_relations(
-        _collect_explicit_param_fqns(overrides)
+        _collect_explicit_param_targets(overrides)
     )
     fragment.prepare()
     try:
