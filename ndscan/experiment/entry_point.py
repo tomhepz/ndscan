@@ -376,25 +376,43 @@ def _replace_ident(expr: str, old: str, new: str) -> str:
     return re.sub(pattern, new, expr)
 
 
-def _build_free_param_handle_index(
+def _build_free_param_handle_indexes(
     fragment: Fragment,
-) -> dict[str, list[ParamHandle]]:
-    by_fqn = dict[str, list[ParamHandle]]()
-    fragment._collect_free_param_handles(by_fqn)
-    return by_fqn
+) -> tuple[dict[str, list[ParamHandle]], dict[str, list[ParamHandle]]]:
+    attached = dict[str, list[ParamHandle]]()
+    fragment._collect_free_param_handles(attached, include_detached=False)
+    all_handles = dict[str, list[ParamHandle]]()
+    fragment._collect_free_param_handles(all_handles, include_detached=True)
+    return attached, all_handles
 
 
 def _resolve_relation_handle(
-    ref: _RelationParamRef, handle_index: dict[str, list[ParamHandle]]
+    ref: _RelationParamRef,
+    attached_index: dict[str, list[ParamHandle]],
+    all_handles_index: dict[str, list[ParamHandle]],
 ) -> ParamHandle:
-    candidates = handle_index.get(ref.fqn, [])
+    all_candidates = all_handles_index.get(ref.fqn, [])
+    all_matches = [
+        h for h in all_candidates if path_matches_spec(h.owner._fragment_path, ref.path)
+    ]
+    if not all_matches:
+        raise ScanSpecError(
+            "Relation references parameter with no matching free handle: "
+            + f"{ref.fqn}@{ref.path}"
+        )
+
+    candidates = attached_index.get(ref.fqn, [])
     matches = [
         h for h in candidates if path_matches_spec(h.owner._fragment_path, ref.path)
     ]
     if not matches:
+        detached_paths = ", ".join(
+            sorted(h.owner._stringize_path() for h in all_matches)
+        )
         raise ScanSpecError(
-            "Relation references parameter with no matching free handle: "
-            + f"{ref.fqn}@{ref.path}"
+            "Relation references detached subfragment parameter, which is currently "
+            "unsupported in scan.relations: "
+            + f"{ref.fqn}@{ref.path}. Detached matches: {detached_paths}"
         )
     if len(matches) > 1:
         match_paths = ", ".join(sorted(h.owner._stringize_path() for h in matches))
@@ -489,7 +507,7 @@ def _activate_scan_arg_param_relations(
     if not isinstance(relation_specs, list):
         raise ScanSpecError("scan.relations must be a list")
 
-    handle_index = _build_free_param_handle_index(fragment)
+    attached_index, all_handles_index = _build_free_param_handle_indexes(fragment)
     for i, relation_spec in enumerate(relation_specs):
         relation_context = f"scan.relations[{i}]"
         if not isinstance(relation_spec, dict):
@@ -539,8 +557,13 @@ def _activate_scan_arg_param_relations(
         except RelationExpressionError as e:
             raise ScanSpecError(f"{relation_context}: {e}") from None
 
-        target_handle = _resolve_relation_handle(target, handle_index)
-        dep_handles = tuple(_resolve_relation_handle(dep, handle_index) for dep in dep_refs)
+        target_handle = _resolve_relation_handle(
+            target, attached_index, all_handles_index
+        )
+        dep_handles = tuple(
+            _resolve_relation_handle(dep, attached_index, all_handles_index)
+            for dep in dep_refs
+        )
         if any(d is target_handle for d in dep_handles):
             raise ScanSpecError(
                 f"{relation_context}: target parameter appears in its dependency list"

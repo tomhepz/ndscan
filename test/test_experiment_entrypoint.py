@@ -102,6 +102,29 @@ class UiRelationFragment(ExpFragment):
 ScanUiRelationExp = make_fragment_scan_exp(UiRelationFragment)
 
 
+class DetachedRelationLeafFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("x", FloatParam, "x", default=0.0)
+        self.setattr_result("leaf_result", FloatChannel)
+
+    def run_once(self):
+        self.leaf_result.push(self.x.get())
+
+
+class DetachedRelationParentFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_fragment("child", DetachedRelationLeafFragment)
+        self.detach_fragment(self.child)
+        self.setattr_param("p", FloatParam, "p", default=0.0)
+        self.setattr_result("result", FloatChannel)
+
+    def run_once(self):
+        self.result.push(self.p.get())
+
+
+ScanDetachedRelationParentExp = make_fragment_scan_exp(DetachedRelationParentFragment)
+
+
 class TestAggregateExpFragment(HasEnvironmentCase):
     def test_aggregate(self):
         parent = self.create(AddOneAggregate, [])
@@ -252,6 +275,29 @@ class FragmentScanExpCase(HasEnvironmentCase):
         ]
 
         with self.assertRaises(ScanSpecError):
+            exp.prepare()
+
+    def test_ui_relation_rejects_detached_subfragment_target(self):
+        exp = self.create(ScanDetachedRelationParentExp)
+        p_fqn = "test_experiment_entrypoint.DetachedRelationParentFragment.p"
+        x_fqn = "test_experiment_entrypoint.DetachedRelationLeafFragment.x"
+        exp.args._params["scan"]["axes"].append(
+            {
+                "type": "list",
+                "range": {"values": [1.0], "randomise_order": False},
+                "fqn": p_fqn,
+                "path": "*",
+            }
+        )
+        exp.args._params["scan"]["relations"] = [
+            {
+                "target": {"fqn": x_fqn, "path": "child"},
+                "deps": [{"fqn": p_fqn, "path": "*", "alias": "p"}],
+                "expr": "p + 1",
+            }
+        ]
+
+        with self.assertRaisesRegex(ScanSpecError, "detached subfragment parameter"):
             exp.prepare()
 
     def test_run_1d_scan_with_param_relation(self):

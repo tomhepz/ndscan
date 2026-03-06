@@ -1048,14 +1048,20 @@ class Fragment(HasEnvironment):
         return [getattr(self, name)] + self._rebound_subfragment_params.get(name, [])
 
     def _collect_free_param_handles(
-        self, handles_by_fqn: dict[str, list[ParamHandle]]
+        self,
+        handles_by_fqn: dict[str, list[ParamHandle]],
+        include_detached: bool = False,
     ) -> None:
         for name, param in self._free_params.items():
             handles = self._get_all_handles_for_param(name)
             if handles:
                 handles_by_fqn.setdefault(param.fqn, []).extend(handles)
         for s in self._subfragments:
-            s._collect_free_param_handles(handles_by_fqn)
+            if not include_detached and s in self._detached_subfragments:
+                continue
+            s._collect_free_param_handles(
+                handles_by_fqn, include_detached=include_detached
+            )
 
     def _stringize_path(self) -> str:
         return "/".join(self._fragment_path)
