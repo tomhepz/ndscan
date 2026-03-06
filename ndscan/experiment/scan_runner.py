@@ -18,7 +18,7 @@ from artiq.language import HasEnvironment, host_only, kernel, kernel_from_string
 
 from .default_analysis import AnnotationContext, DefaultAnalysis
 from .fragment import ExpFragment, RestartKernelTransitoryError, TransitoryError
-from .parameters import ParamStore
+from .parameters import ParamHandle, ParamStore
 from .result_channels import ResultChannel, ResultSink, SingleUseSink
 from .scan_generator import ScanGenerator, ScanOptions, generate_points
 from .utils import is_kernel
@@ -98,7 +98,11 @@ class ScanRunner(HasEnvironment):
         self.setattr_device("scheduler")
 
     def run(
-        self, fragment: ExpFragment, spec: ScanSpec, axis_sinks: list[ResultSink]
+        self,
+        fragment: ExpFragment,
+        spec: ScanSpec,
+        axis_sinks: list[ResultSink],
+        param_sinks: list[tuple[ParamHandle, ResultSink]] | None = None,
     ) -> None:
         """Run a scan of the given fragment, with axes as specified.
 
@@ -110,7 +114,7 @@ class ScanRunner(HasEnvironment):
             coordinates for each scan point to, matching ``scan.axes``.
         """
         # TODO: Support parameters which require host_setup() when changed.
-        self.setup(fragment, spec.axes, axis_sinks)
+        self.setup(fragment, spec.axes, axis_sinks, param_sinks)
         self.set_points(generate_points(spec.generators, spec.options))
         while True:
             # After every pause(), pull in dataset changes (immediately as well to catch
@@ -133,7 +137,11 @@ class ScanRunner(HasEnvironment):
             self.scheduler.pause()
 
     def setup(
-        self, fragment: ExpFragment, axes: list[ScanAxis], axis_sinks: list[ResultSink]
+        self,
+        fragment: ExpFragment,
+        axes: list[ScanAxis],
+        axis_sinks: list[ResultSink],
+        param_sinks: list[tuple[ParamHandle, ResultSink]] | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -221,11 +229,16 @@ class ResultBatcher:
 
 class HostScanRunner(ScanRunner):
     def setup(
-        self, fragment: ExpFragment, axes: list[ScanAxis], axis_sinks: list[ResultSink]
+        self,
+        fragment: ExpFragment,
+        axes: list[ScanAxis],
+        axis_sinks: list[ResultSink],
+        param_sinks: list[tuple[ParamHandle, ResultSink]] | None = None,
     ) -> None:
         self._fragment = fragment
         self._axes = axes
         self._axis_sinks = axis_sinks
+        self._param_sinks = [] if param_sinks is None else param_sinks
 
     def set_points(self, points: Iterator[tuple]) -> None:
         self._points = points
@@ -254,6 +267,8 @@ class HostScanRunner(ScanRunner):
                         # Now that we know self._fragment successfully produced a
                         # complete point, also record the axis coordinates.
                         sink.push(value)
+                    for handle, sink in self._param_sinks:
+                        sink.push(handle.get())
 
                     if self.scheduler.check_pause():
                         return False
@@ -268,7 +283,11 @@ class KernelScanRunner(ScanRunner):
     # implementation might well be a long-forgotten ritual for invoking Cthulhu.
 
     def setup(
-        self, fragment: ExpFragment, axes: list[ScanAxis], axis_sinks: list[ResultSink]
+        self,
+        fragment: ExpFragment,
+        axes: list[ScanAxis],
+        axis_sinks: list[ResultSink],
+        param_sinks: list[tuple[ParamHandle, ResultSink]] | None = None,
     ) -> None:
         self._fragment = fragment
 
@@ -574,6 +593,10 @@ def describe_scan(
         gen.describe_limits(ax)
 
     desc["axes"] = axis_specs
+    desc["axis_param_map"] = {
+        f"axis_{i}": {"fqn": ax.param_schema["fqn"], "path": ax.path}
+        for i, ax in enumerate(spec.axes)
+    }
     desc["seed"] = spec.options.seed
 
     # KLUDGE: Skip non-saved channels to make sure the UI doesn't attempt to display

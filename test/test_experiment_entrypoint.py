@@ -99,7 +99,15 @@ class FragmentScanExpCase(HasEnvironmentCase):
             return self.dataset_db.get("ndscan.rid_0." + key)
 
         self.assertEqual(d("points.axis_0"), [3.0, 6.0, 7.0])
+        self.assertEqual(d("points.param_q"), [13.0, 40.0, 53.0])
         self.assertEqual(d("points.channel_result"), [13.0, 40.0, 53.0])
+        axis_map = json.loads(d("axis_param_map"))
+        self.assertEqual(
+            axis_map["axis_0"]["fqn"],
+            "test_experiment_entrypoint.RelationSquareFragment.p",
+        )
+        self.assertEqual(axis_map["axis_0"]["path"], "*")
+        self.assertNotIn("ndscan.rid_0.points.param_p", self.dataset_db.data)
 
     def test_run_kernel_scan_with_param_relation_not_supported(self):
         exp = self.create(ScanKernelRelationExp)

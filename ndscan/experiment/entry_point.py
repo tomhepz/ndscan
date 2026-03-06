@@ -366,6 +366,22 @@ class TopLevelRunner(HasEnvironment):
             channel.set_sink(sink)
             self._scan_result_sinks[channel] = sink
 
+        self._param_sinks = []
+        if self.spec.axes:
+            relation_targets = {}
+            self.fragment._collect_param_relation_targets(relation_targets)
+            if relation_targets:
+                param_name_map = shorten_to_unambiguous_suffixes(
+                    relation_targets.keys(),
+                    lambda path, n: "/".join(path.split("/")[-n:]),
+                )
+                for full_path, handle in relation_targets.items():
+                    short_name = param_name_map[full_path].replace("/", "_")
+                    sink = AppendingDatasetSink(
+                        self, self.dataset_prefix + "points.param_" + short_name
+                    )
+                    self._param_sinks.append((handle, sink))
+
         # Filter analyses, set up analysis result channels, and keep track of all the
         # names in the annotation context.
         self._analyses = (
@@ -429,7 +445,12 @@ class TopLevelRunner(HasEnvironment):
                 AppendingDatasetSink(self, self.dataset_prefix + f"points.axis_{i}")
                 for i in range(len(self.spec.axes))
             ]
-            runner.run(self.fragment, self.spec, self._coordinate_sinks)
+            runner.run(
+                self.fragment,
+                self.spec,
+                self._coordinate_sinks,
+                self._param_sinks,
+            )
             self._set_completed()
 
         return self._make_coordinate_dict(), self._make_value_dict()

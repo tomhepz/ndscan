@@ -619,8 +619,9 @@ class Fragment(HasEnvironment):
         deps_tuple = tuple(deps)
         assert deps_tuple, "Requires at least one dependency handle"
 
-        target_param = self._free_params.get(param_name, None)
-        assert target_param is not None, f"Not a free parameter: '{param_name}'"
+        assert self._free_params.get(param_name, None) is not None, (
+            f"Not a free parameter: '{param_name}'"
+        )
         target = getattr(self, param_name)
         assert target not in deps_tuple, "Target cannot be a dependency"
 
@@ -675,6 +676,17 @@ class Fragment(HasEnvironment):
             if s._has_param_relations():
                 return True
         return False
+
+    def _collect_param_relation_targets(
+        self, targets: dict[str, ParamHandle]
+    ) -> None:
+        for rel in self._param_relations:
+            key = "/".join(rel.target.owner._fragment_path + [rel.target.name])
+            targets[key] = rel.target
+        for s in self._subfragments:
+            if s in self._detached_subfragments:
+                continue
+            s._collect_param_relation_targets(targets)
 
     def _require_host_execution_for_param_relations(self, detail: str) -> None:
         if not self._has_param_relations():
