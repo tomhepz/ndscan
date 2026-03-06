@@ -2,6 +2,7 @@ import logging
 from collections import OrderedDict
 from collections.abc import Iterable
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from artiq.language import HasEnvironment, kernel, kernel_from_string, portable, rpc
@@ -39,6 +40,11 @@ def _log_failed_cleanup(path: str) -> None:
     # a more usable error message to the user.
     _log_failed_cleanup_host(path)
 
+@dataclass
+class _ParamRelation:
+    target: ParamHandle # Which parameter the output of this function applies to
+    deps: tuple[ParamHandle, ...] # Which parameters are the inputs to the function
+    fn: Callable[..., Any] # The function.
 
 class Fragment(HasEnvironment):
     """Main building block."""
@@ -72,6 +78,9 @@ class Fragment(HasEnvironment):
         #: List of (param, store) tuples of parameters set to their defaults after
         #: init_params().
         self._default_params = []
+
+        #: Per-shot computed parameter relations
+        self._param_relations: list[_ParamRelation] = []
 
         #: Maps full path of own result channels to ResultChannel instances.
         self._result_channels = {}
@@ -589,6 +598,74 @@ class Fragment(HasEnvironment):
         )
 
         return param
+    
+    def bind_param_relation(
+        self,
+        param_name: str,
+        deps: list[ParamHandle] | tuple[ParamHandle, ...],
+        fn: Callable[..., Any],
+    ) -> None:
+        """Register a computed parameter relation:
+        ``self.<param_name> := fn(*deps)``, evaluated before each host-side point
+        execution.
+
+        Can only be called during build_fragment() for now.
+        """
+        assert self._building, "Can only call bind_param_relation during build_fragment"
+        assert isinstance(param_name, str), "param_name must be a string"
+        assert param_name.isidentifier(), "Parameter name must be valid Python identifier"
+        assert callable(fn), "fn must be callable"
+
+        deps_tuple = tuple(deps)
+        assert deps_tuple, "Requires at least one dependency handle"
+
+        target_param = self._free_params.get(param_name, None)
+        assert target_param is not None, f"Not a free parameter: '{param_name}'"
+        target = getattr(self, param_name)
+        assert target not in deps_tuple, "Target cannot be a dependency"
+
+        # As with bind_param()/override_param(), relation-driven targets cease to be
+        # free parameters and must have a store initialised immediately.
+        self.override_param(param_name)
+
+        for dep in deps_tuple:
+            assert isinstance(dep, ParamHandle), (
+                "All dependencies must be ParamHandle instances"
+            )
+
+        for rel in self._param_relations:
+            assert rel.target is not target, "Relation for target already registered."
+
+        # Add to list of param relations to evaluate later (at runtime in scan_runner)
+        self._param_relations.append(_ParamRelation(target, deps_tuple, fn))
+
+
+    def _apply_param_relations(self) -> None:
+        """
+        Docstring for _apply_param_relations
+        """
+        for rel in self._param_relations:
+            if rel.target._store is None:
+                raise RuntimeError(
+                    f"Target store not initialised for relation target '{rel.target}'"
+                )
+            args = []
+            for dep in rel.deps:
+                if dep._store is None:
+                    raise RuntimeError(
+                        f"Dependency store not initialised for relation dependency '{dep}'"
+                    )
+                args.append(dep.get())
+            
+            # Perform the function evaluation and set target store to output
+            rel.target._store.set_value(rel.fn(*args))
+
+        # recursively apply to all subfragments of this fragment
+        for s in self._subfragments:
+            if s in self._detached_subfragments:
+                continue
+            s._apply_param_relations()
+
 
     def _collect_params(
         self,

@@ -242,6 +242,10 @@ class HostScanRunner(ScanRunner):
                         return True
                     for axis, value in zip(self._axes, axis_values):
                         axis.param_store.set_value(value)
+
+                    # Apply computed host-side parameter relations for this point.
+                    self._fragment._apply_param_relations()
+
                     self._fragment.device_setup()
                     self._fragment.run_once()
 

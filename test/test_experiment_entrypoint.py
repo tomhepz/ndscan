@@ -29,6 +29,18 @@ ScanReboundAddOneExp = make_fragment_scan_exp(ReboundAddOneFragment)
 ScanTwoAnalysisAggregateExp = make_fragment_scan_exp(TwoAnalysisAggregate)
 ScanReadParamDefaultExp = make_fragment_scan_exp(ReadParamDefault)
 
+class RelationSquareFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("p", FloatParam, "p", default=0.0)
+        self.setattr_param("q", FloatParam, "q", default=0.0)
+        self.bind_param_relation("q", [self.p], lambda p: p**2 + 4.0)
+        self.setattr_result("result", FloatChannel)
+
+    def run_once(self):
+        self.result.push(self.q.get())
+
+ScanRelationSquareExp = make_fragment_scan_exp(RelationSquareFragment)
+
 
 class TestAggregateExpFragment(HasEnvironmentCase):
     def test_aggregate(self):
@@ -51,6 +63,31 @@ class TestAggregateExpFragment(HasEnvironmentCase):
 
 
 class FragmentScanExpCase(HasEnvironmentCase):
+
+    def test_run_1d_scan_with_param_relation(self):
+        exp = self.create(ScanRelationSquareExp)
+        exp.args._params["scan"]["axes"].append(
+            {
+                "type": "list",
+                "range": {
+                    "values": [3.0, 6.0, 7.0],
+                    "randomise_order": False,
+                },
+                "fqn": "test_experiment_entrypoint.RelationSquareFragment.p",
+                "path": "*",
+            }
+        )
+
+        exp.prepare()
+        exp.run()
+
+        def d(key):
+            return self.dataset_db.get("ndscan.rid_0." + key)
+
+        self.assertEqual(d("points.axis_0"), [3.0, 6.0, 7.0])
+        self.assertEqual(d("points.channel_result"), [13.0, 40.0, 53.0])
+
+
     def test_wrong_fqn_override(self):
         exp = self.create(
             ScanAddOneExp,
@@ -360,6 +397,16 @@ class FragmentScanExpCase(HasEnvironmentCase):
 
 
 class RunOnceCase(HasEnvironmentCase):
+
+    def test_run_once_host_with_param_relation(self):
+        fragment = self.create(RelationSquareFragment, [])
+        store = FloatParamStore("...", 6.0)
+        results = run_fragment_once(
+            fragment, overrides={fragment.fqn + ".p": [("*", store)]}
+        )
+        self.assertEqual(results, {fragment.result: 40.0})
+
+
     def test_run_once_host(self):
         fragment = self.create(AddOneFragment, [])
         self.assertEqual(run_fragment_once(fragment), {fragment.result: 1.0})

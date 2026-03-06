@@ -413,6 +413,7 @@ class TopLevelRunner(HasEnvironment):
             self._time_series_start = time.monotonic()
             self._run_continuous()
         else:
+            # This returns either HostScanRunner or KernelScanRunner
             runner = select_runner_class(self.fragment)(
                 self,
                 max_rtio_underflow_retries=self.max_rtio_underflow_retries,
@@ -492,6 +493,8 @@ class TopLevelRunner(HasEnvironment):
                         if done:
                             break
                     else:
+                        # Host-side single-point execution supports computed relations.
+                        self.fragment._apply_param_relations()
                         if self._continuous_loop():
                             break
                 finally:
@@ -781,6 +784,8 @@ class _FragmentRunner(HasEnvironment):
             self.setattr_device("core")
             return self._run_on_kernel()
         else:
+            # Host-side single-point execution supports computed relations.
+            self.fragment._apply_param_relations()
             return self._run()
 
     @kernel
