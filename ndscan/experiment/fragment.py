@@ -676,6 +676,14 @@ class Fragment(HasEnvironment):
                 return True
         return False
 
+    def _require_host_execution_for_param_relations(self, detail: str) -> None:
+        if not self._has_param_relations():
+            return
+        raise NotImplementedError(
+            "bind_param_relation() is currently only supported for host-side "
+            f"execution; {detail}"
+        )
+
 
     def _collect_params(
         self,

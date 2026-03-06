@@ -401,10 +401,9 @@ class TopLevelRunner(HasEnvironment):
         """Run the (possibly trivial) scan."""
         self._broadcast_metadata()
 
-        if is_kernel(self.fragment.run_once) and self.fragment._has_param_relations():
-            raise NotImplementedError(
-                "bind_param_relation() is currently only supported for host-side "
-                "execution; kernel run_once() is not supported."
+        if is_kernel(self.fragment.run_once):
+            self.fragment._require_host_execution_for_param_relations(
+                "kernel run_once() is not supported."
             )
 
         if not self.spec.axes and not self._is_time_series:
@@ -787,12 +786,9 @@ class _FragmentRunner(HasEnvironment):
         """
         # TODO: Unify with FragmentScanExperiment._run_continuous().
         if is_kernel(self.fragment.run_once):
-            if self.fragment._has_param_relations():
-                raise NotImplementedError(
-                    "bind_param_relation() is currently only supported for host-side "
-                    "execution; run_fragment_once() with kernel run_once() is not "
-                    "supported."
-                )
+            self.fragment._require_host_execution_for_param_relations(
+                "run_fragment_once() with kernel run_once() is not supported."
+            )
             self.setattr_device("core")
             return self._run_on_kernel()
         else:
