@@ -666,6 +666,16 @@ class Fragment(HasEnvironment):
                 continue
             s._apply_param_relations()
 
+    def _has_param_relations(self) -> bool:
+        if self._param_relations:
+            return True
+        for s in self._subfragments:
+            if s in self._detached_subfragments:
+                continue
+            if s._has_param_relations():
+                return True
+        return False
+
 
     def _collect_params(
         self,

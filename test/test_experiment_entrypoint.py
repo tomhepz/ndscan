@@ -42,6 +42,20 @@ class RelationSquareFragment(ExpFragment):
 ScanRelationSquareExp = make_fragment_scan_exp(RelationSquareFragment)
 
 
+class KernelRelationFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("p", FloatParam, "p", default=0.0)
+        self.setattr_param("q", FloatParam, "q", default=0.0)
+        self.bind_param_relation("q", [self.p], lambda p: p + 1.0)
+
+    @kernel
+    def run_once(self):
+        self.q.get()
+
+
+ScanKernelRelationExp = make_fragment_scan_exp(KernelRelationFragment)
+
+
 class TestAggregateExpFragment(HasEnvironmentCase):
     def test_aggregate(self):
         parent = self.create(AddOneAggregate, [])
@@ -86,6 +100,20 @@ class FragmentScanExpCase(HasEnvironmentCase):
 
         self.assertEqual(d("points.axis_0"), [3.0, 6.0, 7.0])
         self.assertEqual(d("points.channel_result"), [13.0, 40.0, 53.0])
+
+    def test_run_kernel_scan_with_param_relation_not_supported(self):
+        exp = self.create(ScanKernelRelationExp)
+        exp.args._params["scan"]["axes"].append(
+            {
+                "type": "list",
+                "range": {"values": [1.0], "randomise_order": False},
+                "fqn": "test_experiment_entrypoint.KernelRelationFragment.p",
+                "path": "*",
+            }
+        )
+        exp.prepare()
+        with self.assertRaisesRegex(NotImplementedError, "bind_param_relation"):
+            exp.run()
 
 
     def test_wrong_fqn_override(self):
@@ -405,6 +433,11 @@ class RunOnceCase(HasEnvironmentCase):
             fragment, overrides={fragment.fqn + ".p": [("*", store)]}
         )
         self.assertEqual(results, {fragment.result: 40.0})
+
+    def test_run_once_kernel_with_param_relation_not_supported(self):
+        fragment = self.create(KernelRelationFragment, [])
+        with self.assertRaisesRegex(NotImplementedError, "bind_param_relation"):
+            run_fragment_once(fragment)
 
 
     def test_run_once_host(self):

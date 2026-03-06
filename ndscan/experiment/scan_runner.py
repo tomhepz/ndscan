@@ -506,6 +506,11 @@ class KernelScanRunner(ScanRunner):
 
 def select_runner_class(fragment: ExpFragment) -> type[ScanRunner]:
     if is_kernel(fragment.run_once):
+        if fragment._has_param_relations():
+            raise NotImplementedError(
+                "bind_param_relation() is currently only supported for host-side "
+                "execution; kernel scans are not supported."
+            )
         return KernelScanRunner
     else:
         return HostScanRunner
