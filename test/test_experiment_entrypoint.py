@@ -20,6 +20,7 @@ from mock_environment import HasEnvironmentCase
 from sipyco import pyon
 
 from ndscan.experiment import *
+from ndscan.experiment.entry_point import ScanSpecError
 from ndscan.experiment.parameters import FloatParamStore
 from ndscan.experiment.utils import is_kernel
 from ndscan.utils import PARAMS_ARG_KEY, SCHEMA_REVISION, SCHEMA_REVISION_KEY
@@ -87,6 +88,20 @@ class OptionalRelationAllFragment(ExpFragment):
 ScanOptionalRelationAllExp = make_fragment_scan_exp(OptionalRelationAllFragment)
 
 
+class UiRelationFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("p", FloatParam, "p", default=0.0)
+        self.setattr_param("q", FloatParam, "q", default=0.0)
+        self.setattr_param("z", FloatParam, "z", default=0.0)
+        self.setattr_result("result", FloatChannel)
+
+    def run_once(self):
+        self.result.push(self.z.get())
+
+
+ScanUiRelationExp = make_fragment_scan_exp(UiRelationFragment)
+
+
 class TestAggregateExpFragment(HasEnvironmentCase):
     def test_aggregate(self):
         parent = self.create(AddOneAggregate, [])
@@ -108,6 +123,136 @@ class TestAggregateExpFragment(HasEnvironmentCase):
 
 
 class FragmentScanExpCase(HasEnvironmentCase):
+    def test_run_1d_scan_with_ui_relation_alias_syntax(self):
+        exp = self.create(ScanUiRelationExp)
+        p_fqn = "test_experiment_entrypoint.UiRelationFragment.p"
+        z_fqn = "test_experiment_entrypoint.UiRelationFragment.z"
+        exp.args._params["scan"]["axes"].append(
+            {
+                "type": "list",
+                "range": {"values": [3.0, 6.0, 7.0], "randomise_order": False},
+                "fqn": p_fqn,
+                "path": "*",
+            }
+        )
+        exp.args._params["scan"]["relations"] = [
+            {
+                "target": {"fqn": z_fqn, "path": "*"},
+                "deps": [{"fqn": p_fqn, "path": "*", "alias": "p"}],
+                "expr": "p**2 + 4",
+            }
+        ]
+
+        exp.prepare()
+        exp.run()
+
+        def d(key):
+            return self.dataset_db.get("ndscan.rid_0." + key)
+
+        self.assertEqual(d("points.channel_result"), [13.0, 40.0, 53.0])
+        self.assertEqual(d("points.param_z"), [13.0, 40.0, 53.0])
+
+    def test_run_1d_scan_with_ui_relation_bracket_syntax(self):
+        exp = self.create(ScanUiRelationExp)
+        p_fqn = "test_experiment_entrypoint.UiRelationFragment.p"
+        z_fqn = "test_experiment_entrypoint.UiRelationFragment.z"
+        exp.args._params["scan"]["axes"].append(
+            {
+                "type": "list",
+                "range": {"values": [3.0, 6.0, 7.0], "randomise_order": False},
+                "fqn": p_fqn,
+                "path": "*",
+            }
+        )
+        exp.args._params["scan"]["relations"] = [
+            {
+                "target": {"fqn": z_fqn, "path": "*"},
+                "expr": f"[{p_fqn}]**2 + 4",
+            }
+        ]
+
+        exp.prepare()
+        exp.run()
+
+        def d(key):
+            return self.dataset_db.get("ndscan.rid_0." + key)
+
+        self.assertEqual(d("points.channel_result"), [13.0, 40.0, 53.0])
+        self.assertEqual(d("points.param_z"), [13.0, 40.0, 53.0])
+
+    def test_ui_relation_inactive_unless_dependency_is_explicit(self):
+        exp = self.create(ScanUiRelationExp)
+        p_fqn = "test_experiment_entrypoint.UiRelationFragment.p"
+        q_fqn = "test_experiment_entrypoint.UiRelationFragment.q"
+        z_fqn = "test_experiment_entrypoint.UiRelationFragment.z"
+        exp.args._params["scan"]["axes"].append(
+            {
+                "type": "list",
+                "range": {"values": [1.0, 2.0], "randomise_order": False},
+                "fqn": q_fqn,
+                "path": "*",
+            }
+        )
+        exp.args._params["scan"]["relations"] = [
+            {
+                "target": {"fqn": z_fqn, "path": "*"},
+                "deps": [{"fqn": p_fqn, "path": "*", "alias": "p"}],
+                "expr": "p**2 + 4",
+            }
+        ]
+
+        exp.prepare()
+        exp.run()
+        self.assertEqual(
+            self.dataset_db.get("ndscan.rid_0.points.channel_result"), [0.0, 0.0]
+        )
+
+        exp = self.create(ScanUiRelationExp)
+        exp.args._params["scan"]["axes"].append(
+            {
+                "type": "list",
+                "range": {"values": [1.0, 2.0], "randomise_order": False},
+                "fqn": q_fqn,
+                "path": "*",
+            }
+        )
+        exp.args._params["overrides"][p_fqn] = [{"path": "*", "value": 6.0}]
+        exp.args._params["scan"]["relations"] = [
+            {
+                "target": {"fqn": z_fqn, "path": "*"},
+                "deps": [{"fqn": p_fqn, "path": "*", "alias": "p"}],
+                "expr": "p**2 + 4",
+            }
+        ]
+
+        exp.prepare()
+        exp.run()
+        self.assertEqual(
+            self.dataset_db.get("ndscan.rid_0.points.channel_result"), [40.0, 40.0]
+        )
+
+    def test_ui_relation_rejects_unsafe_expression(self):
+        exp = self.create(ScanUiRelationExp)
+        p_fqn = "test_experiment_entrypoint.UiRelationFragment.p"
+        z_fqn = "test_experiment_entrypoint.UiRelationFragment.z"
+        exp.args._params["scan"]["axes"].append(
+            {
+                "type": "list",
+                "range": {"values": [1.0], "randomise_order": False},
+                "fqn": p_fqn,
+                "path": "*",
+            }
+        )
+        exp.args._params["scan"]["relations"] = [
+            {
+                "target": {"fqn": z_fqn, "path": "*"},
+                "deps": [{"fqn": p_fqn, "path": "*", "alias": "p"}],
+                "expr": "__import__('os').system('echo bad')",
+            }
+        ]
+
+        with self.assertRaises(ScanSpecError):
+            exp.prepare()
 
     def test_run_1d_scan_with_param_relation(self):
         exp = self.create(ScanRelationSquareExp)

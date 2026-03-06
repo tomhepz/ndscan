@@ -12,10 +12,12 @@ The two main entry points into the :class:`.ExpFragment` universe are
 
 import logging
 import random
+import re
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from contextlib import suppress
+from dataclasses import dataclass
 from functools import reduce
 from typing import Any
 
@@ -46,7 +48,12 @@ from .fragment import (
     RestartKernelTransitoryError,
     TransitoryError,
 )
-from .parameters import ParamBase, ParamStore
+from .parameters import ParamBase, ParamHandle, ParamStore
+from .relation_expressions import (
+    RelationExpressionError,
+    compile_safe_relation_expr,
+    rewrite_bracket_param_refs,
+)
 from .result_channels import (
     AppendingDatasetSink,
     LastValueSink,
@@ -62,7 +69,7 @@ from .scan_runner import (
     filter_default_analyses,
     select_runner_class,
 )
-from .utils import dump_json, is_kernel, to_metadata_broadcast_type
+from .utils import dump_json, is_kernel, path_matches_spec, to_metadata_broadcast_type
 
 __all__ = [
     "ArgumentInterface",
@@ -145,6 +152,7 @@ class FragmentScanExperiment(EnvExperiment):
             param_stores.setdefault(fqn, []).append((ax.path, ax.param_store))
 
         self.fragment.init_params(param_stores)
+        self.fragment._clear_runtime_param_relations()
 
         for fqn, pairs in param_stores.items():
             for path, store in pairs:
@@ -161,8 +169,10 @@ class FragmentScanExperiment(EnvExperiment):
                         + "since made to the experiment code; try "
                         + "Recompute All Arguments)."
                     )
-        self.fragment._activate_optional_param_relations(
-            _collect_explicit_param_fqns(param_stores)
+        explicit_fqns = _collect_explicit_param_fqns(param_stores)
+        self.fragment._activate_optional_param_relations(explicit_fqns)
+        _activate_scan_arg_param_relations(
+            self.fragment, self.args.get_scan_relation_specs(), explicit_fqns
         )
 
         self.tlr = TopLevelRunner(
@@ -221,6 +231,7 @@ class ArgumentInterface(HasEnvironment):
         if scannable:
             desc["scan"] = {
                 "axes": [],
+                "relations": [],
                 "num_repeats": 1,
                 "no_axes_mode": "single",
                 "randomise_order_globally": False,
@@ -292,6 +303,10 @@ class ArgumentInterface(HasEnvironment):
         )
         return spec, no_axes_mode, skip_on_persistent_transitory_error
 
+    def get_scan_relation_specs(self) -> list[dict[str, Any]]:
+        scan = self._params.get("scan", {})
+        return scan.get("relations", [])
+
 
 def _collect_explicit_param_fqns(
     param_stores: dict[str, list[tuple[str, ParamStore]]]
@@ -301,6 +316,237 @@ def _collect_explicit_param_fqns(
         if any(store._handles for _path, store in pairs):
             explicit.add(fqn)
     return explicit
+
+
+@dataclass(frozen=True)
+class _RelationParamRef:
+    fqn: str
+    path: str = "*"
+
+
+def _parse_relation_param_ref(spec: Any, context: str) -> _RelationParamRef:
+    if isinstance(spec, str):
+        fqn = spec
+        path = "*"
+    elif isinstance(spec, dict):
+        try:
+            fqn = spec["fqn"]
+        except KeyError:
+            raise ScanSpecError(f"{context} is missing required key 'fqn'")
+        path = spec.get("path", "*")
+    else:
+        raise ScanSpecError(
+            f"{context} must be a string FQN or dict with 'fqn'/'path'"
+        )
+
+    if not isinstance(fqn, str) or not fqn:
+        raise ScanSpecError(f"{context}.fqn must be a non-empty string")
+    if not isinstance(path, str) or not path:
+        raise ScanSpecError(f"{context}.path must be a non-empty string")
+    return _RelationParamRef(fqn=fqn, path=path)
+
+
+def _parse_relation_token_ref(token: str, context: str) -> _RelationParamRef:
+    token = token.strip()
+    if not token:
+        raise ScanSpecError(f"{context} must not be empty")
+    if "@" in token:
+        fqn, path = token.rsplit("@", 1)
+        return _parse_relation_param_ref({"fqn": fqn.strip(), "path": path.strip()}, context)
+    return _parse_relation_param_ref(token, context)
+
+
+def _suggest_alias(fqn: str, used_aliases: set[str]) -> str:
+    base = fqn.rsplit(".", 1)[-1]
+    alias = re.sub(r"\W", "_", base)
+    if not alias or alias[0].isdigit():
+        alias = f"param_{alias}"
+    if not alias.isidentifier():
+        alias = "param"
+    candidate = alias
+    i = 1
+    while candidate in used_aliases:
+        candidate = f"{alias}_{i}"
+        i += 1
+    return candidate
+
+
+def _replace_ident(expr: str, old: str, new: str) -> str:
+    pattern = r"\b" + re.escape(old) + r"\b"
+    return re.sub(pattern, new, expr)
+
+
+def _build_free_param_handle_index(
+    fragment: Fragment,
+) -> dict[str, list[ParamHandle]]:
+    by_fqn = dict[str, list[ParamHandle]]()
+    fragment._collect_free_param_handles(by_fqn)
+    return by_fqn
+
+
+def _resolve_relation_handle(
+    ref: _RelationParamRef, handle_index: dict[str, list[ParamHandle]]
+) -> ParamHandle:
+    candidates = handle_index.get(ref.fqn, [])
+    matches = [
+        h for h in candidates if path_matches_spec(h.owner._fragment_path, ref.path)
+    ]
+    if not matches:
+        raise ScanSpecError(
+            "Relation references parameter with no matching free handle: "
+            + f"{ref.fqn}@{ref.path}"
+        )
+    if len(matches) > 1:
+        match_paths = ", ".join(sorted(h.owner._stringize_path() for h in matches))
+        raise ScanSpecError(
+            "Relation reference is ambiguous; specify a narrower path for "
+            + f"{ref.fqn}@{ref.path}. Matches: {match_paths}"
+        )
+    return matches[0]
+
+
+def _extract_relation_deps_and_expr(
+    relation_spec: dict[str, Any], relation_context: str
+) -> tuple[list[tuple[str, _RelationParamRef]], str]:
+    deps_spec = relation_spec.get("deps", [])
+    if deps_spec is None:
+        deps_spec = []
+    if not isinstance(deps_spec, list):
+        raise ScanSpecError(f"{relation_context}.deps must be a list if specified")
+
+    try:
+        expr = relation_spec["expr"]
+    except KeyError:
+        raise ScanSpecError(f"{relation_context} is missing required key 'expr'")
+    if not isinstance(expr, str):
+        raise ScanSpecError(f"{relation_context}.expr must be a string")
+
+    used_aliases = set[str]()
+    deps = list[tuple[str, _RelationParamRef]]()
+    ref_to_alias = dict[tuple[str, str], str]()
+
+    for i, dep in enumerate(deps_spec):
+        dep_context = f"{relation_context}.deps[{i}]"
+        alias = None
+        if isinstance(dep, dict):
+            alias_value = dep.get("alias", None)
+            if alias_value is not None:
+                if not isinstance(alias_value, str) or not alias_value.isidentifier():
+                    raise ScanSpecError(
+                        f"{dep_context}.alias must be a valid Python identifier"
+                    )
+                alias = alias_value
+        dep_ref = _parse_relation_param_ref(dep, dep_context)
+        if alias is None:
+            alias = _suggest_alias(dep_ref.fqn, used_aliases)
+        if alias in used_aliases:
+            raise ScanSpecError(
+                f"{dep_context}.alias '{alias}' collides with another dependency alias"
+            )
+        used_aliases.add(alias)
+        key = (dep_ref.fqn, dep_ref.path)
+        ref_to_alias[key] = alias
+        deps.append((alias, dep_ref))
+
+    rewritten_expr, token_to_temp_alias = rewrite_bracket_param_refs(expr)
+    for token, temp_alias in token_to_temp_alias.items():
+        ref = _parse_relation_token_ref(token, f"{relation_context}.expr")
+        key = (ref.fqn, ref.path)
+        alias = ref_to_alias.get(key)
+        if alias is None:
+            alias = temp_alias
+            if alias in used_aliases:
+                alias = _suggest_alias(ref.fqn, used_aliases)
+            used_aliases.add(alias)
+            ref_to_alias[key] = alias
+            deps.append((alias, ref))
+        if alias != temp_alias:
+            rewritten_expr = _replace_ident(rewritten_expr, temp_alias, alias)
+
+    return deps, rewritten_expr
+
+
+def _is_relation_active(
+    activation_refs: list[_RelationParamRef],
+    activation_mode: str,
+    explicit_fqns: set[str],
+) -> bool:
+    if not activation_refs:
+        return True
+    matches = [ref.fqn in explicit_fqns for ref in activation_refs]
+    if activation_mode == "all":
+        return all(matches)
+    return any(matches)
+
+
+def _activate_scan_arg_param_relations(
+    fragment: Fragment,
+    relation_specs: list[dict[str, Any]],
+    explicit_fqns: set[str],
+) -> None:
+    if not relation_specs:
+        return
+    if not isinstance(relation_specs, list):
+        raise ScanSpecError("scan.relations must be a list")
+
+    handle_index = _build_free_param_handle_index(fragment)
+    for i, relation_spec in enumerate(relation_specs):
+        relation_context = f"scan.relations[{i}]"
+        if not isinstance(relation_spec, dict):
+            raise ScanSpecError(f"{relation_context} must be a dictionary")
+        if relation_spec.get("enabled", True) is False:
+            continue
+
+        if "target" not in relation_spec:
+            raise ScanSpecError(f"{relation_context} is missing required key 'target'")
+        target = _parse_relation_param_ref(
+            relation_spec["target"], relation_context + ".target"
+        )
+        deps, rewritten_expr = _extract_relation_deps_and_expr(
+            relation_spec, relation_context
+        )
+        dep_aliases = tuple(alias for alias, _dep in deps)
+        dep_refs = [dep for _alias, dep in deps]
+
+        activation_mode = relation_spec.get("activation_mode", "any")
+        if activation_mode not in ("any", "all"):
+            raise ScanSpecError(
+                f"{relation_context}.activation_mode must be 'any' or 'all'"
+            )
+        activation_dep_specs = relation_spec.get("activation_deps", None)
+        if activation_dep_specs is None:
+            activation_refs = dep_refs
+        else:
+            if not isinstance(activation_dep_specs, list):
+                raise ScanSpecError(
+                    f"{relation_context}.activation_deps must be a list"
+                )
+            activation_refs = [
+                _parse_relation_param_ref(s, f"{relation_context}.activation_deps[{j}]")
+                for j, s in enumerate(activation_dep_specs)
+            ]
+
+        if not _is_relation_active(activation_refs, activation_mode, explicit_fqns):
+            continue
+        if target.fqn in explicit_fqns:
+            raise ValueError(
+                "Optional relation target is explicitly driven in the same run: "
+                + target.fqn
+            )
+
+        try:
+            fn = compile_safe_relation_expr(rewritten_expr, dep_aliases)
+        except RelationExpressionError as e:
+            raise ScanSpecError(f"{relation_context}: {e}") from None
+
+        target_handle = _resolve_relation_handle(target, handle_index)
+        dep_handles = tuple(_resolve_relation_handle(dep, handle_index) for dep in dep_refs)
+        if any(d is target_handle for d in dep_handles):
+            raise ScanSpecError(
+                f"{relation_context}: target parameter appears in its dependency list"
+            )
+
+        fragment._add_runtime_param_relation(target_handle, dep_handles, fn)
 
 
 class TopLevelRunner(HasEnvironment):

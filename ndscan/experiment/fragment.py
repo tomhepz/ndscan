@@ -92,6 +92,7 @@ class Fragment(HasEnvironment):
         self._param_relations: list[_ParamRelation] = []
         self._optional_param_relations: list[_OptionalParamRelation] = []
         self._active_optional_param_relations: list[_OptionalParamRelation] = []
+        self._runtime_param_relations: list[_ParamRelation] = []
 
         #: Maps full path of own result channels to ResultChannel instances.
         self._result_channels = {}
@@ -733,6 +734,49 @@ class Fragment(HasEnvironment):
                 continue
             s._activate_optional_param_relations(explicit_fqns)
 
+    def _clear_runtime_param_relations(self) -> None:
+        self._runtime_param_relations.clear()
+        for s in self._subfragments:
+            if s in self._detached_subfragments:
+                continue
+            s._clear_runtime_param_relations()
+
+    def _add_runtime_param_relation(
+        self,
+        target: ParamHandle,
+        deps: tuple[ParamHandle, ...],
+        fn: Callable[..., Any],
+    ) -> None:
+        owner = target.owner
+        assert target.name in owner._free_params, (
+            "Runtime relation target must be a free parameter"
+        )
+        for dep in deps:
+            assert isinstance(dep, ParamHandle), (
+                "All runtime relation dependencies must be ParamHandle instances"
+            )
+
+        for rel in owner._param_relations:
+            if rel.target is target:
+                raise ValueError(
+                    "Target already has a relation registered in fragment code: "
+                    + target.parameter.fqn
+                )
+        for rel in owner._optional_param_relations:
+            if rel.target is target:
+                raise ValueError(
+                    "Target already has an optional relation registered in fragment code: "
+                    + target.parameter.fqn
+                )
+        for rel in owner._runtime_param_relations:
+            if rel.target is target:
+                raise ValueError(
+                    "Target already has a runtime relation registered: "
+                    + target.parameter.fqn
+                )
+
+        owner._runtime_param_relations.append(_ParamRelation(target, deps, fn))
+
     def _apply_param_relations(self) -> None:
         """
         Docstring for _apply_param_relations
@@ -751,6 +795,20 @@ class Fragment(HasEnvironment):
                 args.append(dep.get())
             
             # Perform the function evaluation and set target store to output
+            rel.target._store.set_value(rel.fn(*args))
+
+        for rel in self._runtime_param_relations:
+            if rel.target._store is None:
+                raise RuntimeError(
+                    f"Target store not initialised for relation target '{rel.target}'"
+                )
+            args = []
+            for dep in rel.deps:
+                if dep._store is None:
+                    raise RuntimeError(
+                        f"Dependency store not initialised for relation dependency '{dep}'"
+                    )
+                args.append(dep.get())
             rel.target._store.set_value(rel.fn(*args))
 
         for rel in self._active_optional_param_relations:
@@ -774,7 +832,11 @@ class Fragment(HasEnvironment):
             s._apply_param_relations()
 
     def _has_param_relations(self) -> bool:
-        if self._param_relations or self._active_optional_param_relations:
+        if (
+            self._param_relations
+            or self._runtime_param_relations
+            or self._active_optional_param_relations
+        ):
             return True
         for s in self._subfragments:
             if s in self._detached_subfragments:
@@ -787,6 +849,9 @@ class Fragment(HasEnvironment):
         self, targets: dict[str, ParamHandle]
     ) -> None:
         for rel in self._param_relations:
+            key = "/".join(rel.target.owner._fragment_path + [rel.target.name])
+            targets[key] = rel.target
+        for rel in self._runtime_param_relations:
             key = "/".join(rel.target.owner._fragment_path + [rel.target.name])
             targets[key] = rel.target
         for rel in self._active_optional_param_relations:
@@ -981,6 +1046,16 @@ class Fragment(HasEnvironment):
 
     def _get_all_handles_for_param(self, name: str) -> list[ParamHandle]:
         return [getattr(self, name)] + self._rebound_subfragment_params.get(name, [])
+
+    def _collect_free_param_handles(
+        self, handles_by_fqn: dict[str, list[ParamHandle]]
+    ) -> None:
+        for name, param in self._free_params.items():
+            handles = self._get_all_handles_for_param(name)
+            if handles:
+                handles_by_fqn.setdefault(param.fqn, []).extend(handles)
+        for s in self._subfragments:
+            s._collect_free_param_handles(handles_by_fqn)
 
     def _stringize_path(self) -> str:
         return "/".join(self._fragment_path)
