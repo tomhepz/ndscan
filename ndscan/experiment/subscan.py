@@ -21,6 +21,7 @@ from ..utils import (
 from .default_analysis import AnnotationContext, DefaultAnalysis
 from .fragment import ExpFragment, Fragment, RestartKernelTransitoryError
 from .parameters import ParamHandle
+from .point_source import StrategyPointSource
 from .result_channels import (
     AppendingDatasetSink,
     ArraySink,
@@ -32,7 +33,6 @@ from .result_channels import (
     TeeSink,
 )
 from .scan_generator import ListGenerator, ScanGenerator, ScanOptions
-from .scan_point_strategies import generate_points_for_strategy
 from .scan_runner import (
     ScanAxis,
     ScanRunner,
@@ -199,8 +199,8 @@ class Subscan:
         self._regenerate_points()
 
     def _regenerate_points(self):
-        self._runner.set_points(
-            generate_points_for_strategy(
+        self._runner.set_point_source(
+            StrategyPointSource(
                 self._spec.generators, self._spec.options, self._spec.strategy
             )
         )

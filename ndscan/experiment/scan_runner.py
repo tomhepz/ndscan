@@ -9,7 +9,6 @@ will likely be used by end users via
 import logging
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from itertools import islice
 from typing import Any
 
 import numpy as np
@@ -19,9 +18,9 @@ from artiq.language import HasEnvironment, host_only, kernel, kernel_from_string
 from .default_analysis import AnnotationContext, DefaultAnalysis
 from .fragment import ExpFragment, RestartKernelTransitoryError, TransitoryError
 from .parameters import ParamHandle, ParamStore
+from .point_source import IteratorPointSource, PointSource, StrategyPointSource
 from .result_channels import ResultChannel, ResultSink, SingleUseSink
 from .scan_generator import ScanGenerator, ScanOptions
-from .scan_point_strategies import generate_points_for_strategy
 from .scan_strategy_specs import get_scan_strategy_kind
 from .utils import is_kernel
 
@@ -122,8 +121,8 @@ class ScanRunner(HasEnvironment):
         """
         # TODO: Support parameters which require host_setup() when changed.
         self.setup(fragment, spec.axes, axis_sinks, param_sinks)
-        self.set_points(
-            generate_points_for_strategy(spec.generators, spec.options, spec.strategy)
+        self.set_point_source(
+            StrategyPointSource(spec.generators, spec.options, spec.strategy)
         )
         while True:
             # After every pause(), pull in dataset changes (immediately as well to catch
@@ -155,6 +154,9 @@ class ScanRunner(HasEnvironment):
         raise NotImplementedError
 
     def set_points(self, points: Iterator[tuple]) -> None:
+        self.set_point_source(IteratorPointSource(points))
+
+    def set_point_source(self, point_source: PointSource) -> None:
         raise NotImplementedError
 
     def acquire(self, device_cleanup: bool) -> bool:
@@ -263,8 +265,8 @@ class HostScanRunner(ScanRunner):
         self._axis_sinks = axis_sinks
         self._param_sinks = [] if param_sinks is None else param_sinks
 
-    def set_points(self, points: Iterator[tuple]) -> None:
-        self._points = points
+    def set_point_source(self, point_source: PointSource) -> None:
+        self._point_source = point_source
 
     def acquire(self, device_cleanup: bool) -> bool:
         with ResultBatcher(self._fragment) as result_batcher:
@@ -273,7 +275,7 @@ class HostScanRunner(ScanRunner):
                 # enough to do so in ScanRunner.run(), which we want anyway for
                 # host_setup(), etc.).
                 while True:
-                    axis_values = next(self._points, None)
+                    axis_values = self._point_source.next_point()
                     if axis_values is None:
                         return True
                     self._set_axis_param_stores(axis_values)
@@ -349,8 +351,8 @@ class KernelScanRunner(ScanRunner):
         # cannot use the context manager API.
         self._result_batcher: ResultBatcher | None = None
 
-    def set_points(self, points: Iterator[tuple]) -> None:
-        self._points = points
+    def set_point_source(self, point_source: PointSource) -> None:
+        self._point_source = point_source
         # Stash away points in current kernel chunk until they have been marked
         # complete so we can resume from interruptions.
         self._current_chunk = []
@@ -476,7 +478,7 @@ class KernelScanRunner(ScanRunner):
         CHUNK_SIZE = 10
 
         self._current_chunk.extend(
-            islice(self._points, CHUNK_SIZE - len(self._current_chunk))
+            self._point_source.take_points(CHUNK_SIZE - len(self._current_chunk))
         )
 
         values = tuple([] for _ in self._axes)
