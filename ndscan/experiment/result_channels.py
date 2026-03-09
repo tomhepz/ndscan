@@ -127,7 +127,7 @@ class TeeSink(ResultSink):
     
     def clear(self) -> None:
         for sink in (self.primary, self.secondary):
-            clear = self.getattr(sink, "clear", None)
+            clear = getattr(sink, "clear", None)
             if clear is not None:
                 clear()
 
