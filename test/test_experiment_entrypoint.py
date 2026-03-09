@@ -209,6 +209,58 @@ class FragmentScanExpCase(HasEnvironmentCase):
         self.assertEqual(d("points.channel_result"), [110.0, 220.0])
         self.assertEqual(d("strategy"), "zip")
 
+    def test_run_point_list_scan_strategy(self):
+        exp = self.create(ScanZipTwoAxisExp)
+        exp.args._params["scan"]["axes"].append(
+            {
+                "fqn": "test_experiment_entrypoint.ZipTwoAxisFragment.a",
+                "path": "*",
+            }
+        )
+        exp.args._params["scan"]["axes"].append(
+            {
+                "fqn": "test_experiment_entrypoint.ZipTwoAxisFragment.b",
+                "path": "*",
+            }
+        )
+        exp.args._params["scan"]["strategy"] = {
+            "kind": "point_list",
+            "points": [[1.0, 10.0], [2.0, 20.0], [4.0, 40.0]],
+        }
+
+        exp.prepare()
+        exp.run()
+
+        def d(key):
+            return self.dataset_db.get("ndscan.rid_0." + key)
+
+        self.assertEqual(d("points.axis_0"), [1.0, 2.0, 4.0])
+        self.assertEqual(d("points.axis_1"), [10.0, 20.0, 40.0])
+        self.assertEqual(d("points.channel_result"), [110.0, 220.0, 440.0])
+        self.assertEqual(d("strategy"), "point_list")
+
+    def test_point_list_scan_rejects_bad_row_shape(self):
+        exp = self.create(ScanZipTwoAxisExp)
+        exp.args._params["scan"]["axes"].append(
+            {
+                "fqn": "test_experiment_entrypoint.ZipTwoAxisFragment.a",
+                "path": "*",
+            }
+        )
+        exp.args._params["scan"]["axes"].append(
+            {
+                "fqn": "test_experiment_entrypoint.ZipTwoAxisFragment.b",
+                "path": "*",
+            }
+        )
+        exp.args._params["scan"]["strategy"] = {
+            "kind": "point_list",
+            "points": [[1.0], [2.0, 20.0]],
+        }
+
+        with self.assertRaisesRegex(ScanSpecError, "row length must match"):
+            exp.prepare()
+
     def test_run_1d_scan_with_ui_relation_alias_syntax(self):
         exp = self.create(ScanUiRelationExp)
         p_fqn = "test_experiment_entrypoint.UiRelationFragment.p"

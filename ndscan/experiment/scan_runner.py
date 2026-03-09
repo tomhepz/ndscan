@@ -65,8 +65,9 @@ class ScanSpec:
     options: ScanOptions
 
     #: How multi-axis points are composed into a point stream.
-    #: ``grid`` = Cartesian/refining (current behaviour), ``zip`` = lockstep.
-    strategy: str = "grid"
+    #: String form (``"grid"``, ``"zip"``, …) and dict form
+    #: (``{"kind": "point_list", "points": [...]}``) are both accepted.
+    strategy: str | dict[str, Any] = "grid"
 
 
 class ScanRunner(HasEnvironment):
@@ -602,7 +603,10 @@ def describe_scan(
         for i, ax in enumerate(spec.axes)
     }
     desc["seed"] = spec.options.seed
-    desc["strategy"] = spec.strategy
+    if isinstance(spec.strategy, dict):
+        desc["strategy"] = spec.strategy.get("kind", "grid")
+    else:
+        desc["strategy"] = spec.strategy
 
     # KLUDGE: Skip non-saved channels to make sure the UI doesn't attempt to display
     # them; they should possibly just be ignored there.

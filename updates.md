@@ -618,3 +618,24 @@ stateDiagram-v2
   ChunkCleanup --> [*]: if scan complete
   Paused --> ChunkSetup: resume
 ```
+
+## Point Strategy Semantics (Flat Stream)
+
+The scan runner now treats point generation as "strategy + options", always producing a
+single flat stream of shot vectors.
+
+- `grid`: Existing behaviour. Uses axis generators and refinement levels, then forms
+  Cartesian products of axis points.
+- `zip`: Uses axis level-0 points in lockstep by index.
+  Example: `a=[1,2,3]`, `b=[10,20,30]` => `(1,10),(2,20),(3,30)`.
+- `point_list`: Uses explicit row-wise shot vectors.
+  Example: `[[1,10],[2,20],[4,40]]` => those exact three points.
+
+`zip` and `point_list` are intentionally both supported:
+
+- `zip` is column-wise (per-axis lists).
+- `point_list` is row-wise (per-shot vectors), which is easier to drive from external
+  optimisers and imported trajectories.
+
+In all cases, repeats and `randomise_order_globally` are applied by the same scan
+options layer, so dataset writing remains append-only and flat.

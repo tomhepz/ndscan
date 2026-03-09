@@ -57,7 +57,7 @@ from .result_channels import (
     ResultChannel,
     ScalarDatasetSink,
 )
-from .scan_generator import GENERATORS, ScanOptions
+from .scan_generator import GENERATORS, ListGenerator, ScanOptions
 from .scan_runner import (
     ScanAxis,
     ScanSpec,
@@ -264,16 +264,53 @@ class ArgumentInterface(HasEnvironment):
     def make_scan_spec(self) -> tuple[ScanSpec, NoAxesMode, bool]:
         scan = self._params.get("scan", {})
 
+        strategy_spec = scan.get("strategy", "grid")
+        strategy: str | dict[str, Any] = strategy_spec
+        if isinstance(strategy_spec, dict):
+            strategy_kind = strategy_spec.get("kind", "grid")
+        else:
+            strategy_kind = strategy_spec
+        if not isinstance(strategy_kind, str) or not strategy_kind:
+            raise ScanSpecError("scan.strategy must be a non-empty string or dict")
+
+        point_rows: list[Any] = []
+        if strategy_kind == "point_list":
+            if not isinstance(strategy_spec, dict):
+                raise ScanSpecError(
+                    "point_list strategy must be specified as a dict with 'points'"
+                )
+            point_rows = strategy_spec.get("points", [])
+            if not isinstance(point_rows, list):
+                raise ScanSpecError("scan.strategy.points must be a list")
+            if not point_rows:
+                raise ScanSpecError("scan.strategy.points must not be empty")
+            num_axes = len(scan.get("axes", []))
+            for i, row in enumerate(point_rows):
+                if not isinstance(row, (list, tuple)):
+                    raise ScanSpecError(
+                        f"scan.strategy.points[{i}] must be a list/tuple"
+                    )
+                if len(row) != num_axes:
+                    raise ScanSpecError(
+                        "scan.strategy.points row length must match number of axes, "
+                        f"got {len(row)} values for {num_axes} axes at row {i}"
+                    )
+
         generators = []
         axes = []
-        for axspec in scan.get("axes", []):
-            generator_class = GENERATORS.get(axspec["type"], None)
-            if not generator_class:
+        for axis_idx, axspec in enumerate(scan.get("axes", [])):
+            generator = None
+            axis_type = axspec.get("type", None)
+            if axis_type is not None:
+                generator_class = GENERATORS.get(axis_type, None)
+                if not generator_class:
+                    raise ScanSpecError("Axis type '{}' not implemented".format(axis_type))
+                generator = generator_class(**axspec["range"])
+            elif strategy_kind != "point_list":
                 raise ScanSpecError(
-                    "Axis type '{}' not implemented".format(axspec["type"])
+                    "Axis spec is missing 'type' and cannot be used with strategy "
+                    f"'{strategy_kind}'"
                 )
-            generator = generator_class(**axspec["range"])
-            generators.append(generator)
 
             fqn = axspec["fqn"]
             pathspec = axspec["path"]
@@ -287,8 +324,15 @@ class ArgumentInterface(HasEnvironment):
                     + "(likely due to outdated argument editor after "
                     + "changes to experiment; try Recompute All Arguments)"
                 )
-            first_value = generator.points_for_level(0, random)[0]
+            if generator is not None:
+                first_value = generator.points_for_level(0, random)[0]
+            else:
+                first_value = point_rows[0][axis_idx]
+                # point_list provides full shot vectors directly, so we keep only a
+                # minimal synthetic generator to preserve axis bookkeeping.
+                generator = ListGenerator([first_value], randomise_order=False)
             store = store_type((fqn, pathspec), store_type.value_from_pyon(first_value))
+            generators.append(generator)
             axes.append(ScanAxis(self._schemata[fqn], pathspec, store))
 
         options = ScanOptions(
@@ -296,14 +340,6 @@ class ArgumentInterface(HasEnvironment):
             scan.get("num_repeats_per_point", 1),
             scan.get("randomise_order_globally", False),
         )
-        strategy_spec = scan.get("strategy", "grid")
-        if isinstance(strategy_spec, dict):
-            strategy = strategy_spec.get("kind", "grid")
-        else:
-            strategy = strategy_spec
-        if not isinstance(strategy, str) or not strategy:
-            raise ScanSpecError("scan.strategy must be a non-empty string or dict")
-
         spec = ScanSpec(axes, generators, options, strategy=strategy)
         no_axes_mode = NoAxesMode[scan.get("no_axes_mode", "single")]
         skip_on_persistent_transitory_error = scan.get(

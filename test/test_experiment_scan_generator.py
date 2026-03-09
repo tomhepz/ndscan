@@ -289,3 +289,61 @@ class GeneratePointsCase(unittest.TestCase):
         gen2 = ListGenerator(values=[10.0, 20.0], randomise_order=False)
         with self.assertRaisesRegex(ValueError, "single-level generators"):
             list(generate_points([gen1, gen2], opt, strategy="zip"))
+
+    def test_point_list_scan(self):
+        opt = ScanOptions(num_repeats=1, num_repeats_per_point=1)
+        # Only the number of axes matters for point_list.
+        gen1 = ListGenerator(values=[0.0], randomise_order=False)
+        gen2 = ListGenerator(values=[0.0], randomise_order=False)
+        points = list(
+            generate_points(
+                [gen1, gen2],
+                opt,
+                strategy={
+                    "kind": "point_list",
+                    "points": [[1.0, 10.0], [2.0, 20.0], [4.0, 40.0]],
+                },
+            )
+        )
+        self.assertEqual(points, [(1.0, 10.0), (2.0, 20.0), (4.0, 40.0)])
+
+    def test_point_list_scan_repeats(self):
+        opt = ScanOptions(num_repeats=2, num_repeats_per_point=2)
+        gen1 = ListGenerator(values=[0.0], randomise_order=False)
+        gen2 = ListGenerator(values=[0.0], randomise_order=False)
+        points = list(
+            generate_points(
+                [gen1, gen2],
+                opt,
+                strategy={
+                    "kind": "point_list",
+                    "points": [[1.0, 10.0], [2.0, 20.0]],
+                },
+            )
+        )
+        self.assertEqual(
+            points,
+            [
+                (1.0, 10.0),
+                (1.0, 10.0),
+                (2.0, 20.0),
+                (2.0, 20.0),
+                (1.0, 10.0),
+                (1.0, 10.0),
+                (2.0, 20.0),
+                (2.0, 20.0),
+            ],
+        )
+
+    def test_point_list_scan_rejects_bad_row_length(self):
+        opt = ScanOptions()
+        gen1 = ListGenerator(values=[0.0], randomise_order=False)
+        gen2 = ListGenerator(values=[0.0], randomise_order=False)
+        with self.assertRaisesRegex(ValueError, "row length"):
+            list(
+                generate_points(
+                    [gen1, gen2],
+                    opt,
+                    strategy={"kind": "point_list", "points": [[1.0], [2.0, 20.0]]},
+                )
+            )
