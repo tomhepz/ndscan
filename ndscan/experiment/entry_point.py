@@ -296,7 +296,15 @@ class ArgumentInterface(HasEnvironment):
             scan.get("num_repeats_per_point", 1),
             scan.get("randomise_order_globally", False),
         )
-        spec = ScanSpec(axes, generators, options)
+        strategy_spec = scan.get("strategy", "grid")
+        if isinstance(strategy_spec, dict):
+            strategy = strategy_spec.get("kind", "grid")
+        else:
+            strategy = strategy_spec
+        if not isinstance(strategy, str) or not strategy:
+            raise ScanSpecError("scan.strategy must be a non-empty string or dict")
+
+        spec = ScanSpec(axes, generators, options, strategy=strategy)
         no_axes_mode = NoAxesMode[scan.get("no_axes_mode", "single")]
         skip_on_persistent_transitory_error = scan.get(
             "skip_on_persistent_transitory_error", False

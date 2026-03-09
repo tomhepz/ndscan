@@ -13,6 +13,7 @@ __all__ = [
     "ListGenerator",
     "CentreSpanRefiningGenerator",
     "ScanOptions",
+    "generate_points",
 ]
 
 
@@ -303,6 +304,23 @@ class ScanOptions:
 
 
 def generate_points(
+    axis_generators: list[ScanGenerator],
+    options: ScanOptions,
+    strategy: str = "grid",
+) -> Iterator[Any]:
+    """Generate a flat linear stream of points for the requested strategy.
+
+    ``grid`` is the current Cartesian/refining behaviour.
+    ``zip`` walks axes in lockstep (point i of each axis together).
+    """
+    if strategy == "grid":
+        return _generate_grid_points(axis_generators, options)
+    if strategy == "zip":
+        return _generate_zip_points(axis_generators, options)
+    raise ValueError(f"Unknown scan strategy '{strategy}'")
+
+
+def _generate_grid_points(
     axis_generators: list[ScanGenerator], options: ScanOptions
 ) -> Iterator[Any]:
     rng = np.random.RandomState(options.seed)
@@ -341,3 +359,41 @@ def generate_points(
                     yield p[::-1]
 
         max_level += 1
+
+
+def _generate_zip_points(
+    axis_generators: list[ScanGenerator], options: ScanOptions
+) -> Iterator[Any]:
+    rng = np.random.RandomState(options.seed)
+
+    # Zip mode is intentionally simple: take level-0 points from each axis
+    # and walk them in lockstep. This gives a flat linear stream without
+    # Cartesian expansion.
+    axis_points = []
+    for i, gen in enumerate(axis_generators):
+        if not gen.has_level(0):
+            raise ValueError(f"Zip strategy axis {i} has no level-0 points")
+        if gen.has_level(1):
+            raise ValueError(
+                "Zip strategy currently supports only single-level generators; "
+                f"axis {i} has refinement levels"
+            )
+        axis_points.append(list(gen.points_for_level(0, rng)))
+
+    if not axis_points:
+        return
+
+    lengths = [len(p) for p in axis_points]
+    if len(set(lengths)) != 1:
+        raise ValueError(
+            "Zip strategy requires equal number of points across all axes, got "
+            + ", ".join(str(n) for n in lengths)
+        )
+
+    points = list(zip(*axis_points))
+    for _ in range(options.num_repeats):
+        if options.randomise_order_globally:
+            rng.shuffle(points)
+        for p in points:
+            for _ in range(options.num_repeats_per_point):
+                yield p

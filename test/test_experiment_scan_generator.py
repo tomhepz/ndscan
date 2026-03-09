@@ -249,3 +249,43 @@ class GeneratePointsCase(unittest.TestCase):
         self.assertEqual(
             points, [(-1.0, -20.0), (1.0, -20.0), (-1.0, 20.0), (1.0, 20.0)]
         )
+
+    def test_zip_scan(self):
+        opt = ScanOptions(num_repeats=1, num_repeats_per_point=1)
+        gen1 = ListGenerator(values=[1.0, 2.0, 3.0], randomise_order=False)
+        gen2 = ListGenerator(values=[10.0, 20.0, 30.0], randomise_order=False)
+        points = list(generate_points([gen1, gen2], opt, strategy="zip"))
+        self.assertEqual(points, [(1.0, 10.0), (2.0, 20.0), (3.0, 30.0)])
+
+    def test_zip_scan_repeats(self):
+        opt = ScanOptions(num_repeats=2, num_repeats_per_point=2)
+        gen1 = ListGenerator(values=[1.0, 2.0], randomise_order=False)
+        gen2 = ListGenerator(values=[10.0, 20.0], randomise_order=False)
+        points = list(generate_points([gen1, gen2], opt, strategy="zip"))
+        self.assertEqual(
+            points,
+            [
+                (1.0, 10.0),
+                (1.0, 10.0),
+                (2.0, 20.0),
+                (2.0, 20.0),
+                (1.0, 10.0),
+                (1.0, 10.0),
+                (2.0, 20.0),
+                (2.0, 20.0),
+            ],
+        )
+
+    def test_zip_scan_requires_equal_lengths(self):
+        opt = ScanOptions()
+        gen1 = ListGenerator(values=[1.0, 2.0, 3.0], randomise_order=False)
+        gen2 = ListGenerator(values=[10.0, 20.0], randomise_order=False)
+        with self.assertRaisesRegex(ValueError, "equal number of points"):
+            list(generate_points([gen1, gen2], opt, strategy="zip"))
+
+    def test_zip_scan_rejects_refining_levels(self):
+        opt = ScanOptions()
+        gen1 = RefiningGenerator(lower=0.0, upper=2.0, randomise_order=False)
+        gen2 = ListGenerator(values=[10.0, 20.0], randomise_order=False)
+        with self.assertRaisesRegex(ValueError, "single-level generators"):
+            list(generate_points([gen1, gen2], opt, strategy="zip"))

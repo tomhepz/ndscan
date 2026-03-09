@@ -64,6 +64,10 @@ class ScanSpec:
     #: Applicable :class:`.ScanOptions`.
     options: ScanOptions
 
+    #: How multi-axis points are composed into a point stream.
+    #: ``grid`` = Cartesian/refining (current behaviour), ``zip`` = lockstep.
+    strategy: str = "grid"
+
 
 class ScanRunner(HasEnvironment):
     """Runs the actual loop that executes an :class:`.ExpFragment` for a specified list
@@ -115,7 +119,7 @@ class ScanRunner(HasEnvironment):
         """
         # TODO: Support parameters which require host_setup() when changed.
         self.setup(fragment, spec.axes, axis_sinks, param_sinks)
-        self.set_points(generate_points(spec.generators, spec.options))
+        self.set_points(generate_points(spec.generators, spec.options, spec.strategy))
         while True:
             # After every pause(), pull in dataset changes (immediately as well to catch
             # changes between the time the experiment is prepared and when it is run, to
@@ -598,6 +602,7 @@ def describe_scan(
         for i, ax in enumerate(spec.axes)
     }
     desc["seed"] = spec.options.seed
+    desc["strategy"] = spec.strategy
 
     # KLUDGE: Skip non-saved channels to make sure the UI doesn't attempt to display
     # them; they should possibly just be ignored there.
