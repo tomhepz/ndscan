@@ -13,7 +13,9 @@ __all__ = [
     "SingleUseSink",
     "LastValueSink",
     "ArraySink",
+    "TeeSink",
     "AppendingDatasetSink",
+    "ResettableAppendingDatasetSink",
     "ScalarDatasetSink",
     "ResultChannel",
     "NumericChannel",
@@ -106,6 +108,33 @@ class ArraySink(ResultSink):
         """Clear the list of previously pushed values."""
         self.data = []
 
+class TeeSink(ResultSink):
+    """Sink that forwards values two underlying sinks."""
+
+    def __init__(self, primary: ResultSink, secondary: ResultSink):
+        self.primary = primary
+        self.secondary = secondary
+
+    def push(self, value: Any) -> None:
+        self.primary.push(value)
+        self.secondary.push(value)
+
+    def get_last(self) -> Any:
+        return self.primary.get_last()
+    
+    def get_all(self) -> list[Any]:
+        return self.primary.get_all()
+    
+    def clear(self) -> None:
+        for sink in (self.primary, self.secondary):
+            clear = self.getattr(sink, "clear", None)
+            if clear is not None:
+                clear()
+
+# TODO: Later we probably need to consider whether we want the archive=True (default) 
+#       of set_dataset and get_dataset. This can be problematic for non-ragged datasets, 
+#       but we eventually intend on getting rid of these anyways...
+
 
 class AppendingDatasetSink(ResultSink, HasEnvironment):
     def build(self, key: str, broadcast: bool = True) -> None:
@@ -134,6 +163,14 @@ class AppendingDatasetSink(ResultSink, HasEnvironment):
         """Read back the previously pushed values from the target dataset (if any)."""
         return [] if (self.last_value is None) else self.get_dataset(self.key)
 
+class ResettableAppendingDatasetSink(AppendingDatasetSink):
+    """Appending dataset sink that can be reset to an empty dataset"""
+
+    def clear(self) -> None:
+        self.set_dataset(
+            self.key, [], broadcast=self.broadcast
+        )
+        self.last_value = None
 
 class ScalarDatasetSink(ResultSink, HasEnvironment):
     """Sink that writes pushed results to a dataset, overwriting its previous value
