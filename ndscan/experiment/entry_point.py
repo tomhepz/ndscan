@@ -266,7 +266,15 @@ class ArgumentInterface(HasEnvironment):
         scan = self._params.get("scan", {})
 
         strategy, strategy_kind = parse_scan_strategy(
-            scan, ScanSpecError, allowed_kinds={"grid", "zip", "point_list"}
+            scan,
+            ScanSpecError,
+            allowed_kinds={
+                "grid",
+                "zip",
+                "point_list",
+                "adaptive",
+                "gaussian_adaptive_1d",
+            },
         )
         point_rows = extract_point_list_rows(
             strategy,

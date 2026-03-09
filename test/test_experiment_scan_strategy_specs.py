@@ -34,6 +34,15 @@ class ScanStrategySpecsCase(unittest.TestCase):
                 allowed_kinds={"grid", "zip", "point_list"},
             )
 
+    def test_parse_scan_strategy_allows_adaptive_dict(self):
+        strategy, kind = parse_scan_strategy(
+            {"strategy": {"kind": "adaptive", "driver": "gaussian_1d", "config": {}}},
+            ValueError,
+            allowed_kinds={"grid", "zip", "point_list", "adaptive"},
+        )
+        self.assertEqual(kind, "adaptive")
+        self.assertEqual(strategy["driver"], "gaussian_1d")
+
     def test_extract_point_list_rows_ignores_non_point_list(self):
         rows = extract_point_list_rows("zip", 2, error_type=ValueError)
         self.assertEqual(rows, [])

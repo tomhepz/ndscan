@@ -18,7 +18,12 @@ from artiq.language import HasEnvironment, host_only, kernel, kernel_from_string
 from .default_analysis import AnnotationContext, DefaultAnalysis
 from .fragment import ExpFragment, RestartKernelTransitoryError, TransitoryError
 from .parameters import ParamHandle, ParamStore
-from .point_source import IteratorPointSource, PointSource, StrategyPointSource
+from .point_source import (
+    IteratorPointSource,
+    PointObservation,
+    PointSource,
+    StrategyPointSource,
+)
 from .result_channels import ResultChannel, ResultSink, SingleUseSink
 from .scan_generator import ScanGenerator, ScanOptions
 from .scan_strategy_specs import get_scan_strategy_kind
@@ -67,7 +72,8 @@ class ScanSpec:
 
     #: How multi-axis points are composed into a point stream.
     #: String form (``"grid"``, ``"zip"``, …) and dict form
-    #: (``{"kind": "point_list", "points": [...]}``) are both accepted.
+    #: (e.g. ``{"kind": "point_list", "points": [...]}`` or adaptive strategy specs)
+    #: are both accepted.
     strategy: str | dict[str, Any] = "grid"
 
 
@@ -183,6 +189,15 @@ class ScanRunner(HasEnvironment):
                 value = axis.param_store.value_from_pyon(value)
             axis.param_store.set_value(value)
 
+    @host_only
+    def _make_axis_observation_map(
+        self, axis_values: Iterable[Any]
+    ) -> dict[tuple[str, str], Any]:
+        return {
+            (axis.param_schema["fqn"], axis.path): value
+            for axis, value in zip(self._axes, axis_values)
+        }
+
 
 class ResultBatcher:
     """Intercepts all result channel sinks of the given fragment, making sure that every
@@ -264,6 +279,7 @@ class HostScanRunner(ScanRunner):
         self._axes = axes
         self._axis_sinks = axis_sinks
         self._param_sinks = [] if param_sinks is None else param_sinks
+        self._point_index = 0
 
     def set_point_source(self, point_source: PointSource) -> None:
         self._point_source = point_source
@@ -286,6 +302,7 @@ class HostScanRunner(ScanRunner):
                     self._fragment.device_setup()
                     self._fragment.run_once()
 
+                    result_values = self._make_observed_result_values()
                     result_batcher.ensure_complete_and_push()
                     for sink, value in zip(self._axis_sinks, axis_values):
                         # Now that we know self._fragment successfully produced a
@@ -293,12 +310,34 @@ class HostScanRunner(ScanRunner):
                         sink.push(value)
                     for handle, sink in self._param_sinks:
                         sink.push(handle.get())
+                    self._point_source.observe(
+                        PointObservation(
+                            point_index=self._point_index,
+                            axis_values=tuple(axis_values),
+                            result_values=result_values,
+                            axis_by_param=self._make_axis_observation_map(axis_values),
+                        )
+                    )
+                    self._point_index += 1
 
                     if self.scheduler.check_pause():
                         return False
             finally:
                 if device_cleanup:
                     self._fragment.device_cleanup()
+
+    @host_only
+    def _make_observed_result_values(self) -> dict[str, Any]:
+        values = {}
+        channels = dict[str, ResultChannel]()
+        self._fragment._collect_result_channels(channels)
+        for path, channel in channels.items():
+            sink = getattr(channel, "sink", None)
+            if sink is None or not hasattr(sink, "is_set"):
+                continue
+            if sink.is_set():
+                values[path] = sink.get()
+        return values
 
 
 class KernelScanRunner(ScanRunner):
@@ -350,6 +389,7 @@ class KernelScanRunner(ScanRunner):
         # appropriately handle the results streaming in via async RPCs, so unfortunately
         # cannot use the context manager API.
         self._result_batcher: ResultBatcher | None = None
+        self._point_index = 0
 
     def set_point_source(self, point_source: PointSource) -> None:
         self._point_source = point_source
@@ -475,10 +515,13 @@ class KernelScanRunner(ScanRunner):
         # choice based on the observation that even for fast experiments, 10 points take
         # a good fraction of a second, while it is still low enough not to run into any
         # memory management issues on the kernel.
-        CHUNK_SIZE = 10
+        DEFAULT_CHUNK_SIZE = 10
+        chunk_size = self._point_source.preferred_batch_size(DEFAULT_CHUNK_SIZE)
+        if chunk_size <= 0:
+            chunk_size = DEFAULT_CHUNK_SIZE
 
         self._current_chunk.extend(
-            self._point_source.take_points(CHUNK_SIZE - len(self._current_chunk))
+            self._point_source.take_points(max(0, chunk_size - len(self._current_chunk)))
         )
 
         values = tuple([] for _ in self._axes)
@@ -511,6 +554,7 @@ class KernelScanRunner(ScanRunner):
         # the next synchronous RPC request. As this only occurs when the user code
         # contains a logic error (failure to call push() on a result channel), this
         # should be acceptable, however.
+        result_values = self._make_observed_result_values()
         self._result_batcher.ensure_complete_and_push()
 
         # Now that we know that a complete point was successfully produced, also record
@@ -518,6 +562,15 @@ class KernelScanRunner(ScanRunner):
         values = self._current_chunk.pop(0)
         for value, sink in zip(values, self._axis_sinks):
             sink.push(value)
+        self._point_source.observe(
+            PointObservation(
+                point_index=self._point_index,
+                axis_values=tuple(values),
+                result_values=result_values,
+                axis_by_param=self._make_axis_observation_map(values),
+            )
+        )
+        self._point_index += 1
 
         # Prepare for the next point.
         self._update_host_param_stores()
@@ -544,6 +597,19 @@ class KernelScanRunner(ScanRunner):
         # Current chunk is empty, but we might be at a chunk boundary.
         self._get_param_values_chunk()
         return not self._current_chunk
+
+    @host_only
+    def _make_observed_result_values(self) -> dict[str, Any]:
+        values = {}
+        channels = dict[str, ResultChannel]()
+        self._fragment._collect_result_channels(channels)
+        for path, channel in channels.items():
+            sink = getattr(channel, "sink", None)
+            if sink is None or not hasattr(sink, "is_set"):
+                continue
+            if sink.is_set():
+                values[path] = sink.get()
+        return values
 
 
 def select_runner_class(fragment: ExpFragment) -> type[ScanRunner]:
@@ -621,7 +687,12 @@ def describe_scan(
         for i, ax in enumerate(spec.axes)
     }
     desc["seed"] = spec.options.seed
-    desc["strategy"] = get_scan_strategy_kind(spec.strategy, ValueError)
+    strategy_kind = get_scan_strategy_kind(spec.strategy, ValueError)
+    desc["strategy"] = strategy_kind
+    if isinstance(spec.strategy, dict) and "driver" in spec.strategy:
+        desc["strategy_driver"] = spec.strategy["driver"]
+    elif strategy_kind == "gaussian_adaptive_1d":
+        desc["strategy_driver"] = "gaussian_1d"
 
     # KLUDGE: Skip non-saved channels to make sure the UI doesn't attempt to display
     # them; they should possibly just be ignored there.

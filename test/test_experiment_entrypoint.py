@@ -3,6 +3,7 @@ Tests for ndscan.experiment top-level runners.
 """
 
 import json
+import math
 
 from fixtures import (
     AddOneAggregate,
@@ -157,6 +158,19 @@ class ZipTwoAxisFragment(ExpFragment):
 ScanZipTwoAxisExp = make_fragment_scan_exp(ZipTwoAxisFragment)
 
 
+class AdaptiveGaussianFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("x", FloatParam, "x", default=0.0)
+        self.setattr_result("result", FloatChannel)
+
+    def run_once(self):
+        x = self.x.get()
+        self.result.push(math.exp(-0.5 * ((x - 6.0) / 1.1) ** 2))
+
+
+ScanAdaptiveGaussianExp = make_fragment_scan_exp(AdaptiveGaussianFragment)
+
+
 class TestAggregateExpFragment(HasEnvironmentCase):
     def test_aggregate(self):
         parent = self.create(AddOneAggregate, [])
@@ -178,6 +192,44 @@ class TestAggregateExpFragment(HasEnvironmentCase):
 
 
 class FragmentScanExpCase(HasEnvironmentCase):
+    def test_run_adaptive_gaussian_1d_scan_strategy(self):
+        exp = self.create(ScanAdaptiveGaussianExp)
+        exp.args._params["scan"]["axes"].append(
+            {
+                "type": "linear",
+                "range": {
+                    "start": 0.0,
+                    "stop": 10.0,
+                    "num_points": 2,
+                    "randomise_order": False,
+                },
+                "fqn": "test_experiment_entrypoint.AdaptiveGaussianFragment.x",
+                "path": "*",
+            }
+        )
+        exp.args._params["scan"]["strategy"] = {
+            "kind": "adaptive",
+            "driver": "gaussian_1d",
+            "config": {
+                "num_points": 9,
+                "warmup_points": 5,
+                "candidate_count": 64,
+            },
+        }
+
+        exp.prepare()
+        exp.run()
+
+        def d(key):
+            return self.dataset_db.get("ndscan.rid_0." + key)
+
+        points = d("points.axis_0")
+        self.assertEqual(len(points), 9)
+        self.assertEqual(points[:5], [0.0, 2.5, 5.0, 7.5, 10.0])
+        self.assertEqual(len(d("points.channel_result")), 9)
+        self.assertEqual(d("strategy"), "adaptive")
+        self.assertEqual(d("strategy_driver"), "gaussian_1d")
+
     def test_run_zip_scan_strategy(self):
         exp = self.create(ScanZipTwoAxisExp)
         exp.args._params["scan"]["axes"].append(
