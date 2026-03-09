@@ -30,6 +30,65 @@ class Scan1DFragment(ExpFragment):
         )[:2]
 
 
+class TwoAxisValueFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("a", FloatParam, "a", default=0.0)
+        self.setattr_param("b", FloatParam, "b", default=0.0)
+        self.setattr_result("result", FloatChannel)
+
+    def run_once(self):
+        self.result.push(self.a.get() * 100.0 + self.b.get())
+
+
+class Scan2DZipFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_fragment("child", TwoAxisValueFragment)
+        setattr_subscan(
+            self,
+            "scan",
+            self.child,
+            [(self.child, "a"), (self.child, "b")],
+            expose_analysis_results=False,
+        )
+
+    def run_once(self):
+        return self.scan.run(
+            [
+                (self.child.a, ListGenerator([1.0, 2.0, 4.0], False)),
+                (self.child.b, ListGenerator([10.0, 20.0, 40.0], False)),
+            ],
+            ScanOptions(seed=1234),
+            strategy="zip",
+            execute_default_analyses=False,
+        )[:2]
+
+
+class Scan2DPointListFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_fragment("child", TwoAxisValueFragment)
+        setattr_subscan(
+            self,
+            "scan",
+            self.child,
+            [(self.child, "a"), (self.child, "b")],
+            expose_analysis_results=False,
+        )
+
+    def run_once(self):
+        return self.scan.run(
+            [
+                (self.child.a, ListGenerator([0.0], False)),
+                (self.child.b, ListGenerator([0.0], False)),
+            ],
+            ScanOptions(seed=1234),
+            strategy={
+                "kind": "point_list",
+                "points": [[1.0, 10.0], [4.0, 40.0], [2.0, 20.0]],
+            },
+            execute_default_analyses=False,
+        )[:2]
+
+
 class SubscanCase(ExpFragmentCase):
     def test_1d_subscan_return(self):
         parent = self.create(Scan1DFragment, AddOneFragment)
@@ -38,6 +97,31 @@ class SubscanCase(ExpFragmentCase):
     def test_1d_rebound_subscan_return(self):
         parent = self.create(Scan1DFragment, ReboundAddOneFragment)
         self._test_1d(parent, parent.child.add_one.result)
+
+    def test_2d_zip_subscan_return(self):
+        parent = self.create(Scan2DZipFragment)
+        coords, values = parent.run_once()
+        self.assertEqual(coords[parent.child.a], [1.0, 2.0, 4.0])
+        self.assertEqual(coords[parent.child.b], [10.0, 20.0, 40.0])
+        self.assertEqual(values[parent.child.result], [110.0, 220.0, 440.0])
+
+    def test_2d_point_list_subscan_return(self):
+        parent = self.create(Scan2DPointListFragment)
+        coords, values = parent.run_once()
+        self.assertEqual(coords[parent.child.a], [1.0, 4.0, 2.0])
+        self.assertEqual(coords[parent.child.b], [10.0, 40.0, 20.0])
+        self.assertEqual(values[parent.child.result], [110.0, 440.0, 220.0])
+
+    def test_2d_strategy_is_exposed_in_subscan_spec(self):
+        zip_parent = self.create(Scan2DZipFragment)
+        zip_results = run_fragment_once(zip_parent)
+        zip_spec = json.loads(zip_results[zip_parent.scan_spec])
+        self.assertEqual(zip_spec["strategy"], "zip")
+
+        point_parent = self.create(Scan2DPointListFragment)
+        point_results = run_fragment_once(point_parent)
+        point_spec = json.loads(point_results[point_parent.scan_spec])
+        self.assertEqual(point_spec["strategy"], "point_list")
 
     def _test_1d(self, parent, result_channel):
         coords, values = parent.run_once()
@@ -201,6 +285,36 @@ class RunSubscanTwiceFragment(ExpFragment):
         return r0, r1
 
 
+class RelationSubscanChildFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("p", FloatParam, "p", default=0.0)
+        self.setattr_param("q", FloatParam, "q", default=0.0)
+        self.bind_param_relation("q", [self.p], lambda p: p**2 + 4.0)
+        self.setattr_result("result", FloatChannel)
+
+    def run_once(self):
+        self.result.push(self.q.get())
+
+
+class RelationSubscanParentFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_fragment("child", RelationSubscanChildFragment)
+        setattr_subscan(
+            self,
+            "scan",
+            self.child,
+            [(self.child, "p")],
+            expose_analysis_results=False,
+        )
+
+    def run_once(self):
+        self.scan.run(
+            [(self.child.p, ListGenerator([3.0, 6.0, 7.0], False))],
+            ScanOptions(seed=1234),
+            execute_default_analyses=False,
+        )
+
+
 class RunSubscanTwiceCase(ExpFragmentCase):
     def test_1d_subscan_twice(self):
         parent = self.create(RunSubscanTwiceFragment)
@@ -253,6 +367,7 @@ class SubscanFlatDatasetCase(ExpFragmentCase):
         self.assertEqual(d("source_id"), "rid_0")
         self.assertEqual(d("completed"), True)
         self.assertEqual(d("fragment_fqn"), "fixtures.AddOneFragment")
+        self.assertEqual(d("strategy"), "grid")
         self.assertEqual(j("segment_fields"), {"starts": "starts"})
 
         axes = j("axes")
@@ -281,10 +396,25 @@ class SubscanFlatDatasetCase(ExpFragmentCase):
                 flat_prefix + "points.channel_result",
                 flat_prefix + "seed",
                 flat_prefix + "segment_fields",
+                flat_prefix + "strategy",
                 flat_prefix + "source_id",
                 flat_prefix + "starts",
             },
         )
+
+    def test_flat_stream_records_relation_target_param(self):
+        parent = self.create(RelationSubscanParentFragment)
+        parent.run_once()
+
+        flat_prefix = parent.scan._flat_dataset_prefix
+
+        def d(key):
+            return self.dataset_db.get(flat_prefix + key)
+
+        self.assertEqual(d("points.axis_0"), [3.0, 6.0, 7.0])
+        self.assertEqual(d("points.channel_result"), [13.0, 40.0, 53.0])
+        self.assertEqual(d("points.param_q"), [13.0, 40.0, 53.0])
+        self.assertNotIn(flat_prefix + "points.param_p", self.dataset_db.data)
 
 
 class CharacteriseBulkPushFragment(ExpFragment):
@@ -411,6 +541,84 @@ class NestedRaggedOuterSubscan(SubscanExpFragment):
 NestedRaggedOuterSubscanScan = make_fragment_scan_exp(NestedRaggedOuterSubscan)
 
 
+class NestedStrategyLeafFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("p", FloatParam, "p", default=0.0)
+        self.setattr_param("z", FloatParam, "z", default=0.0)
+        self.setattr_param("x", FloatParam, "x", default=0.0)
+        self.setattr_param("y", FloatParam, "y", default=0.0)
+        self.setattr_result("result", FloatChannel)
+
+    def run_once(self):
+        self.result.push(
+            self.p.get() * 1000.0
+            + self.z.get() * 100.0
+            + self.x.get() * 10.0
+            + self.y.get()
+        )
+
+
+class NestedStrategyInnerSubscan(SubscanExpFragment):
+    def build_fragment(self):
+        self.setattr_fragment("leaf", NestedStrategyLeafFragment)
+        super().build_fragment(
+            self,
+            "leaf",
+            [(self.leaf, "x"), (self.leaf, "y")],
+            expose_analysis_results=False,
+        )
+
+    def _configure(self):
+        self.configure(
+            [
+                (self.leaf.x, ListGenerator([1.0, 2.0], False)),
+                (self.leaf.y, ListGenerator([10.0, 20.0], False)),
+            ],
+            options=ScanOptions(seed=11),
+            strategy="zip",
+        )
+
+    def host_setup(self):
+        self._configure()
+        super().host_setup()
+
+    def device_setup(self):
+        self._configure()
+        self.device_setup_subfragments()
+
+
+class NestedStrategyOuterSubscan(SubscanExpFragment):
+    def build_fragment(self):
+        self.setattr_fragment("inner", NestedStrategyInnerSubscan)
+        super().build_fragment(
+            self,
+            "inner",
+            [(self.inner.leaf, "p"), (self.inner.leaf, "z")],
+            expose_analysis_results=False,
+        )
+
+    def _configure(self):
+        self.configure(
+            [
+                (self.inner.leaf.p, ListGenerator([0.0], False)),
+                (self.inner.leaf.z, ListGenerator([0.0], False)),
+            ],
+            options=ScanOptions(seed=22),
+            strategy={
+                "kind": "point_list",
+                "points": [[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]],
+            },
+        )
+
+    def host_setup(self):
+        self._configure()
+        super().host_setup()
+
+    def device_setup(self):
+        self._configure()
+        self.device_setup_subfragments()
+
+
 class RaggedSubscanDatasetCase(HasEnvironmentCase):
     def test_nested_ragged_preview_is_broadcast_only(self):
         exp = self.create(NestedRaggedOuterSubscanScan)
@@ -519,6 +727,38 @@ class RaggedSubscanDatasetCase(HasEnvironmentCase):
         self.assertEqual(
             d("points.channel_scan_channel_result"),
             [[1.0, 2.0], [1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0]],
+        )
+
+
+class NestedStrategySubscanDatasetCase(ExpFragmentCase):
+    def test_nested_strategy_subscan_writes_recursive_starts(self):
+        parent = self.create(NestedStrategyOuterSubscan)
+        run_fragment_once(parent)
+
+        outer_prefix = parent._subscan._flat_dataset_prefix
+        inner_prefix = parent.inner._subscan._flat_dataset_prefix
+
+        def d(prefix, key):
+            return self.dataset_db.get(prefix + key)
+
+        self.assertEqual(d(outer_prefix, "strategy"), "point_list")
+        self.assertEqual(d(inner_prefix, "strategy"), "zip")
+
+        # One outer subscan execution with three points.
+        self.assertEqual(d(outer_prefix, "starts"), [0])
+        self.assertEqual(d(outer_prefix, "points.axis_0"), [1.0, 2.0, 3.0])
+        self.assertEqual(d(outer_prefix, "points.axis_1"), [4.0, 5.0, 6.0])
+
+        # Inner subscan runs once per outer point and has two zip points each time.
+        self.assertEqual(d(inner_prefix, "starts"), [0, 2, 4])
+        self.assertEqual(d(inner_prefix, "points.axis_0"), [1.0, 2.0, 1.0, 2.0, 1.0, 2.0])
+        self.assertEqual(
+            d(inner_prefix, "points.axis_1"),
+            [10.0, 20.0, 10.0, 20.0, 10.0, 20.0],
+        )
+        self.assertEqual(
+            d(inner_prefix, "points.channel_result"),
+            [1420.0, 1440.0, 2520.0, 2540.0, 3620.0, 3640.0],
         )
 
 

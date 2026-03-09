@@ -64,6 +64,7 @@ class Subscan:
         preview_child_result_sinks: dict[ResultChannel, ResettableAppendingDatasetSink],
         preview_dataset_prefix: str,
         flat_child_result_sinks: dict[ResultChannel, AppendingDatasetSink],
+        flat_param_sinks: list[tuple[ParamHandle, AppendingDatasetSink]],
         flat_dataset_prefix: str,
         flat_segment_start_sink: AppendingDatasetSink,
         aggregate_result_channels: dict[ResultChannel, ResultChannel],
@@ -80,6 +81,7 @@ class Subscan:
         self._preview_child_result_sinks = preview_child_result_sinks
         self._preview_dataset_prefix = preview_dataset_prefix
         self._flat_child_result_sinks = flat_child_result_sinks
+        self._flat_param_sinks = flat_param_sinks
         self._flat_dataset_prefix = flat_dataset_prefix
         self._flat_segment_start_sink = flat_segment_start_sink
         self._aggregate_result_channels = aggregate_result_channels
@@ -125,7 +127,12 @@ class Subscan:
         self.set_scan_spec(axis_generators, options, strategy)
         self._prepare_preview()
         self._fragment.prepare()
-        self._runner.run(self._fragment, self._spec, self._point_coordinate_sinks)
+        self._runner.run(
+            self._fragment,
+            self._spec,
+            self._point_coordinate_sinks,
+            self._flat_param_sinks,
+        )
         return self._push_results(execute_default_analyses)
 
     def set_scan_spec(
@@ -183,7 +190,12 @@ class Subscan:
             )
 
         self._spec = ScanSpec(axes, generators, options, strategy=strategy)
-        self._runner.setup(self._fragment, axes, self._point_coordinate_sinks)
+        self._runner.setup(
+            self._fragment,
+            axes,
+            self._point_coordinate_sinks,
+            self._flat_param_sinks,
+        )
         self._regenerate_points()
 
     def _regenerate_points(self):
@@ -576,6 +588,7 @@ def setup_subscan(
     child_result_sinks = {}
     preview_child_result_sinks = {}
     flat_child_result_sinks = {}
+    flat_param_sinks = []
     aggregate_result_channels = {}
     short_child_channel_names = {}
     for full_name, short_name in channel_name_map.items():
@@ -611,6 +624,25 @@ def setup_subscan(
             save_by_default=save_results_by_default and channel.save_by_default,
             archive_by_default=False,
         )
+
+    relation_targets = {}
+    scanned_fragment._collect_param_relation_targets(relation_targets)
+    if relation_targets:
+        param_name_map = shorten_to_unambiguous_suffixes(
+            relation_targets.keys(),
+            lambda path, n: "/".join(path.split("/")[-n:]),
+        )
+        for full_path, handle in relation_targets.items():
+            short_identifier = param_name_map[full_path].replace("/", "_")
+            flat_param_sinks.append(
+                (
+                    handle,
+                    AppendingDatasetSink(
+                        result_target,
+                        flat_dataset_prefix + "points.param_" + short_identifier,
+                    ),
+                )
+            )
 
     spec_channel = result_target.setattr_result(name_prefix + "spec", SubscanChannel)
 
@@ -667,6 +699,7 @@ def setup_subscan(
         preview_child_result_sinks,
         preview_dataset_prefix,
         flat_child_result_sinks,
+        flat_param_sinks,
         flat_dataset_prefix,
         flat_segment_start_sink,
         aggregate_result_channels,
