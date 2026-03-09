@@ -21,6 +21,7 @@ from .fragment import ExpFragment, RestartKernelTransitoryError, TransitoryError
 from .parameters import ParamHandle, ParamStore
 from .result_channels import ResultChannel, ResultSink, SingleUseSink
 from .scan_generator import ScanGenerator, ScanOptions, generate_points
+from .scan_strategy_specs import get_scan_strategy_kind
 from .utils import is_kernel
 
 __all__ = [
@@ -603,10 +604,7 @@ def describe_scan(
         for i, ax in enumerate(spec.axes)
     }
     desc["seed"] = spec.options.seed
-    if isinstance(spec.strategy, dict):
-        desc["strategy"] = spec.strategy.get("kind", "grid")
-    else:
-        desc["strategy"] = spec.strategy
+    desc["strategy"] = get_scan_strategy_kind(spec.strategy, ValueError)
 
     # KLUDGE: Skip non-saved channels to make sure the UI doesn't attempt to display
     # them; they should possibly just be ignored there.

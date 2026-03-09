@@ -66,6 +66,7 @@ from .scan_runner import (
     filter_default_analyses,
     select_runner_class,
 )
+from .scan_strategy_specs import extract_point_list_rows, parse_scan_strategy
 from .utils import dump_json, is_kernel, to_metadata_broadcast_type
 
 __all__ = [
@@ -264,37 +265,15 @@ class ArgumentInterface(HasEnvironment):
     def make_scan_spec(self) -> tuple[ScanSpec, NoAxesMode, bool]:
         scan = self._params.get("scan", {})
 
-        strategy_spec = scan.get("strategy", "grid")
-        strategy: str | dict[str, Any] = strategy_spec
-        if isinstance(strategy_spec, dict):
-            strategy_kind = strategy_spec.get("kind", "grid")
-        else:
-            strategy_kind = strategy_spec
-        if not isinstance(strategy_kind, str) or not strategy_kind:
-            raise ScanSpecError("scan.strategy must be a non-empty string or dict")
-
-        point_rows: list[Any] = []
-        if strategy_kind == "point_list":
-            if not isinstance(strategy_spec, dict):
-                raise ScanSpecError(
-                    "point_list strategy must be specified as a dict with 'points'"
-                )
-            point_rows = strategy_spec.get("points", [])
-            if not isinstance(point_rows, list):
-                raise ScanSpecError("scan.strategy.points must be a list")
-            if not point_rows:
-                raise ScanSpecError("scan.strategy.points must not be empty")
-            num_axes = len(scan.get("axes", []))
-            for i, row in enumerate(point_rows):
-                if not isinstance(row, (list, tuple)):
-                    raise ScanSpecError(
-                        f"scan.strategy.points[{i}] must be a list/tuple"
-                    )
-                if len(row) != num_axes:
-                    raise ScanSpecError(
-                        "scan.strategy.points row length must match number of axes, "
-                        f"got {len(row)} values for {num_axes} axes at row {i}"
-                    )
+        strategy, strategy_kind = parse_scan_strategy(
+            scan, ScanSpecError, allowed_kinds={"grid", "zip", "point_list"}
+        )
+        point_rows = extract_point_list_rows(
+            strategy,
+            len(scan.get("axes", [])),
+            error_type=ScanSpecError,
+            require_non_empty=True,
+        )
 
         generators = []
         axes = []
@@ -330,7 +309,9 @@ class ArgumentInterface(HasEnvironment):
                 first_value = point_rows[0][axis_idx]
                 # point_list provides full shot vectors directly, so we keep only a
                 # minimal synthetic generator to preserve axis bookkeeping.
-                generator = ListGenerator([first_value], randomise_order=False)
+                generator = ListGenerator(
+                    [row[axis_idx] for row in point_rows], randomise_order=False
+                )
             store = store_type((fqn, pathspec), store_type.value_from_pyon(first_value))
             generators.append(generator)
             axes.append(ScanAxis(self._schemata[fqn], pathspec, store))

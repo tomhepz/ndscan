@@ -6,6 +6,8 @@ from typing import Any
 
 import numpy as np
 
+from .scan_strategy_specs import extract_point_list_rows, get_scan_strategy_kind
+
 __all__ = [
     "ScanGenerator",
     "RefiningGenerator",
@@ -314,20 +316,20 @@ def generate_points(
     ``zip`` walks axes in lockstep (point i of each axis together).
     ``point_list`` consumes explicit shot vectors from ``strategy["points"]``.
     """
-    strategy_kind = strategy
-    if isinstance(strategy, dict):
-        strategy_kind = strategy.get("kind", "grid")
-
-    if not isinstance(strategy_kind, str) or not strategy_kind:
-        raise ValueError("scan strategy must be a non-empty string")
+    strategy_kind = get_scan_strategy_kind(strategy, ValueError)
 
     if strategy_kind == "grid":
         return _generate_grid_points(axis_generators, options)
     if strategy_kind == "zip":
         return _generate_zip_points(axis_generators, options)
     if strategy_kind == "point_list":
-        points = strategy.get("points", []) if isinstance(strategy, dict) else []
-        return _generate_point_list_points(axis_generators, points, options)
+        rows = extract_point_list_rows(
+            strategy,
+            len(axis_generators),
+            error_type=ValueError,
+            require_non_empty=False,
+        )
+        return _generate_rows(rows, options)
     raise ValueError(f"Unknown scan strategy '{strategy_kind}'")
 
 
@@ -401,36 +403,15 @@ def _generate_zip_points(
             + ", ".join(str(n) for n in lengths)
         )
 
-    points = list(zip(*axis_points))
-    for _ in range(options.num_repeats):
-        if options.randomise_order_globally:
-            rng.shuffle(points)
-        for p in points:
-            for _ in range(options.num_repeats_per_point):
-                yield p
+    rows = [tuple(row) for row in zip(*axis_points)]
+    return _generate_rows(rows, options)
 
 
-def _generate_point_list_points(
-    axis_generators: list[ScanGenerator],
-    points: list[Any],
-    options: ScanOptions,
+def _generate_rows(
+    rows: list[list[Any] | tuple[Any, ...]], options: ScanOptions
 ) -> Iterator[Any]:
     rng = np.random.RandomState(options.seed)
-
-    # point_list is similar to zip semantically, but the user provides full
-    # shot vectors row-by-row instead of per-axis lists column-by-column.
-    num_axes = len(axis_generators)
-    rows = []
-    for i, row in enumerate(points):
-        if not isinstance(row, (list, tuple)):
-            raise ValueError(f"point_list row {i} must be a list/tuple")
-        if len(row) != num_axes:
-            raise ValueError(
-                "point_list row length must match number of scan axes, got "
-                f"{len(row)} values for {num_axes} axes at row {i}"
-            )
-        rows.append(tuple(row))
-
+    rows = [tuple(row) for row in rows]
     for _ in range(options.num_repeats):
         if options.randomise_order_globally:
             rng.shuffle(rows)
