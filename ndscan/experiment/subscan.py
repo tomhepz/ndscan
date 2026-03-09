@@ -5,6 +5,7 @@ another child fragment as part of its execution.
 
 import hashlib
 import re
+import time
 from collections import OrderedDict
 from copy import copy
 from functools import reduce
@@ -67,6 +68,9 @@ class Subscan:
         flat_param_sinks: list[tuple[ParamHandle, AppendingDatasetSink]],
         flat_dataset_prefix: str,
         flat_segment_start_sink: AppendingDatasetSink,
+        point_timestamp_sink: TeeSink | None,
+        preview_point_timestamp_sink: ResettableAppendingDatasetSink | None,
+        flat_segment_start_timestamp_sink: AppendingDatasetSink | None,
         aggregate_result_channels: dict[ResultChannel, ResultChannel],
         short_child_channel_names: dict[ResultChannel, str],
         analyses: list[DefaultAnalysis],
@@ -84,6 +88,9 @@ class Subscan:
         self._flat_param_sinks = flat_param_sinks
         self._flat_dataset_prefix = flat_dataset_prefix
         self._flat_segment_start_sink = flat_segment_start_sink
+        self._point_timestamp_sink = point_timestamp_sink
+        self._preview_point_timestamp_sink = preview_point_timestamp_sink
+        self._flat_segment_start_timestamp_sink = flat_segment_start_timestamp_sink
         self._aggregate_result_channels = aggregate_result_channels
         self._short_child_channel_names = short_child_channel_names
         self._analyses = analyses
@@ -92,6 +99,7 @@ class Subscan:
         self._flat_coordinate_sinks = {}
         self._flat_next_point_index = 0
         self._point_coordinate_sinks = []
+        self._segment_start_timestamp = None
 
     def run(
         self,
@@ -132,6 +140,7 @@ class Subscan:
             self._spec,
             self._point_coordinate_sinks,
             self._flat_param_sinks,
+            acquired_at_sink=self._point_timestamp_sink,
         )
         return self._push_results(execute_default_analyses)
 
@@ -195,6 +204,7 @@ class Subscan:
             axes,
             self._point_coordinate_sinks,
             self._flat_param_sinks,
+            acquired_at_sink=self._point_timestamp_sink,
         )
         self._regenerate_points()
 
@@ -237,6 +247,9 @@ class Subscan:
             sink.clear()
         for sink in self._preview_coordinate_sinks.values():
             sink.clear()
+        if self._preview_point_timestamp_sink is not None:
+            self._preview_point_timestamp_sink.clear()
+            self._segment_start_timestamp = time.time()
         self._broadcast_preview_metadata()
         self._broadcast_flat_metadata()
 
@@ -270,6 +283,10 @@ class Subscan:
             num_points = 0
 
         self._flat_segment_start_sink.push(self._flat_next_point_index)
+        if self._flat_segment_start_timestamp_sink is not None:
+            if self._segment_start_timestamp is None:
+                self._segment_start_timestamp = time.time()
+            self._flat_segment_start_timestamp_sink.push(self._segment_start_timestamp)
         self._flat_next_point_index += num_points
 
     def _broadcast_preview_metadata(self):
@@ -279,6 +296,7 @@ class Subscan:
         rid = getattr(self._runner.scheduler, "rid", 0)
         self._preview_push("source_id", f"{source_prefix}_{rid}")
         self._preview_push("completed", False)
+        self._preview_push("start_timestamp", time.time())
         for name, value in scan_desc.items():
             ds_value = to_metadata_broadcast_type(value)
             self._preview_push(name, dump_json(value) if ds_value is None else ds_value)
@@ -290,6 +308,12 @@ class Subscan:
         rid = getattr(self._runner.scheduler, "rid", 0)
         self._flat_push("source_id", f"{source_prefix}_{rid}")
         self._flat_push("completed", False)
+        self._flat_push(
+            "start_timestamp",
+            self._segment_start_timestamp
+            if self._segment_start_timestamp is not None
+            else time.time(),
+        )
         flat_desc = {
             "fragment_fqn": scan_desc["fragment_fqn"],
             "seed": scan_desc["seed"],
@@ -300,6 +324,8 @@ class Subscan:
                 "starts": "starts",
             },
         }
+        if self._flat_segment_start_timestamp_sink is not None:
+            flat_desc["segment_fields"]["start_timestamps"] = "start_timestamps"
         for name, value in flat_desc.items():
             ds_value = to_metadata_broadcast_type(value)
             self._flat_push(name, dump_json(value) if ds_value is None else ds_value)
@@ -428,6 +454,7 @@ def setattr_subscan(
     axis_params: list[tuple[Fragment, str]],
     save_results_by_default: bool = True,
     expose_analysis_results: bool = True,
+    timestamp_depth_limit: int | None = 1,
 ) -> Subscan:
     """Set up a scan for the given subfragment.
 
@@ -472,6 +499,7 @@ def setattr_subscan(
         axis_params,
         save_results_by_default,
         expose_analysis_results,
+        timestamp_depth_limit,
     )
     setattr(owner, scan_name, subscan)
     return subscan
@@ -543,6 +571,7 @@ def setup_subscan(
     axis_params: list[tuple[Fragment, str]],
     save_results_by_default: bool = True,
     expose_analysis_results: bool = True,
+    timestamp_depth_limit: int | None = 1,
 ) -> Subscan:
     # Override target parameter stores with newly created stores.
     # TODO: Potentially make handles have identity and accept them directly.
@@ -579,6 +608,10 @@ def setup_subscan(
     )
     flat_dataset_prefix = _make_flat_dataset_prefix(
         result_target, name_prefix, scanned_fragment
+    )
+    subscan_depth = len(result_target._fragment_path) + 1
+    write_timestamps = (
+        timestamp_depth_limit is None or subscan_depth <= timestamp_depth_limit
     )
 
     # … and re-export result channels that the collected data will be pushed to.
@@ -684,6 +717,24 @@ def setup_subscan(
     flat_segment_start_sink = AppendingDatasetSink(
         result_target, flat_dataset_prefix + "starts"
     )
+    preview_point_timestamp_sink = None
+    point_timestamp_sink = None
+    flat_segment_start_timestamp_sink = None
+    if write_timestamps:
+        preview_point_timestamp_sink = ResettableAppendingDatasetSink(
+            result_target,
+            preview_dataset_prefix + "points.acquired_at",
+            archive=False,
+        )
+        flat_point_timestamp_sink = AppendingDatasetSink(
+            result_target, flat_dataset_prefix + "points.acquired_at"
+        )
+        point_timestamp_sink = TeeSink(
+            preview_point_timestamp_sink, flat_point_timestamp_sink
+        )
+        flat_segment_start_timestamp_sink = AppendingDatasetSink(
+            result_target, flat_dataset_prefix + "start_timestamps"
+        )
 
     class SubscanInstance(Subscan):
         # ARTIQ compiler needs a different type for each RunnerInstance.
@@ -702,6 +753,9 @@ def setup_subscan(
         flat_param_sinks,
         flat_dataset_prefix,
         flat_segment_start_sink,
+        point_timestamp_sink,
+        preview_point_timestamp_sink,
+        flat_segment_start_timestamp_sink,
         aggregate_result_channels,
         short_child_channel_names,
         analyses,
@@ -807,6 +861,7 @@ class SubscanExpFragment(ExpFragment):
         axis_params: list[tuple[Fragment, str]],
         save_results_by_default: bool = True,
         expose_analysis_results: bool = True,
+        timestamp_depth_limit: int | None = 1,
     ) -> None:
         """
         :param scanned_fragment_parent: The fragment that owns the scanned fragment.
@@ -834,6 +889,7 @@ class SubscanExpFragment(ExpFragment):
             axis_params,
             save_results_by_default,
             expose_analysis_results,
+            timestamp_depth_limit,
         )
         if not is_kernel(scanned_fragment.run_once):
             self.run_once = self._subscan.acquire

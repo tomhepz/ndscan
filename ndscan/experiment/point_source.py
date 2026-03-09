@@ -27,6 +27,7 @@ class PointObservation:
     axis_values: tuple[Any, ...]
     result_values: dict[str, Any]
     axis_by_param: dict[tuple[str, str], Any] | None = None
+    acquired_at: float | None = None
 
 
 class PointSource:

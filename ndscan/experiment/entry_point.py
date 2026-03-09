@@ -47,6 +47,7 @@ from .fragment import (
     TransitoryError,
 )
 from .parameters import ParamBase, ParamStore
+from .point_source import PointObservation, PointSource
 from .relation_specs import (
     activate_scan_arg_param_relations,
     collect_explicit_param_targets,
@@ -86,6 +87,133 @@ if "sphinx" in sys.modules:
     __all__.append("FragmentScanExperiment")
 
 logger = logging.getLogger(__name__)
+
+
+def _run_fragment_point_with_retries(
+    fragment: ExpFragment,
+    *,
+    max_rtio_underflow_retries: int,
+    max_transitory_error_retries: int,
+    num_underflows_caught: int = 0,
+    num_transitory_errors_caught: int = 0,
+    skip_on_persistent_transitory_error: bool = False,
+) -> tuple[str, int, int]:
+    """Run one fragment point with shared retry/restart semantics.
+
+    Returns ``(outcome, underflows, transitory_errors)`` where ``outcome`` is one of:
+    ``"completed"``, ``"restart_kernel"``, ``"skipped"``.
+    """
+    while True:
+        try:
+            fragment.device_setup()
+            fragment.run_once()
+            return ("completed", num_underflows_caught, num_transitory_errors_caught)
+        except RTIOUnderflow:
+            num_underflows_caught += 1
+            if num_underflows_caught > max_rtio_underflow_retries:
+                raise
+            print(
+                "Ignoring RTIOUnderflow (",
+                num_underflows_caught,
+                "/",
+                max_rtio_underflow_retries,
+                ")",
+            )
+        except RestartKernelTransitoryError:
+            num_transitory_errors_caught += 1
+            if num_transitory_errors_caught > max_transitory_error_retries:
+                raise
+            print(
+                "Caught transitory error (",
+                num_transitory_errors_caught,
+                "/",
+                max_transitory_error_retries,
+                "), restarting kernel",
+            )
+            return (
+                "restart_kernel",
+                num_underflows_caught,
+                num_transitory_errors_caught,
+            )
+        except TransitoryError:
+            num_transitory_errors_caught += 1
+            if num_transitory_errors_caught > max_transitory_error_retries:
+                if skip_on_persistent_transitory_error:
+                    return (
+                        "skipped",
+                        num_underflows_caught,
+                        num_transitory_errors_caught,
+                    )
+                raise
+            print(
+                "Caught transitory error (",
+                num_transitory_errors_caught,
+                "/",
+                max_transitory_error_retries,
+                "), retrying",
+            )
+
+
+class _NoAxesPointSource(PointSource):
+    """Point source for no-axes single/repeat execution.
+
+    Emits empty point tuples so the regular scan runners can drive execution.
+    """
+
+    def __init__(
+        self,
+        *,
+        repeat: bool,
+        on_point_completed: Callable[[], None] | None = None,
+    ) -> None:
+        self._repeat = repeat
+        self._on_point_completed = on_point_completed
+        self._done_single = False
+
+    def next_point(self):
+        if self._repeat:
+            return ()
+        if self._done_single:
+            return None
+        self._done_single = True
+        return ()
+
+    def take_points(self, max_points: int) -> list[tuple]:
+        if max_points < 0:
+            raise ValueError("max_points must be non-negative")
+        if max_points == 0:
+            return []
+        if self._repeat:
+            return [()] * max_points
+        point = self.next_point()
+        return [] if point is None else [point]
+
+    def observe(self, observation: PointObservation) -> None:
+        del observation
+        if self._on_point_completed is not None:
+            self._on_point_completed()
+
+
+class _TimeSeriesPointSource(PointSource):
+    """Point source for no-axes time-series scans."""
+
+    def __init__(self, start_monotonic: float):
+        self._start_monotonic = start_monotonic
+
+    def next_point(self):
+        return (time.monotonic() - self._start_monotonic,)
+
+    def take_points(self, max_points: int) -> list[tuple]:
+        if max_points < 0:
+            raise ValueError("max_points must be non-negative")
+        if max_points == 0:
+            return []
+        return [self.next_point() for _ in range(max_points)]
+
+    def preferred_batch_size(self, default: int) -> int:
+        del default
+        # Keep timestamps as close as possible to the corresponding acquisition.
+        return 1
 
 
 class ScanSpecError(Exception):
@@ -461,6 +589,9 @@ class TopLevelRunner(HasEnvironment):
         )
 
         self._coordinate_sinks = None
+        self._acquired_at_sink = AppendingDatasetSink(
+            self, self.dataset_prefix + "points.acquired_at"
+        )
 
         self.fragment.prepare()
 
@@ -474,7 +605,7 @@ class TopLevelRunner(HasEnvironment):
             )
 
         if not self.spec.axes and not self._is_time_series:
-            self._run_continuous()
+            self._run_no_axes_with_runner()
             return None, {c: s.get_last() for c, s in self._scan_result_sinks.items()}
 
         if self._is_time_series:
@@ -483,7 +614,12 @@ class TopLevelRunner(HasEnvironment):
             )
             self._coordinate_sinks = [self._timestamp_sink]
             self._time_series_start = time.monotonic()
-            self._run_continuous()
+            if is_kernel(self.fragment.run_once):
+                # Keep legacy kernel time-series path for now; host time-series already
+                # uses the unified runner engine below.
+                self._run_continuous()
+            else:
+                self._run_time_series_with_runner()
         else:
             # This returns either HostScanRunner or KernelScanRunner
             runner = select_runner_class(self.fragment)(
@@ -501,10 +637,61 @@ class TopLevelRunner(HasEnvironment):
                 self.spec,
                 self._coordinate_sinks,
                 self._param_sinks,
+                acquired_at_sink=self._acquired_at_sink,
             )
             self._set_completed()
 
         return self._make_coordinate_dict(), self._make_value_dict()
+
+    def _run_no_axes_with_runner(self):
+        self._point_phase = False
+        runner = select_runner_class(self.fragment)(
+            self,
+            max_rtio_underflow_retries=self.max_rtio_underflow_retries,
+            max_transitory_error_retries=self.max_transitory_error_retries,
+            skip_on_persistent_transitory_error=self.skip_on_persistent_transitory_error,
+        )
+        point_source = _NoAxesPointSource(
+            repeat=self._continue_running,
+            on_point_completed=self._toggle_point_phase,
+        )
+        try:
+            runner.run(
+                self.fragment,
+                self.spec,
+                [],
+                self._param_sinks,
+                acquired_at_sink=self._acquired_at_sink,
+                point_source=point_source,
+            )
+        finally:
+            self._set_completed()
+
+    def _toggle_point_phase(self):
+        self._point_phase = not self._point_phase
+        self.set_dataset(
+            self.dataset_prefix + "point_phase", self._point_phase, broadcast=True
+        )
+
+    def _run_time_series_with_runner(self):
+        runner = select_runner_class(self.fragment)(
+            self,
+            max_rtio_underflow_retries=self.max_rtio_underflow_retries,
+            max_transitory_error_retries=self.max_transitory_error_retries,
+            skip_on_persistent_transitory_error=self.skip_on_persistent_transitory_error,
+        )
+        point_source = _TimeSeriesPointSource(self._time_series_start)
+        try:
+            runner.run(
+                self.fragment,
+                self.spec,
+                self._coordinate_sinks,
+                self._param_sinks,
+                acquired_at_sink=self._acquired_at_sink,
+                point_source=point_source,
+            )
+        finally:
+            self._set_completed()
 
     def _make_coordinate_dict(self):
         return OrderedDict(
@@ -553,9 +740,6 @@ class TopLevelRunner(HasEnvironment):
 
     def _run_continuous(self):
         self._point_phase = False
-        # TODO: Unify with _FragmentRunner.
-        self.num_current_transitory_errors = 0
-        self.num_current_underflows = 0
         try:
             while True:
                 # After every pause(), pull in dataset changes (immediately as well to
@@ -587,60 +771,19 @@ class TopLevelRunner(HasEnvironment):
 
     @portable
     def _continuous_loop(self):
-        # TODO: Unify with _FragmentRunner.
         try:
             while not self.scheduler.check_pause():
-                try:
-                    self.fragment.device_setup()
-                    self.fragment.run_once()
-                    self._finish_continuous_point()
-                    if not self._continue_running:
-                        return True
-
-                    # One point is now finished, so reset transitory error counters for
-                    # the next one.
-                    self.num_current_transitory_errors = 0
-                    self.num_current_underflows = 0
-                except RTIOUnderflow:
-                    self.num_current_underflows += 1
-                    if self.num_current_underflows > self.max_rtio_underflow_retries:
-                        raise
-                    print(
-                        "Ignoring RTIOUnderflow (",
-                        self.num_current_underflows,
-                        "/",
-                        self.max_rtio_underflow_retries,
-                        ")",
-                    )
-                except RestartKernelTransitoryError:
-                    self.num_current_transitory_errors += 1
-                    if (
-                        self.num_current_transitory_errors
-                        > self.max_transitory_error_retries
-                    ):
-                        raise
-                    print(
-                        "Caught transitory error (",
-                        self.num_current_transitory_errors,
-                        "/",
-                        self.max_transitory_error_retries,
-                        "), restarting kernel",
-                    )
+                outcome, _, _ = _run_fragment_point_with_retries(
+                    self.fragment,
+                    max_rtio_underflow_retries=self.max_rtio_underflow_retries,
+                    max_transitory_error_retries=self.max_transitory_error_retries,
+                )
+                if outcome == "restart_kernel":
                     return False
-                except TransitoryError:
-                    self.num_current_transitory_errors += 1
-                    if (
-                        self.num_current_transitory_errors
-                        > self.max_transitory_error_retries
-                    ):
-                        raise
-                    print(
-                        "Caught transitory error (",
-                        self.num_current_transitory_errors,
-                        "/",
-                        self.max_transitory_error_retries,
-                        "), retrying",
-                    )
+                assert outcome == "completed"
+                self._finish_continuous_point()
+                if not self._continue_running:
+                    return True
             return False
         finally:
             self.fragment.device_cleanup()
@@ -649,6 +792,8 @@ class TopLevelRunner(HasEnvironment):
 
     @rpc(flags={"async"})
     def _finish_continuous_point(self):
+        if self._acquired_at_sink is not None:
+            self._acquired_at_sink.push(time.time())
         if self._is_time_series:
             self._timestamp_sink.push(time.monotonic() - self._time_series_start)
         else:
@@ -758,6 +903,7 @@ class TopLevelRunner(HasEnvironment):
         push("source_id", f"{source_prefix}_{self.scheduler.rid}")
 
         push("completed", False)
+        push("start_timestamp", time.time())
 
         self._scan_desc = describe_scan(
             self.spec, self.fragment, self._short_child_channel_names
@@ -856,7 +1002,6 @@ class _FragmentRunner(HasEnvironment):
         :return: ``True`` if execution completed, ``False`` if it should be attempted
             again (RestartKernelTransitoryError).
         """
-        # TODO: Unify with FragmentScanExperiment._run_continuous().
         if is_kernel(self.fragment.run_once):
             self.fragment._require_host_execution_for_param_relations(
                 "run_fragment_once() with kernel run_once() is not supported."
@@ -876,45 +1021,19 @@ class _FragmentRunner(HasEnvironment):
     @portable
     def _run(self):
         try:
-            while True:
-                try:
-                    self.fragment.device_setup()
-                    self.fragment.run_once()
-                    return True
-                except RTIOUnderflow:
-                    self.num_underflows_caught += 1
-                    if self.num_underflows_caught > self.max_rtio_underflow_retries:
-                        raise
-                    print(
-                        "Ignoring RTIOUnderflow (",
-                        self.num_underflows_caught,
-                        "/",
-                        self.max_rtio_underflow_retries,
-                        ")",
-                    )
-                except RestartKernelTransitoryError:
-                    self.num_transitory_errors_caught += 1
-                    if (
-                        self.num_transitory_errors_caught
-                        > self.max_transitory_error_retries
-                    ):
-                        raise
-                    print("Caught transitory error, restarting kernel")
-                    return False
-                except TransitoryError:
-                    self.num_transitory_errors_caught += 1
-                    if (
-                        self.num_transitory_errors_caught
-                        > self.max_transitory_error_retries
-                    ):
-                        raise
-                    print(
-                        "Caught transitory error (",
-                        self.num_transitory_errors_caught,
-                        "/",
-                        self.max_transitory_error_retries,
-                        "), retrying",
-                    )
+            outcome, self.num_underflows_caught, self.num_transitory_errors_caught = (
+                _run_fragment_point_with_retries(
+                    self.fragment,
+                    max_rtio_underflow_retries=self.max_rtio_underflow_retries,
+                    max_transitory_error_retries=self.max_transitory_error_retries,
+                    num_underflows_caught=self.num_underflows_caught,
+                    num_transitory_errors_caught=self.num_transitory_errors_caught,
+                )
+            )
+            if outcome == "restart_kernel":
+                return False
+            assert outcome == "completed"
+            return True
         finally:
             self.fragment.device_cleanup()
         assert False, "Execution never reaches here, return is just to pacify compiler."

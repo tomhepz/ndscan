@@ -259,6 +259,7 @@ class FragmentScanExpCase(HasEnvironmentCase):
         self.assertEqual(d("points.axis_0"), [1.0, 2.0])
         self.assertEqual(d("points.axis_1"), [10.0, 20.0])
         self.assertEqual(d("points.channel_result"), [110.0, 220.0])
+        self.assertEqual(len(d("points.acquired_at")), 2)
         self.assertEqual(d("strategy"), "zip")
 
     def test_run_point_list_scan_strategy(self):
@@ -289,6 +290,7 @@ class FragmentScanExpCase(HasEnvironmentCase):
         self.assertEqual(d("points.axis_0"), [1.0, 2.0, 4.0])
         self.assertEqual(d("points.axis_1"), [10.0, 20.0, 40.0])
         self.assertEqual(d("points.channel_result"), [110.0, 220.0, 440.0])
+        self.assertEqual(len(d("points.acquired_at")), 3)
         self.assertEqual(d("strategy"), "point_list")
 
     def test_point_list_scan_rejects_bad_row_shape(self):

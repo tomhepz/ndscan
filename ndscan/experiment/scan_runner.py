@@ -7,6 +7,7 @@ will likely be used by end users via
 """
 
 import logging
+import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -115,6 +116,8 @@ class ScanRunner(HasEnvironment):
         spec: ScanSpec,
         axis_sinks: list[ResultSink],
         param_sinks: list[tuple[ParamHandle, ResultSink]] | None = None,
+        acquired_at_sink: ResultSink | None = None,
+        point_source: PointSource | None = None,
     ) -> None:
         """Run a scan of the given fragment, with axes as specified.
 
@@ -126,10 +129,16 @@ class ScanRunner(HasEnvironment):
             coordinates for each scan point to, matching ``scan.axes``.
         """
         # TODO: Support parameters which require host_setup() when changed.
-        self.setup(fragment, spec.axes, axis_sinks, param_sinks)
-        self.set_point_source(
-            StrategyPointSource(spec.generators, spec.options, spec.strategy)
+        self.setup(
+            fragment,
+            spec.axes,
+            axis_sinks,
+            param_sinks,
+            acquired_at_sink=acquired_at_sink,
         )
+        if point_source is None:
+            point_source = StrategyPointSource(spec.generators, spec.options, spec.strategy)
+        self.set_point_source(point_source)
         while True:
             # After every pause(), pull in dataset changes (immediately as well to catch
             # changes between the time the experiment is prepared and when it is run, to
@@ -156,6 +165,7 @@ class ScanRunner(HasEnvironment):
         axes: list[ScanAxis],
         axis_sinks: list[ResultSink],
         param_sinks: list[tuple[ParamHandle, ResultSink]] | None = None,
+        acquired_at_sink: ResultSink | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -185,6 +195,8 @@ class ScanRunner(HasEnvironment):
             :meth:`ParamStore.value_from_pyon` before being set.
         """
         for axis, value in zip(self._axes, axis_values):
+            if axis.param_store is None:
+                continue
             if values_are_pyon:
                 value = axis.param_store.value_from_pyon(value)
             axis.param_store.set_value(value)
@@ -274,11 +286,13 @@ class HostScanRunner(ScanRunner):
         axes: list[ScanAxis],
         axis_sinks: list[ResultSink],
         param_sinks: list[tuple[ParamHandle, ResultSink]] | None = None,
+        acquired_at_sink: ResultSink | None = None,
     ) -> None:
         self._fragment = fragment
         self._axes = axes
         self._axis_sinks = axis_sinks
         self._param_sinks = [] if param_sinks is None else param_sinks
+        self._acquired_at_sink = acquired_at_sink
         self._point_index = 0
 
     def set_point_source(self, point_source: PointSource) -> None:
@@ -299,8 +313,51 @@ class HostScanRunner(ScanRunner):
                     # Apply computed host-side parameter relations for this point.
                     self._fragment._apply_param_relations()
 
-                    self._fragment.device_setup()
-                    self._fragment.run_once()
+                    num_underflows = 0
+                    num_transitory_errors = 0
+                    while True:
+                        if self.scheduler.check_pause():
+                            return False
+                        try:
+                            self._fragment.device_setup()
+                            self._fragment.run_once()
+                            break
+                        except RTIOUnderflow:
+                            if num_underflows >= self.max_rtio_underflow_retries:
+                                raise
+                            num_underflows += 1
+                            print(
+                                "Ignoring RTIOUnderflow (",
+                                num_underflows,
+                                "/",
+                                self.max_rtio_underflow_retries,
+                                ")",
+                            )
+                            result_batcher.discard_current()
+                        except RestartKernelTransitoryError:
+                            print("Caught transitory error, restarting kernel")
+                            result_batcher.discard_current()
+                            return False
+                        except TransitoryError:
+                            if num_transitory_errors >= self.max_transitory_error_retries:
+                                if self.skip_on_persistent_transitory_error:
+                                    logger.error("Skipping point: %s", axis_values)
+                                    result_batcher.discard_current()
+                                    break
+                                raise
+                            num_transitory_errors += 1
+                            print(
+                                "Caught transitory error (",
+                                num_transitory_errors,
+                                "/",
+                                self.max_transitory_error_retries,
+                                "), retrying",
+                            )
+                            result_batcher.discard_current()
+
+                    if num_transitory_errors >= self.max_transitory_error_retries and self.skip_on_persistent_transitory_error:
+                        # Point skipped after too many transitory errors.
+                        continue
 
                     result_values = self._make_observed_result_values()
                     result_batcher.ensure_complete_and_push()
@@ -310,18 +367,20 @@ class HostScanRunner(ScanRunner):
                         sink.push(value)
                     for handle, sink in self._param_sinks:
                         sink.push(handle.get())
+                    acquired_at = time.time()
+                    if self._acquired_at_sink is not None:
+                        self._acquired_at_sink.push(acquired_at)
+
                     self._point_source.observe(
                         PointObservation(
                             point_index=self._point_index,
                             axis_values=tuple(axis_values),
                             result_values=result_values,
                             axis_by_param=self._make_axis_observation_map(axis_values),
+                            acquired_at=acquired_at,
                         )
                     )
                     self._point_index += 1
-
-                    if self.scheduler.check_pause():
-                        return False
             finally:
                 if device_cleanup:
                     self._fragment.device_cleanup()
@@ -351,6 +410,7 @@ class KernelScanRunner(ScanRunner):
         axes: list[ScanAxis],
         axis_sinks: list[ResultSink],
         param_sinks: list[tuple[ParamHandle, ResultSink]] | None = None,
+        acquired_at_sink: ResultSink | None = None,
     ) -> None:
         self._fragment = fragment
 
@@ -358,6 +418,7 @@ class KernelScanRunner(ScanRunner):
         # _get_param_values_chunk RPC call later.
         self._axes = axes
         self._axis_sinks = axis_sinks
+        self._acquired_at_sink = acquired_at_sink
 
         # Interval between scheduler.check_pause() calls on the core device (or rather,
         # the minimum interval; calls are only made after a point has been completed).
@@ -368,22 +429,25 @@ class KernelScanRunner(ScanRunner):
         # scan axis. Synthesize a return type annotation (`def foo(self): -> …`) with
         # the concrete type for this scan so the compiler can infer the types in
         # run_chunk() correctly.
-        self._get_param_values_chunk.__func__.__annotations__ = {
-            "return": tuple.__class_getitem__(
-                tuple(list[a.param_store.RpcType] for a in axes)
-            )
-        }
+        if axes:
+            self._get_param_values_chunk.__func__.__annotations__ = {
+                "return": tuple.__class_getitem__(
+                    tuple(list[a.param_store.RpcType] for a in axes)
+                )
+            }
 
-        # Build kernel function that calls _get_param_values_chunk() and iterates over
-        # the returned values, assigning them to the respective parameter stores and
-        # calling _run_point() for each.
-        #
-        # Currently, this can't be expressed as generic code, as there is no way to
-        # express indexing or deconstructing a tuple of values of inhomogeneous types
-        # without actually writing it out as an assignment from a tuple value.
-        for i, axis in enumerate(axes):
-            setattr(self, f"_param_setter_{i}", axis.param_store.set_from_rpc)
-        self._run_chunk = self._build_run_chunk(len(axes))
+            # Build kernel function that calls _get_param_values_chunk() and iterates over
+            # the returned values, assigning them to the respective parameter stores and
+            # calling _run_point() for each.
+            #
+            # Currently, this can't be expressed as generic code, as there is no way to
+            # express indexing or deconstructing a tuple of values of inhomogeneous types
+            # without actually writing it out as an assignment from a tuple value.
+            for i, axis in enumerate(axes):
+                setattr(self, f"_param_setter_{i}", axis.param_store.set_from_rpc)
+            self._run_chunk = self._build_run_chunk(len(axes))
+        else:
+            self._run_chunk = self._run_chunk_no_axes
 
         # We'll have to set up the ResultBatcher on the host during the scan to
         # appropriately handle the results streaming in via async RPCs, so unfortunately
@@ -415,6 +479,16 @@ class KernelScanRunner(ScanRunner):
         code += "        return self._RUN_CHUNK_INTERRUPTED\n"
         code += "return self._RUN_CHUNK_PROCEED"
         return kernel_from_string(["self"], code)
+
+    @kernel
+    def _run_chunk_no_axes(self):
+        num_points = self._get_num_points_chunk()
+        if num_points == 0:
+            return self._RUN_CHUNK_SCAN_COMPLETE
+        for _ in range(num_points):
+            if self._run_point():
+                return self._RUN_CHUNK_INTERRUPTED
+        return self._RUN_CHUNK_PROCEED
 
     @rpc(flags={"async"})
     def _install_result_batcher(self):
@@ -537,6 +611,17 @@ class KernelScanRunner(ScanRunner):
                 )
         return values
 
+    @rpc
+    def _get_num_points_chunk(self) -> int:
+        DEFAULT_CHUNK_SIZE = 10
+        chunk_size = self._point_source.preferred_batch_size(DEFAULT_CHUNK_SIZE)
+        if chunk_size <= 0:
+            chunk_size = DEFAULT_CHUNK_SIZE
+        self._current_chunk.extend(
+            self._point_source.take_points(max(0, chunk_size - len(self._current_chunk)))
+        )
+        return len(self._current_chunk)
+
     @rpc(flags={"async"})
     def _retry_point(self):
         self._result_batcher.discard_current()
@@ -562,12 +647,17 @@ class KernelScanRunner(ScanRunner):
         values = self._current_chunk.pop(0)
         for value, sink in zip(values, self._axis_sinks):
             sink.push(value)
+        acquired_at = time.time()
+        if self._acquired_at_sink is not None:
+            self._acquired_at_sink.push(acquired_at)
+
         self._point_source.observe(
             PointObservation(
                 point_index=self._point_index,
                 axis_values=tuple(values),
                 result_values=result_values,
                 axis_by_param=self._make_axis_observation_map(values),
+                acquired_at=acquired_at,
             )
         )
         self._point_index += 1
