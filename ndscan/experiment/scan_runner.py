@@ -20,7 +20,8 @@ from .default_analysis import AnnotationContext, DefaultAnalysis
 from .fragment import ExpFragment, RestartKernelTransitoryError, TransitoryError
 from .parameters import ParamHandle, ParamStore
 from .result_channels import ResultChannel, ResultSink, SingleUseSink
-from .scan_generator import ScanGenerator, ScanOptions, generate_points
+from .scan_generator import ScanGenerator, ScanOptions
+from .scan_point_strategies import generate_points_for_strategy
 from .scan_strategy_specs import get_scan_strategy_kind
 from .utils import is_kernel
 
@@ -121,7 +122,9 @@ class ScanRunner(HasEnvironment):
         """
         # TODO: Support parameters which require host_setup() when changed.
         self.setup(fragment, spec.axes, axis_sinks, param_sinks)
-        self.set_points(generate_points(spec.generators, spec.options, spec.strategy))
+        self.set_points(
+            generate_points_for_strategy(spec.generators, spec.options, spec.strategy)
+        )
         while True:
             # After every pause(), pull in dataset changes (immediately as well to catch
             # changes between the time the experiment is prepared and when it is run, to
@@ -163,6 +166,20 @@ class ScanRunner(HasEnvironment):
             interrupted and ``acquire()`` should be called again to complete it.
         """
         raise NotImplementedError
+
+    @host_only
+    def _set_axis_param_stores(
+        self, axis_values: Iterable[Any], *, values_are_pyon: bool = False
+    ) -> None:
+        """Apply one point's axis values to the active scan-axis stores.
+
+        :param values_are_pyon: Whether values need conversion via
+            :meth:`ParamStore.value_from_pyon` before being set.
+        """
+        for axis, value in zip(self._axes, axis_values):
+            if values_are_pyon:
+                value = axis.param_store.value_from_pyon(value)
+            axis.param_store.set_value(value)
 
 
 class ResultBatcher:
@@ -259,8 +276,7 @@ class HostScanRunner(ScanRunner):
                     axis_values = next(self._points, None)
                     if axis_values is None:
                         return True
-                    for axis, value in zip(self._axes, axis_values):
-                        axis.param_store.set_value(value)
+                    self._set_axis_param_stores(axis_values)
 
                     # Apply computed host-side parameter relations for this point.
                     self._fragment._apply_param_relations()
@@ -517,8 +533,7 @@ class KernelScanRunner(ScanRunner):
             return
         # Set the host-side parameter stores.
         next_values = self._current_chunk[0]
-        for value, axis in zip(next_values, self._axes):
-            axis.param_store.set_value(axis.param_store.value_from_pyon(value))
+        self._set_axis_param_stores(next_values, values_are_pyon=True)
 
     @host_only
     def _is_out_of_points(self):

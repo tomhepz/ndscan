@@ -8,6 +8,7 @@ import re
 from collections import OrderedDict
 from copy import copy
 from functools import reduce
+from typing import Any
 
 from artiq.language import kernel, portable, rpc
 
@@ -30,7 +31,8 @@ from .result_channels import (
     SubscanChannel,
     TeeSink,
 )
-from .scan_generator import ScanGenerator, ScanOptions, generate_points
+from .scan_generator import ListGenerator, ScanGenerator, ScanOptions
+from .scan_point_strategies import generate_points_for_strategy
 from .scan_runner import (
     ScanAxis,
     ScanRunner,
@@ -40,6 +42,7 @@ from .scan_runner import (
     filter_default_analyses,
     select_runner_class,
 )
+from .scan_strategy_specs import extract_point_list_rows, get_scan_strategy_kind
 from .utils import dump_json, is_kernel, to_metadata_broadcast_type
 
 __all__ = ["setattr_subscan", "Subscan", "SubscanExpFragment"]
@@ -92,6 +95,7 @@ class Subscan:
         self,
         axis_generators: list[tuple[ParamHandle, ScanGenerator]],
         options: ScanOptions = ScanOptions(),
+        strategy: str | dict[str, Any] = "grid",
         execute_default_analyses: bool = True,
     ) -> tuple[dict[ParamHandle, list], dict[ResultChannel, list]]:
         """Run the subscan with the given axis iteration specifications, and return the
@@ -102,6 +106,9 @@ class Subscan:
             :func:`setattr_subscan` to set up), and the :class:`ScanGenerator` to use
             to generate the points.
         :param options: :class:`ScanOptions` to control scan execution.
+        :param strategy: Point composition strategy. ``"grid"`` (default) keeps the
+            existing Cartesian/refining behaviour, ``"zip"`` runs axes in lockstep,
+            and ``{"kind": "point_list", "points": [...]}`` runs explicit shot rows.
         :param execute_default_analyses: Whether to run any default analyses associated
             with the subfragment after the scan is complete, even if they are not
             exposed as owning fragment channels.
@@ -115,7 +122,7 @@ class Subscan:
         # implementation might also need something similar).
         for sink in self._child_result_sinks.values():
             sink.clear()
-        self.set_scan_spec(axis_generators, options)
+        self.set_scan_spec(axis_generators, options, strategy)
         self._prepare_preview()
         self._fragment.prepare()
         self._runner.run(self._fragment, self._spec, self._point_coordinate_sinks)
@@ -125,9 +132,18 @@ class Subscan:
         self,
         axis_generators: list[tuple[ParamHandle, ScanGenerator]],
         options: ScanOptions = ScanOptions(),
+        strategy: str | dict[str, Any] = "grid",
     ):
         for sink in self._preview_coordinate_sinks.values():
             sink.clear()
+
+        strategy_kind = get_scan_strategy_kind(strategy, ValueError)
+        point_rows = extract_point_list_rows(
+            strategy,
+            len(axis_generators),
+            error_type=ValueError,
+            require_non_empty=False,
+        )
 
         axes: list[ScanAxis] = []
         generators: list[ScanGenerator] = []
@@ -140,6 +156,12 @@ class Subscan:
         for i, (param_handle, generator) in enumerate(axis_generators):
             axis = self._possible_axes.get(param_handle, None)
             assert axis is not None, "Axis not registered in setattr_subscan()"
+            if strategy_kind == "point_list":
+                # For explicit shot rows, axes still define parameter mapping/order.
+                # Generator values are replaced by per-axis columns from point rows.
+                generator = ListGenerator(
+                    [row[i] for row in point_rows], randomise_order=False
+                )
             axes.append(axis)
             generators.append(generator)
             array_sink = ArraySink()
@@ -160,13 +182,15 @@ class Subscan:
                 TeeSink(array_sink, TeeSink(preview_sink, flat_sink))
             )
 
-        self._spec = ScanSpec(axes, generators, options)
+        self._spec = ScanSpec(axes, generators, options, strategy=strategy)
         self._runner.setup(self._fragment, axes, self._point_coordinate_sinks)
         self._regenerate_points()
 
     def _regenerate_points(self):
         self._runner.set_points(
-            generate_points(self._spec.generators, self._spec.options)
+            generate_points_for_strategy(
+                self._spec.generators, self._spec.options, self._spec.strategy
+            )
         )
 
     @portable
@@ -257,6 +281,7 @@ class Subscan:
         flat_desc = {
             "fragment_fqn": scan_desc["fragment_fqn"],
             "seed": scan_desc["seed"],
+            "strategy": scan_desc["strategy"],
             "axes": _strip_param_defaults(scan_desc["axes"]),
             "channels": scan_desc["channels"],
             "segment_fields": {
@@ -784,6 +809,7 @@ class SubscanExpFragment(ExpFragment):
         self,
         axis_generators: list[tuple[ParamHandle, ScanGenerator]],
         options: ScanOptions = ScanOptions(),
+        strategy: str | dict[str, Any] = "grid",
     ) -> None:
         """Configure point generators for each scan axis, and scan options.
 
@@ -800,8 +826,9 @@ class SubscanExpFragment(ExpFragment):
             in the constructor; see :meth:`build_fragment`), and the
             :class:`.ScanGenerator` to use to generate the points.
         :param options: :class:`.ScanOptions` to control scan execution.
+        :param strategy: Point composition strategy (see :meth:`Subscan.run`).
         """
-        self._subscan.set_scan_spec(axis_generators, options)
+        self._subscan.set_scan_spec(axis_generators, options, strategy)
 
     # We don't forward prepare(), as there will be a top-level ExpFragment to own the
     # scanned fragment anyway, which can then take care of this directly.
