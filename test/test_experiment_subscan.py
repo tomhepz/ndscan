@@ -202,6 +202,27 @@ class RunSubscanTwiceFragment(ExpFragment):
         return r0, r1
 
 
+class SavedAndUnsavedResultFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("value", FloatParam, "Value to return", 0.0)
+        self.setattr_result("saved", FloatChannel)
+        self.setattr_result("debug", OpaqueChannel, save_by_default=False)
+
+    def run_once(self):
+        value = self.value.get()
+        self.saved.push(value + 1)
+        self.debug.push({"raw": value})
+
+
+class ScanSavedAndUnsavedFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_fragment("child", SavedAndUnsavedResultFragment)
+        setattr_subscan(self, "scan", self.child, [(self.child, "value")])
+
+    def run_once(self):
+        self.scan.run([(self.child.value, LinearGenerator(0, 3, 4, False))])
+
+
 class RunSubscanTwiceCase(ExpFragmentCase):
     def test_1d_subscan_twice(self):
         parent = self.create(RunSubscanTwiceFragment)
@@ -212,6 +233,111 @@ class RunSubscanTwiceCase(ExpFragmentCase):
             expected_results = [v + 1 for v in expected_values]
             self.assertEqual(coords, {parent.child.value: expected_values})
             self.assertEqual(values, {parent.child.result: expected_results})
+
+    def test_flat_site_tracks_segments(self):
+        parent = self.create(RunSubscanTwiceFragment)
+        parent.run_once()
+
+        prefix = parent.scan._flat_dataset_prefix
+        self.assertEqual(self.dataset_db.get(prefix + "starts"), [0, 4])
+        self.assertEqual(self.dataset_db.get(prefix + "current_segment"), -1)
+        self.assertEqual(
+            self.dataset_db.get(prefix + "points.axis_0"),
+            [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+        )
+        self.assertEqual(
+            self.dataset_db.get(prefix + "points.channel_result"),
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        )
+
+
+class FlatSubscanSiteCase(ExpFragmentCase):
+    def test_flat_site_single_run(self):
+        parent = self.create(Scan1DFragment, AddOneFragment)
+        parent.run_once()
+
+        prefix = parent.scan._flat_dataset_prefix
+        self.assertEqual(self.dataset_db.get(prefix + "starts"), [0])
+        self.assertEqual(self.dataset_db.get(prefix + "current_segment"), -1)
+        self.assertEqual(
+            self.dataset_db.get(prefix + "points.axis_0"),
+            [0.0, 1.0, 2.0, 3.0],
+        )
+        self.assertEqual(
+            self.dataset_db.get(prefix + "points.channel_result"),
+            [1.0, 2.0, 3.0, 4.0],
+        )
+
+    def test_flat_site_metadata_present(self):
+        parent = self.create(Scan1DFragment, AddOneFragment)
+        parent.run_once()
+
+        prefix = parent.scan._flat_dataset_prefix
+        self.assertEqual(
+            self.dataset_db.get(prefix + "fragment_fqn"),
+            "fixtures.AddOneFragment",
+        )
+        self.assertEqual(self.dataset_db.get(prefix + "seed"), 1234)
+        self.assertEqual(
+            json.loads(self.dataset_db.get(prefix + "segment_fields")),
+            {"starts": "starts"},
+        )
+        self.assertEqual(
+            json.loads(self.dataset_db.get(prefix + "segment_state_fields")),
+            {"current": "current_segment"},
+        )
+        self.assertEqual(
+            json.loads(self.dataset_db.get(prefix + "channels")),
+            {
+                "result": {
+                    "description": "",
+                    "scale": 1.0,
+                    "path": "child/result",
+                    "type": "float",
+                    "unit": "",
+                }
+            },
+        )
+
+    def test_flat_site_writes_only_saved_channels(self):
+        parent = self.create(ScanSavedAndUnsavedFragment)
+        parent.run_once()
+
+        prefix = parent.scan._flat_dataset_prefix
+        self.assertEqual(
+            json.loads(self.dataset_db.get(prefix + "channels")).keys(),
+            {"saved"},
+        )
+        self.assertEqual(
+            self.dataset_db.get(prefix + "points.channel_saved"),
+            [1.0, 2.0, 3.0, 4.0],
+        )
+        self.assertNotIn(prefix + "points.channel_debug", self.dataset_db.data)
+
+    def test_flat_site_allows_compatible_reconfiguration(self):
+        parent = self.create(Scan1DFragment, AddOneFragment)
+
+        parent.scan.run([(parent.child.value, LinearGenerator(0, 3, 4, False))])
+        parent.scan.run([(parent.child.value, LinearGenerator(10, 12, 3, False))])
+
+        prefix = parent.scan._flat_dataset_prefix
+        self.assertEqual(self.dataset_db.get(prefix + "starts"), [0, 4])
+        self.assertEqual(
+            self.dataset_db.get(prefix + "points.axis_0"),
+            [0.0, 1.0, 2.0, 3.0, 10.0, 11.0, 12.0],
+        )
+        self.assertEqual(
+            self.dataset_db.get(prefix + "points.channel_result"),
+            [1.0, 2.0, 3.0, 4.0, 11.0, 12.0, 13.0],
+        )
+
+    def test_flat_site_rejects_incompatible_axis_reuse(self):
+        parent = self.create(SubscanAnalysisFragment, declare_both_scannable=True)
+
+        parent.scan.run([(parent.child.a, LinearGenerator(0.0, 1.0, 3, False))])
+
+        with self.assertRaises(ValueError):
+            parent.scan.run([(parent.child.b, LinearGenerator(0.0, 1.0, 3, False))])
 
 
 class SubscanAnalysisFragment(ExpFragment):
@@ -326,3 +452,20 @@ class TransitoryErrorSubscanCase(ExpFragmentCase):
 
     def test_restart_transitory_run(self):
         self._test_with_kwargs(num_run_once_to_restart_fail=2)
+
+    def test_restart_transitory_run_keeps_single_open_segment(self):
+        subscan = self.create(
+            TransitoryErrorSubscan,
+            fail_at_point=lambda i: i % 3 == 1,
+            num_run_once_to_restart_fail=2,
+        )
+        run_fragment_once(subscan)
+
+        prefix = subscan._subscan._flat_dataset_prefix
+        self.assertEqual(self.dataset_db.get(prefix + "starts"), [0])
+        self.assertEqual(self.dataset_db.get(prefix + "current_segment"), -1)
+
+        inputs = self.dataset_db.get(prefix + "points.axis_0")
+        outputs = self.dataset_db.get(prefix + "points.channel_result")
+        np.testing.assert_array_equal(np.sort(inputs), np.arange(11))
+        np.testing.assert_array_equal(inputs, outputs)
