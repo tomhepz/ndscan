@@ -455,7 +455,7 @@ def setattr_subscan(
     scan_name: str,
     fragment: ExpFragment,
     axis_params: list[tuple[Fragment, str]],
-    save_results_by_default: bool = True,
+    save_results_by_default: bool = False,
     expose_analysis_results: bool = True,
 ) -> Subscan:
     """Set up a scan for the given subfragment.
@@ -548,7 +548,7 @@ def setup_subscan(
     name_prefix: str,
     scanned_fragment: ExpFragment,
     axis_params: list[tuple[Fragment, str]],
-    save_results_by_default: bool = True,
+    save_results_by_default: bool = False,
     expose_analysis_results: bool = True,
 ) -> Subscan:
     """Create the internal machinery needed to run a fragment as a subscan.
@@ -835,7 +835,7 @@ class SubscanExpFragment(ExpFragment):
         scanned_fragment_parent: Fragment,
         scanned_fragment: ExpFragment | str,
         axis_params: list[tuple[Fragment, str]],
-        save_results_by_default: bool = True,
+        save_results_by_default: bool = False,
         expose_analysis_results: bool = True,
     ) -> None:
         """
