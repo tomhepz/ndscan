@@ -86,6 +86,13 @@ def shorten_to_unambiguous_suffixes(
     inefficient; if the strings are long, the implementation should be specialised for
     e.g. the common case of parts being delimited by a single separator character.
 
+    Using lambda fqn, n: "/".join(fqn.split("/")[-n:]), the result would be roughly:
+
+    a/readout/count -> a/readout/count
+    b/readout/count -> b/readout/count
+    a/readout/error -> error
+
+
     :param fqns: The collection of names to shorten (typically ``str``s, but could be
         an arbitrary type that is ordered and supports a notion of reversal via
         ``[::-1]``). The elements must be unique, but are not assumed to be sorted in
