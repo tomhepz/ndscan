@@ -164,14 +164,6 @@ class AppendingDatasetSink(ResultSink, HasEnvironment):
         return [] if (self.last_value is None) else self.get_dataset(self.key)
 
 
-class ResettableAppendingDatasetSink(AppendingDatasetSink):
-    """Appending dataset sink that can be reset to an empty dataset."""
-
-    def clear(self) -> None:
-        self.set_dataset(self.key, [], broadcast=self.broadcast)
-        self.last_value = None
-
-
 class ScalarDatasetSink(ResultSink, HasEnvironment):
     """Sink that writes pushed results to a dataset, overwriting its previous value
     if any."""
