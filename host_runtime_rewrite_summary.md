@@ -34,7 +34,7 @@ streams of points, rather than as a fixed Cartesian product of axes.
 The main ambitions are:
 
 1. Better point choice and point composition.
-   - Keep standard grid scans.
+   - Keep standard grid scans (but flatten them).
    - Support zipped/tandem parameters natively.
    - Support explicit point lists.
    - Leave room for adaptive or optimizer-driven point selection.
