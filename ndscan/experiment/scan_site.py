@@ -115,6 +115,11 @@ class ScanSiteDatasetWriter:
         self._starts_sink = (
             self._make_appending_sink("segments.start_index") if site.segmented else None
         )
+        self._segment_start_time_sink = (
+            self._make_appending_sink("segments.start_unix_time")
+            if site.segmented
+            else None
+        )
         self._parent_point_sink = (
             self._make_appending_sink("segments.parent_point_index")
             if site.segmented and site.parent_path is not None
@@ -145,8 +150,13 @@ class ScanSiteDatasetWriter:
         metadata: Mapping[str, Any],
         *,
         extra_metadata: Mapping[str, Any] | None = None,
+        start_unix_time: float | None = None,
     ) -> None:
-        """Publish site metadata before points start arriving."""
+        """Publish site metadata before points start arriving.
+
+        ``start_unix_time`` is the wall-clock Unix timestamp for this concrete site
+        invocation. Segmented sites also record per-segment start times separately.
+        """
 
         self._push_scalar(SCHEMA_REVISION_KEY, SCAN_SITE_SCHEMA_REVISION)
 
@@ -164,6 +174,8 @@ class ScanSiteDatasetWriter:
 
         merged = dict(base_metadata)
         merged.update(metadata)
+        if start_unix_time is not None:
+            merged["site.start_unix_time"] = start_unix_time
 
         for key, value in merged.items():
             self._push_scalar(key, value)
@@ -183,8 +195,17 @@ class ScanSiteDatasetWriter:
 
         return self._next_point_index
 
-    def start_segment(self, parent_point_index: int | None = None) -> None:
-        """Mark the current point index as the start of a new logical segment."""
+    def start_segment(
+        self,
+        parent_point_index: int | None = None,
+        *,
+        start_unix_time: float | None = None,
+    ) -> None:
+        """Mark the current point index as the start of a new logical segment.
+
+        When provided, ``start_unix_time`` is appended alongside the segment start
+        index so repeated nested runs can be related back to wall-clock time later.
+        """
 
         if not self._site.segmented:
             return
@@ -192,6 +213,8 @@ class ScanSiteDatasetWriter:
             return
 
         self._starts_sink.push(self._next_point_index)
+        if self._segment_start_time_sink is not None and start_unix_time is not None:
+            self._segment_start_time_sink.push(start_unix_time)
         if self._parent_point_sink is not None:
             if parent_point_index is None:
                 raise ValueError(
@@ -215,12 +238,19 @@ class ScanSiteDatasetWriter:
         self._current_segment_sink.push(-1)
 
     def append_observation(self, observation: "PointObservation") -> None:
-        """Append one completed point to the site's point datasets."""
+        """Append one completed point to the site's point datasets.
+
+        Point acquisition timestamps are optional, but when present they are stored as
+        the dedicated `points.acquired_at_unix` stream rather than being mixed into the
+        ordinary axis/channel payload arrays.
+        """
 
         for key, value in observation.axis_values.items():
             self._get_point_sink(key).push(value)
         for key, value in observation.channel_values.items():
             self._get_point_sink(key).push(value)
+        if observation.acquired_at_unix is not None:
+            self._get_point_sink("acquired_at_unix").push(observation.acquired_at_unix)
         self._next_point_index += 1
         self._push_scalar("state.num_points", self._next_point_index)
 

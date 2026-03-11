@@ -2375,3 +2375,124 @@ These have come up in the design notes and should remain visible:
 6. Online analysis + optimiser feedback + batching.
 7. Parameter transforms / relations.
 8. Mid-run HDF5 preview/snapshot writing.
+
+### Pragmatic implementation plan from the current state
+
+The list above is the broad project view. For actual implementation momentum, there is
+an important distinction:
+
+- if the goal is "make the runtime and future plotting direction right",
+- and not immediately "land a polished upstream PR with consumer compatibility",
+
+then the next steps should stay focused on the runtime core.
+
+That means the consumer/read-side and legacy adapter work should be treated as:
+
+- important for eventual integration,
+- but not the first thing to do if the live plotting/frontend path is likely to be
+  rewritten anyway.
+
+#### Phase 1: strengthen the runtime core
+
+These are the next changes that most improve capability without forcing us to commit to
+legacy consumer interfaces too early.
+
+1. Add scan/segment timestamps.
+   - `segments.start_unix_time`
+   - optional `points.acquired_at_unix`
+   - define exactly when timestamps are taken
+   - add tests for root and nested segmented sites
+
+2. Make scheduler/yield boundaries explicit and testable.
+   - isolate the policy for `check_pause()` and `pause()`
+   - add tests that we only yield at point-safe boundaries
+   - decide whether future batching flushes must align with the same boundaries
+
+3. Add richer point-policy composition.
+   - recursive interval refinement / min-max-to-depth scans
+   - compositional wrappers such as `zip`, `product`, `concat`, possibly `repeat`
+   - keep all of this in the point-policy layer, not the runner
+
+4. Add early-exit / repeat-until wrappers.
+   - stop current segment when a threshold or criterion is met
+   - continue to the next planned segment / parent point / experiment step
+   - keep this as a point-policy or execution-policy wrapper
+
+This phase should leave the runtime better at "running interesting scans" without
+changing the schema much beyond timestamps.
+
+#### Phase 2: add observation-driven runtime features
+
+Once point policies and timestamps are in place, add the first genuinely feedback-driven
+features.
+
+1. Introduce an observation/batching interface.
+   - explicit observer API
+   - runtime-controlled flush cadence
+   - no fragment-side batching logic
+
+2. Add online analyses.
+   - use the observation path
+   - publish updates in a throttled way
+   - keep post-run default analysis as the final/full analysis path
+
+3. Add a first closed-loop optimiser backend.
+   - simplest candidate: gradient descent over a small set of parameters
+   - later ask/tell optimiser interface if needed
+
+This phase is where the existing `flush()` / `close()` hook on the site writer becomes
+useful instead of merely preparatory.
+
+#### Phase 3: fragment-side semantic extensions
+
+Only after the runtime loop and observation path are stable:
+
+1. Add parameter transform / relation API.
+   - code-defined first
+   - explicit conflict semantics
+   - resolved before `run_once()`
+
+2. Decide whether transformed parameters are recorded as:
+   - ordinary driven variables,
+   - derived variables,
+   - or both
+
+This is intentionally after the runtime work because it changes fragment semantics and
+should build on a stable execution model.
+
+#### Phase 4: integration work
+
+Only once the runtime shape feels right:
+
+1. Reader/consumer support for the new schema.
+   - HDF5 reader
+   - live subscriber model
+   - nested segment reconstruction
+
+2. Legacy host-side adapters.
+   - dashboard/request conversion into `ScanRequest`
+   - host-side `setattr_subscan(...)` adapter
+
+3. Mid-run HDF5 preview/snapshot writing.
+   - likely via writer flush boundaries, not ad-hoc runner file IO
+
+This phase is what turns the runtime into a candidate upstream PR. Until then, it is
+reasonable to optimise for architecture and experimentation rather than compatibility.
+
+#### Suggested concrete order for the next few pieces of work
+
+If the priority is runtime progress rather than immediate PR-readiness, the most useful
+next sequence is:
+
+1. timestamps
+2. scheduler/yield policy cleanup and tests
+3. recursive/refinement point policies
+4. early-exit wrappers
+5. observation/batching interface
+6. online analysis
+7. first optimiser backend
+8. parameter transforms
+9. reader/adapters
+
+That order keeps the code moving "down the middle" of the new runtime design instead of
+pulling it sideways into compatibility work too early.

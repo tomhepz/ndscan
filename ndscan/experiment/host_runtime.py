@@ -23,6 +23,7 @@ visible to the host collector by the time a point returns.
 from __future__ import annotations
 
 import logging
+import time
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
@@ -231,11 +232,16 @@ class BoundResultChannel:
 
 @dataclass(frozen=True)
 class PointObservation:
-    """Result of one successfully completed point."""
+    """Result of one successfully completed point.
+
+    ``acquired_at_unix`` is recorded on the host once the point body has returned and
+    all point results have been collected successfully.
+    """
 
     point_index: int
     axis_values: OrderedDict[str, Any]
     channel_values: OrderedDict[str, Any]
+    acquired_at_unix: float | None = None
 
 
 @dataclass
@@ -525,6 +531,7 @@ class _HostPointExecutor:
             point_index=site_point_index,
             axis_values=axis_map,
             channel_values=channel_values,
+            acquired_at_unix=time.time(),
         )
 
 
@@ -733,13 +740,17 @@ class HostScanProgramRunner:
 
     def run(self) -> HostScanRunResult:
         self._fragment.prepare()
+        site_start_unix_time = time.time()
         self._program.site_writer.publish_metadata(
-            self._program.metadata(), extra_metadata=self._program.request.metadata
+            self._program.metadata(),
+            extra_metadata=self._program.request.metadata,
+            start_unix_time=site_start_unix_time,
         )
         if self._program.request.site.segmented:
             parent = current_scan_context()
             self._program.site_writer.start_segment(
-                parent_point_index=None if parent is None else parent.point_index
+                parent_point_index=None if parent is None else parent.point_index,
+                start_unix_time=time.time(),
             )
 
         result = HostScanRunResult.empty(

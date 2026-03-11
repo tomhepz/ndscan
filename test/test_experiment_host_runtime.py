@@ -2,6 +2,7 @@
 
 import json
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 from mock_environment import HasEnvironmentCase
@@ -314,6 +315,24 @@ class HostRuntimeCase(HasEnvironmentCase):
             [0.0, 1.0, 2.0],
         )
 
+    def test_host_scan_session_records_root_and_point_unix_timestamps(self):
+        fragment = self.create(PlainAddOneFragment, [])
+        request = ScanRequest.cartesian([(fragment.value, [0.0, 1.0, 2.0])])
+
+        with patch(
+            "ndscan.experiment.host_runtime.time.time",
+            side_effect=[1000.0, 1001.0, 1002.0, 1003.0],
+        ):
+            session = HostScanSession(fragment, fragment, request)
+            session.run()
+
+        prefix = "ndscan.rid_0.site.root."
+        self.assertEqual(self.d(prefix, "site.start_unix_time"), 1000.0)
+        self.assertEqual(
+            self.d(prefix, "points.acquired_at_unix"),
+            [1001.0, 1002.0, 1003.0],
+        )
+
     def test_numeric_channels_can_opt_out_of_save_by_default(self):
         fragment = self.create(VisibleAndHiddenNumericFragment, [])
         request = ScanRequest.explicit([fragment.value], [[1.0], [2.0]])
@@ -447,6 +466,31 @@ class HostRuntimeCase(HasEnvironmentCase):
         self.assertEqual(
             self.d(child_prefix, "points.channel_0"),
             [11.0, 12.0, 21.0, 22.0],
+        )
+
+    def test_nested_child_scan_records_segment_start_unix_timestamps(self):
+        parent = self.create(NestedChildScanParent, [])
+        request = ScanRequest.explicit([parent.outer], [[10.0], [20.0]])
+
+        with patch(
+            "ndscan.experiment.host_runtime.time.time",
+            side_effect=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
+        ):
+            session = HostScanSession(parent, parent, request)
+            session.run()
+
+        root_prefix = "ndscan.rid_0.site.root."
+        child_prefix = "ndscan.rid_0.site.root.child_scan."
+        self.assertEqual(self.d(root_prefix, "site.start_unix_time"), 1.0)
+        self.assertEqual(self.d(root_prefix, "points.acquired_at_unix"), [6.0, 11.0])
+        self.assertEqual(self.d(child_prefix, "site.start_unix_time"), 7.0)
+        self.assertEqual(
+            self.d(child_prefix, "segments.start_unix_time"),
+            [3.0, 8.0],
+        )
+        self.assertEqual(
+            self.d(child_prefix, "points.acquired_at_unix"),
+            [4.0, 5.0, 9.0, 10.0],
         )
 
     def test_recursive_nested_scans_build_natural_site_tree(self):
