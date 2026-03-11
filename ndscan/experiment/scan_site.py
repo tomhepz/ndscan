@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from artiq.language import HasEnvironment
 
-from ..utils import SCHEMA_REVISION, SCHEMA_REVISION_KEY
+from ..utils import SCHEMA_REVISION_KEY
 from .result_channels import AppendingDatasetSink, ScalarDatasetSink
 from .utils import dump_json, to_metadata_broadcast_type
 
@@ -32,6 +32,11 @@ __all__ = [
     "make_scan_site_prefix",
     "ScanSiteDatasetWriter",
 ]
+
+
+# The legacy runtime still writes schema revision 2. The host-runtime scan-site schema
+# has diverged enough that readers should be able to distinguish it explicitly.
+SCAN_SITE_SCHEMA_REVISION = 3
 
 
 @dataclass(frozen=True)
@@ -108,59 +113,69 @@ class ScanSiteDatasetWriter:
         self._point_sinks = dict[str, AppendingDatasetSink]()
         self._analysis_result_sinks = dict[str, ScalarDatasetSink]()
         self._starts_sink = (
-            self._make_appending_sink("starts") if site.segmented else None
+            self._make_appending_sink("segments.start_index") if site.segmented else None
         )
         self._parent_point_sink = (
-            self._make_appending_sink("parent_point_indices")
+            self._make_appending_sink("segments.parent_point_index")
             if site.segmented and site.parent_path is not None
             else None
         )
         self._current_segment_sink = (
-            ScalarDatasetSink(owner, self.prefix + "current_segment") if site.segmented else None
+            ScalarDatasetSink(owner, self.prefix + "state.current_segment")
+            if site.segmented
+            else None
         )
 
-        self._next_point_index = self._get_existing_scalar("num_points", 0)
-        self._num_segments = len(self._get_existing_array("starts")) if site.segmented else 0
+        self._next_point_index = self._get_existing_scalar(
+            ("state.num_points", "num_points"), 0
+        )
+        self._num_segments = (
+            len(self._get_existing_array(("segments.start_index", "starts")))
+            if site.segmented
+            else 0
+        )
         self._current_segment = (
-            self._get_existing_scalar("current_segment", -1) if site.segmented else -1
+            self._get_existing_scalar(("state.current_segment", "current_segment"), -1)
+            if site.segmented
+            else -1
         )
 
-    def publish_metadata(self, metadata: Mapping[str, Any]) -> None:
+    def publish_metadata(
+        self,
+        metadata: Mapping[str, Any],
+        *,
+        extra_metadata: Mapping[str, Any] | None = None,
+    ) -> None:
         """Publish site metadata before points start arriving."""
 
-        self._push_scalar(SCHEMA_REVISION_KEY, SCHEMA_REVISION)
+        self._push_scalar(SCHEMA_REVISION_KEY, SCAN_SITE_SCHEMA_REVISION)
 
         source_prefix = self._owner.get_dataset("system_id", default="rid")
         scheduler = self._owner.get_device("scheduler")
         rid = getattr(scheduler, "rid", 0)
-        self._push_scalar("source_id", f"{source_prefix}_{rid}")
+        self._push_scalar("site.source_id", f"{source_prefix}_{rid}")
 
         base_metadata = {
-            "runtime_flavour": "host_runtime_v2",
-            "site_path": list(self._site.path),
-            "completed": False,
-            "analysis_results": {},
-            "annotations": [],
-            "online_analyses": {},
+            "site.path": list(self._site.path),
+            "state.completed": False,
         }
         if self._site.parent_path is not None:
-            base_metadata["parent_site_path"] = list(self._site.parent_path)
-        if self._site.segmented:
-            base_metadata["segment_fields"] = {"starts": "starts"}
-            if self._parent_point_sink is not None:
-                base_metadata["segment_fields"]["parent_points"] = "parent_point_indices"
-            base_metadata["segment_state_fields"] = {"current": "current_segment"}
+            base_metadata["site.parent_path"] = list(self._site.parent_path)
 
         merged = dict(base_metadata)
         merged.update(metadata)
-        merged.update(self._site.extra_metadata)
 
         for key, value in merged.items():
             self._push_scalar(key, value)
 
+        extras = dict(extra_metadata or {})
+        extras.update(self._site.extra_metadata)
+        for key, value in extras.items():
+            self._push_scalar("extra." + key, value)
+
         if self._site.segmented:
-            self._push_scalar("current_segment", -1)
-        self._push_scalar("num_points", self._next_point_index)
+            self._push_scalar("state.current_segment", -1)
+        self._push_scalar("state.num_points", self._next_point_index)
 
     @property
     def next_point_index(self) -> int:
@@ -207,18 +222,18 @@ class ScanSiteDatasetWriter:
         for key, value in observation.channel_values.items():
             self._get_point_sink(key).push(value)
         self._next_point_index += 1
-        self._push_scalar("num_points", self._next_point_index)
+        self._push_scalar("state.num_points", self._next_point_index)
 
     def set_completed(self, completed: bool = True) -> None:
-        self._push_scalar("completed", completed)
+        self._push_scalar("state.completed", completed)
 
     def set_annotations(self, annotations: list[dict[str, Any]]) -> None:
-        self._push_scalar("annotations", annotations)
+        self._push_scalar("analysis.annotations", annotations)
 
     def set_analysis_result(self, key: str, value: Any) -> None:
         sink = self._analysis_result_sinks.get(key, None)
         if sink is None:
-            sink = ScalarDatasetSink(self._owner, self.prefix + "analysis_result." + key)
+            sink = ScalarDatasetSink(self._owner, self.prefix + "analysis.output." + key)
             self._analysis_result_sinks[key] = sink
         sink.push(value)
 
@@ -254,17 +269,25 @@ class ScanSiteDatasetWriter:
             sink.last_value = existing[-1]
         return sink
 
-    def _get_existing_array(self, relative_key: str) -> list[Any]:
-        try:
-            return self._owner.get_dataset(self.prefix + relative_key)
-        except KeyError:
-            return []
+    def _get_existing_array(self, relative_keys: str | tuple[str, ...]) -> list[Any]:
+        keys = (relative_keys,) if isinstance(relative_keys, str) else relative_keys
+        for key in keys:
+            try:
+                return self._owner.get_dataset(self.prefix + key)
+            except KeyError:
+                continue
+        return []
 
-    def _get_existing_scalar(self, relative_key: str, default: Any) -> Any:
-        try:
-            return self._owner.get_dataset(self.prefix + relative_key)
-        except KeyError:
-            return default
+    def _get_existing_scalar(
+        self, relative_keys: str | tuple[str, ...], default: Any
+    ) -> Any:
+        keys = (relative_keys,) if isinstance(relative_keys, str) else relative_keys
+        for key in keys:
+            try:
+                return self._owner.get_dataset(self.prefix + key)
+            except KeyError:
+                continue
+        return default
 
     def _push_scalar(self, key: str, value: Any) -> None:
         ds_value = to_metadata_broadcast_type(value)

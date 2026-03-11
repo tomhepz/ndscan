@@ -368,11 +368,14 @@ class _HostScanAnalysisPlan:
         return cls(analyses, analysis_results, context)
 
     def metadata(self) -> dict[str, Any]:
-        return {
-            "annotations": list(self._metadata["annotations"]),
-            "online_analyses": dict(self._metadata["online_analyses"]),
-            "analysis_results": dict(self._metadata["analysis_results"]),
-        }
+        metadata = {}
+        if self._metadata["annotations"]:
+            metadata["analysis.annotations"] = list(self._metadata["annotations"])
+        if self._metadata["online_analyses"]:
+            metadata["analysis.online"] = dict(self._metadata["online_analyses"])
+        if self._metadata["analysis_results"]:
+            metadata["analysis.outputs"] = dict(self._metadata["analysis_results"])
+        return metadata
 
     def initial_annotations(self) -> list[dict[str, Any]]:
         return list(self._metadata["annotations"])
@@ -627,25 +630,20 @@ class HostScanProgram:
 
     def metadata(self) -> dict[str, Any]:
         metadata = {
-            "fragment_fqn": self.fragment.fqn,
-            "point_source": self.point_source.describe(),
-            "axes": [
-                {
-                    "key": axis.key,
-                    "param": axis.param_schema,
+            "site.fragment_fqn": self.fragment.fqn,
+            "scan.point_source": self.point_source.describe(),
+            "scan.axes": {
+                axis.key: {
                     "path": axis.path,
+                    "param": axis.param_schema,
                 }
                 for axis in self.axes
-            ],
-            "channels": [
-                {
-                    "key": binding.key,
-                    **binding.channel.describe(),
-                }
+            },
+            "scan.channels": {
+                binding.key: binding.channel.describe()
                 for binding in self.channels
-            ],
+            },
         }
-        metadata.update(self.request.metadata)
         metadata.update(self.analysis_plan.metadata())
         return metadata
 
@@ -735,7 +733,9 @@ class HostScanProgramRunner:
 
     def run(self) -> HostScanRunResult:
         self._fragment.prepare()
-        self._program.site_writer.publish_metadata(self._program.metadata())
+        self._program.site_writer.publish_metadata(
+            self._program.metadata(), extra_metadata=self._program.request.metadata
+        )
         if self._program.request.site.segmented:
             parent = current_scan_context()
             self._program.site_writer.start_segment(

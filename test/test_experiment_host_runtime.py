@@ -257,6 +257,12 @@ class AnalysedHowDoesPVaryFragment(ExpFragment):
 
 
 class HostRuntimeCase(HasEnvironmentCase):
+    def d(self, prefix, key):
+        return self.dataset_db.get(prefix + key)
+
+    def j(self, prefix, key):
+        return json.loads(self.d(prefix, key))
+
     def test_host_scan_session_writes_root_scan_site(self):
         self.dataset_db.data["system_id"] = (True, "system")
         fragment = self.create(PlainAddOneFragment, [])
@@ -268,18 +274,39 @@ class HostRuntimeCase(HasEnvironmentCase):
         prefix = result.site_prefix
         self.assertEqual(prefix, "ndscan.rid_0.site.root.")
         self.assertEqual(
-            self.dataset_db.get(prefix + "fragment_fqn"),
+            self.d(prefix, "site.fragment_fqn"),
             f"{__name__}.PlainAddOneFragment",
         )
-        self.assertEqual(self.dataset_db.get(prefix + "source_id"), "system_0")
-        self.assertEqual(self.dataset_db.get(prefix + "completed"), True)
-        self.assertEqual(json.loads(self.dataset_db.get(prefix + "site_path")), [])
+        self.assertEqual(self.d(prefix, "site.source_id"), "system_0")
+        self.assertEqual(self.d(prefix, "state.completed"), True)
+        self.assertEqual(self.d(prefix, "state.num_points"), 3)
+        self.assertEqual(self.j(prefix, "site.path"), [])
         self.assertEqual(
-            self.dataset_db.get(prefix + "points.axis_0"),
+            self.j(prefix, "scan.axes"),
+            {
+                "axis_0": {
+                    "path": "",
+                    "param": {
+                        "description": "value",
+                        "default": "0.0",
+                        "fqn": f"{__name__}.PlainAddOneFragment.value",
+                        "spec": {
+                            "is_scannable": True,
+                            "scale": 1.0,
+                            "step": 0.1,
+                        },
+                        "type": "float",
+                    },
+                }
+            },
+        )
+        self.assertEqual(list(self.j(prefix, "scan.channels").keys()), ["channel_0"])
+        self.assertEqual(
+            self.d(prefix, "points.axis_0"),
             [0.0, 1.0, 2.0],
         )
         self.assertEqual(
-            self.dataset_db.get(prefix + "points.channel_0"),
+            self.d(prefix, "points.channel_0"),
             [1.0, 2.0, 3.0],
         )
         self.assertEqual(
@@ -296,7 +323,7 @@ class HostRuntimeCase(HasEnvironmentCase):
 
         prefix = result.site_prefix
         self.assertEqual(
-            self.dataset_db.get(prefix + "points.channel_0"),
+            self.d(prefix, "points.channel_0"),
             [2.0, 3.0],
         )
         self.assertNotIn(prefix + "points.channel_1", self.dataset_db.data)
@@ -319,15 +346,15 @@ class HostRuntimeCase(HasEnvironmentCase):
         prefix = result.site_prefix
         self.assertEqual(prefix, "ndscan.rid_0.site.root.zipped_demo.")
         self.assertEqual(
-            self.dataset_db.get(prefix + "points.axis_0"),
+            self.d(prefix, "points.axis_0"),
             [1.0, 2.0, 3.0],
         )
         self.assertEqual(
-            self.dataset_db.get(prefix + "points.axis_1"),
+            self.d(prefix, "points.axis_1"),
             [10.0, 20.0, 30.0],
         )
         self.assertEqual(
-            self.dataset_db.get(prefix + "points.channel_0"),
+            self.d(prefix, "points.channel_0"),
             [11.0, 22.0, 33.0],
         )
 
@@ -343,13 +370,13 @@ class HostRuntimeCase(HasEnvironmentCase):
 
         prefix = result.site_prefix
         self.assertAlmostEqual(result.analysis_results["m"], 4.0, places=6)
-        self.assertAlmostEqual(self.dataset_db.get(prefix + "analysis_result.m"), 4.0)
+        self.assertAlmostEqual(self.d(prefix, "analysis.output.m"), 4.0)
 
-        metadata = json.loads(self.dataset_db.get(prefix + "analysis_results"))
+        metadata = self.j(prefix, "analysis.outputs")
         self.assertIn("m", metadata)
         self.assertEqual(metadata["m"]["path"], "m")
 
-        annotations_data = json.loads(self.dataset_db.get(prefix + "annotations"))
+        annotations_data = self.j(prefix, "analysis.annotations")
         self.assertEqual(len(annotations_data), 1)
         self.assertEqual(annotations_data[0]["kind"], "curve")
         self.assertEqual(result.annotations, annotations_data)
@@ -369,8 +396,8 @@ class HostRuntimeCase(HasEnvironmentCase):
         exp.run()
 
         prefix = "ndscan.rid_0.site.root."
-        self.assertEqual(self.dataset_db.get(prefix + "points.axis_0"), [5.0, 7.0])
-        self.assertEqual(self.dataset_db.get(prefix + "points.channel_0"), [6.0, 8.0])
+        self.assertEqual(self.d(prefix, "points.axis_0"), [5.0, 7.0])
+        self.assertEqual(self.d(prefix, "points.channel_0"), [6.0, 8.0])
 
     def test_host_scan_session_allows_kernel_helpers_inside_host_methods(self):
         fragment = self.create(HostCallsKernelHelperFragment, [])
@@ -380,8 +407,8 @@ class HostRuntimeCase(HasEnvironmentCase):
         session.run()
 
         prefix = "ndscan.rid_0.site.root."
-        self.assertEqual(self.dataset_db.get(prefix + "points.axis_0"), [4.0, 5.0])
-        self.assertEqual(self.dataset_db.get(prefix + "points.channel_0"), [5.0, 6.0])
+        self.assertEqual(self.d(prefix, "points.axis_0"), [4.0, 5.0])
+        self.assertEqual(self.d(prefix, "points.channel_0"), [5.0, 6.0])
 
     def test_make_child_scan_site_requires_active_parent_point(self):
         with self.assertRaises(RuntimeError):
@@ -397,28 +424,28 @@ class HostRuntimeCase(HasEnvironmentCase):
         root_prefix = "ndscan.rid_0.site.root."
         child_prefix = "ndscan.rid_0.site.root.child_scan."
 
-        self.assertEqual(self.dataset_db.get(root_prefix + "points.axis_0"), [10.0, 20.0])
+        self.assertEqual(self.d(root_prefix, "points.axis_0"), [10.0, 20.0])
         self.assertEqual(
-            self.dataset_db.get(root_prefix + "points.channel_0"),
+            self.d(root_prefix, "points.channel_0"),
             [23.0, 43.0],
         )
 
-        self.assertEqual(json.loads(self.dataset_db.get(child_prefix + "site_path")), ["child_scan"])
+        self.assertEqual(self.j(child_prefix, "site.path"), ["child_scan"])
         self.assertEqual(
-            json.loads(self.dataset_db.get(child_prefix + "parent_site_path")),
+            self.j(child_prefix, "site.parent_path"),
             [],
         )
-        self.assertEqual(self.dataset_db.get(child_prefix + "starts"), [0, 2])
+        self.assertEqual(self.d(child_prefix, "segments.start_index"), [0, 2])
         self.assertEqual(
-            self.dataset_db.get(child_prefix + "parent_point_indices"),
+            self.d(child_prefix, "segments.parent_point_index"),
             [0, 1],
         )
         self.assertEqual(
-            self.dataset_db.get(child_prefix + "points.axis_0"),
+            self.d(child_prefix, "points.axis_0"),
             [10.0, 11.0, 20.0, 21.0],
         )
         self.assertEqual(
-            self.dataset_db.get(child_prefix + "points.channel_0"),
+            self.d(child_prefix, "points.channel_0"),
             [11.0, 12.0, 21.0, 22.0],
         )
 
@@ -434,45 +461,45 @@ class HostRuntimeCase(HasEnvironmentCase):
         leaf_prefix = "ndscan.rid_0.site.root.middle_scan.leaf_scan."
 
         self.assertEqual(
-            self.dataset_db.get(root_prefix + "points.channel_0"),
+            self.d(root_prefix, "points.channel_0"),
             [29.0, 33.0],
         )
 
         self.assertEqual(
-            self.dataset_db.get(middle_prefix + "starts"),
+            self.d(middle_prefix, "segments.start_index"),
             [0, 2],
         )
         self.assertEqual(
-            self.dataset_db.get(middle_prefix + "parent_point_indices"),
+            self.d(middle_prefix, "segments.parent_point_index"),
             [0, 1],
         )
         self.assertEqual(
-            self.dataset_db.get(middle_prefix + "points.axis_0"),
+            self.d(middle_prefix, "points.axis_0"),
             [1.0, 11.0, 2.0, 12.0],
         )
         self.assertEqual(
-            self.dataset_db.get(middle_prefix + "points.channel_0"),
+            self.d(middle_prefix, "points.channel_0"),
             [4.5, 24.5, 6.5, 26.5],
         )
 
         self.assertEqual(
-            json.loads(self.dataset_db.get(leaf_prefix + "parent_site_path")),
+            self.j(leaf_prefix, "site.parent_path"),
             ["middle_scan"],
         )
         self.assertEqual(
-            self.dataset_db.get(leaf_prefix + "starts"),
+            self.d(leaf_prefix, "segments.start_index"),
             [0, 2, 4, 6],
         )
         self.assertEqual(
-            self.dataset_db.get(leaf_prefix + "parent_point_indices"),
+            self.d(leaf_prefix, "segments.parent_point_index"),
             [0, 1, 2, 3],
         )
         self.assertEqual(
-            self.dataset_db.get(leaf_prefix + "points.axis_0"),
+            self.d(leaf_prefix, "points.axis_0"),
             [1.0, 1.5, 11.0, 11.5, 2.0, 2.5, 12.0, 12.5],
         )
         self.assertEqual(
-            self.dataset_db.get(leaf_prefix + "points.channel_0"),
+            self.d(leaf_prefix, "points.channel_0"),
             [2.0, 2.5, 12.0, 12.5, 3.0, 3.5, 13.0, 13.5],
         )
 
@@ -486,19 +513,19 @@ class HostRuntimeCase(HasEnvironmentCase):
         x_prefix = "ndscan.rid_0.site.root.scan_p.scan_x."
 
         self.assertAlmostEqual(
-            self.dataset_db.get(root_prefix + "points.channel_0")[0],
+            self.d(root_prefix, "points.channel_0")[0],
             2.0,
             places=6,
         )
         self.assertEqual(
-            self.dataset_db.get(p_prefix + "points.axis_0"),
+            self.d(p_prefix, "points.axis_0"),
             [1.0, 2.0, 3.0, 4.0, 5.0],
         )
         self.assertEqual(
-            self.dataset_db.get(p_prefix + "points.channel_0"),
+            self.d(p_prefix, "points.channel_0"),
             [1.0, 4.0, 9.0, 16.0, 25.0],
         )
-        self.assertEqual(self.dataset_db.get(x_prefix + "starts"), [0, 6, 12, 18, 24])
+        self.assertEqual(self.d(x_prefix, "segments.start_index"), [0, 6, 12, 18, 24])
         self.assertAlmostEqual(result.values[parent.fit_e][0], 2.0, places=6)
-        self.assertAlmostEqual(self.dataset_db.get(p_prefix + "analysis_result.fit_e"), 2.0)
-        self.assertAlmostEqual(self.dataset_db.get(x_prefix + "analysis_result.m"), 25.0)
+        self.assertAlmostEqual(self.d(p_prefix, "analysis.output.fit_e"), 2.0)
+        self.assertAlmostEqual(self.d(x_prefix, "analysis.output.m"), 25.0)

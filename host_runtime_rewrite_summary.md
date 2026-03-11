@@ -2206,3 +2206,172 @@ The refactor is complete when all of these are true:
 5. Analysis remains post-run through a bridge rather than being redesigned as a streaming observer system in this refactor.
 6. Legacy `setattr_subscan(...)` may remain as a wrapper, but canonical truth is always nested site datasets.
 7. Minimal consumer updates are included so the new runtime is actually usable; broad dashboard UX changes remain out of scope.
+
+### Next priorities after the current host-runtime milestone
+
+The new host runtime now has:
+
+- code-first point sources,
+- recursive nested scan sites,
+- canonical scan-site writing,
+- post-run default analyses.
+
+The main missing work is no longer "invent the runtime". It is "make it the real path"
+and then add the next layer of scanning behavior.
+
+#### Priority 1: reader/consumer updates for the new scan-site schema
+
+Why first:
+
+- the new runtime is much more valuable once plot/offline tools can consume it,
+- this is the main usability gap after the core runtime landed,
+- it will test whether the schema is actually pleasant for non-ARTIQ code.
+
+Scope:
+
+- live subscriber model for the new site schema,
+- HDF5 reader for the new site schema,
+- nested site discovery via `site.path` / `site.parent_path`,
+- segment reconstruction via `segments.start_index` / `segments.parent_point_index`.
+
+#### Priority 2: adapters from existing host-side entry points into the new runtime
+
+Why second:
+
+- the runtime is most useful once ordinary ndscan experiment submission can reach it,
+- this isolates legacy compatibility at the edges rather than in the core.
+
+Scope:
+
+- host-side top-level adapter from dashboard/legacy request syntax into `ScanRequest`,
+- host-side subscan adapter so legacy `setattr_subscan(...)` can target the new core,
+- explicit early errors for unsupported kernel-only combinations.
+
+#### Priority 3: timestamp support and explicit scheduler/yield boundaries
+
+Why third:
+
+- this improves both live introspection and later batching work,
+- it is orthogonal to point-policy complexity.
+
+Scope:
+
+- record a Unix timestamp at the start of each segmented site execution,
+- optionally record per-point acquisition timestamps,
+- make scheduler pause/yield boundaries explicit and testable,
+- define whether batching/flush boundaries coincide with those same checkpoints.
+
+Recommended shape:
+
+- `segments.start_unix_time`
+- optional `points.acquired_at_unix`
+
+#### Priority 4: richer point-policy composition
+
+Why here:
+
+- the simple runtime core is already in place,
+- more advanced scan behavior should live in point-policy code, not in the runner.
+
+Scope:
+
+- recursive min/max refinement scans,
+- composable point-policy algebra such as product/sum/zip/concatenate,
+- point-policy metadata that explains the chosen structure to readers.
+
+Design note:
+
+- early-exit logic should live with point-policy state or point-policy wrappers, not be
+  spread through the runner.
+
+#### Priority 5: early-exit / repeat-until conditions
+
+Why separate from point generation:
+
+- semantically this is not just "which point comes next";
+  it is also "should this site or segment stop now".
+
+Scope:
+
+- stop current segment once a threshold/criterion is met,
+- proceed to the next configured segment or experiment step,
+- make the stop reason observable in metadata if useful.
+
+Likely shape:
+
+- a wrapper point policy or execution policy around an existing source,
+- optional `state.stop_reason` if that turns out to be useful.
+
+#### Priority 6: online analyses and closed-loop optimisation feedback
+
+Why after the above:
+
+- this is the first feature that genuinely needs observation callbacks, batching, and a
+  stable flush interface all at once.
+
+Scope:
+
+- online analysis observer interface,
+- closed-loop ask/tell optimiser interface,
+- batching/flush policy so analysis updates do not churn the dataset layer,
+- initial simple optimiser such as gradient descent over a parameter set.
+
+Important separation:
+
+- online analysis publication is not the same concern as optimiser feedback,
+- but they should share observation and batching infrastructure.
+
+#### Priority 7: parameter transform / relation API
+
+Why later:
+
+- it is important, but it changes fragment semantics rather than just scan execution,
+- it wants a careful fragment-side API and validation story.
+
+Scope:
+
+- bind one parameter as a transform of others,
+- code-defined transforms first,
+- optional UI formula transforms later,
+- runtime hook before `run_once()` so resolved values are visible everywhere.
+
+#### Priority 8: mid-run HDF5 preview writing
+
+Why later:
+
+- once schema readers and batching exist, this becomes much easier to design cleanly,
+- the runtime should not grow ad-hoc file-writing logic too early.
+
+Scope:
+
+- periodic/snapshot HDF5 writing for ongoing scans,
+- or a dataset-to-HDF5 mirror driven by the same writer flush boundaries.
+
+Recommended direction:
+
+- do not make the runner itself "an HDF5 writer",
+- instead let `ScanSiteDatasetWriter.flush()` become the single place where a future
+  HDF5 mirror or preview exporter hooks in.
+
+#### Features discussed elsewhere that are easy to forget
+
+These have come up in the design notes and should remain visible:
+
+1. Host-side legacy subscan cutover onto the new runtime is still not done.
+2. Dashboard/request parsing into `ScanRequest` is still not done.
+3. Minimal consumer updates for the new site schema are still not done.
+4. Optional preview roots are still a policy question, not a settled implementation.
+5. `points.param_*` recording has been discussed, but is not currently essential.
+6. The canonical contract should stay HDF5 + JSON, not PYON-dependent.
+7. Unsupported host/kernel combinations should fail early with clear messages.
+
+#### Suggested priority order
+
+1. Consumer/read-side support for the new scan-site schema.
+2. Host-side legacy adapters into the new runtime.
+3. Timestamp fields and explicit scheduler/yield boundaries.
+4. Richer point-policy composition.
+5. Early-exit / repeat-until conditions.
+6. Online analysis + optimiser feedback + batching.
+7. Parameter transforms / relations.
+8. Mid-run HDF5 preview/snapshot writing.
