@@ -146,22 +146,43 @@ class ScanRequest:
     parameter handles to scan and a ``PointSource`` describing the point strategy. A
     future dashboard adapter can resolve selector syntax into the same object without
     changing the runtime core again.
+
+    ``max_points_per_batch`` is a host-runtime execution hint, not a point-selection
+    concept. It caps how many points the runtime will execute before it:
+
+    - writes the completed observations through the scan-site writer,
+    - gives the point policy a batched observation callback,
+    - runs future batch-level online analyses,
+    - considers yielding to the scheduler.
+
+    The point policy can still request a smaller natural batch size through
+    ``preferred_batch_size()``.
     """
 
     axes: tuple[ParamHandle, ...]
     point_source: PointSource
     site: ScanSite = field(default_factory=ScanSite)
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    max_points_per_batch: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_points_per_batch is not None and self.max_points_per_batch <= 0:
+            raise ValueError("max_points_per_batch must be positive when specified")
 
     @classmethod
     def single(
-        cls, *, site: ScanSite | None = None, metadata: Mapping[str, Any] | None = None
+        cls,
+        *,
+        site: ScanSite | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        max_points_per_batch: int | None = None,
     ) -> "ScanRequest":
         return cls(
             axes=(),
             point_source=SinglePointSource(),
             site=ScanSite() if site is None else site,
             metadata={} if metadata is None else metadata,
+            max_points_per_batch=max_points_per_batch,
         )
 
     @classmethod
@@ -171,12 +192,14 @@ class ScanRequest:
         *,
         site: ScanSite | None = None,
         metadata: Mapping[str, Any] | None = None,
+        max_points_per_batch: int | None = None,
     ) -> "ScanRequest":
         return cls(
             axes=tuple(handle for handle, _ in axes),
             point_source=CartesianPointSource([values for _, values in axes]),
             site=ScanSite() if site is None else site,
             metadata={} if metadata is None else metadata,
+            max_points_per_batch=max_points_per_batch,
         )
 
     @classmethod
@@ -186,12 +209,14 @@ class ScanRequest:
         *,
         site: ScanSite | None = None,
         metadata: Mapping[str, Any] | None = None,
+        max_points_per_batch: int | None = None,
     ) -> "ScanRequest":
         return cls(
             axes=tuple(handle for handle, _ in axes),
             point_source=ZipPointSource([values for _, values in axes]),
             site=ScanSite() if site is None else site,
             metadata={} if metadata is None else metadata,
+            max_points_per_batch=max_points_per_batch,
         )
 
     @classmethod
@@ -202,12 +227,14 @@ class ScanRequest:
         *,
         site: ScanSite | None = None,
         metadata: Mapping[str, Any] | None = None,
+        max_points_per_batch: int | None = None,
     ) -> "ScanRequest":
         return cls(
             axes=tuple(axes),
             point_source=ExplicitPointSource(len(axes), points),
             site=ScanSite() if site is None else site,
             metadata={} if metadata is None else metadata,
+            max_points_per_batch=max_points_per_batch,
         )
 
 
@@ -284,6 +311,16 @@ class HostScanRunResult:
             )
         for channel in channels:
             self.values[channel.channel].append(observation.channel_values[channel.key])
+
+    def record_batch(
+        self,
+        observations: Sequence[PointObservation],
+        axes: Sequence[BoundScanAxis],
+        channels: Sequence[BoundResultChannel],
+    ) -> None:
+        """Record a completed batch of observations into the in-memory mirror."""
+        for observation in observations:
+            self.record(observation, axes, channels)
 
 
 class _TemporaryAnalysisResultSinks:
@@ -415,6 +452,21 @@ class _HostScanAnalysisPlan:
         if annotations:
             site_writer.set_annotations(annotations)
             run_result.annotations = annotations
+
+    def observe_batch(
+        self,
+        observations: Sequence[PointObservation],
+        run_result: HostScanRunResult,
+        site_writer: ScanSiteDatasetWriter,
+    ) -> None:
+        """Handle one completed execution batch.
+
+        The first host-runtime analysis implementation is post-run only, so this is a
+        deliberate no-op today. The hook exists so future online analyses can attach to
+        the same batch boundary that drives point publication and scheduler yielding,
+        instead of forcing the runner to grow a second control-flow path later on.
+        """
+        del observations, run_result, site_writer
 
 
 @dataclass
@@ -714,8 +766,9 @@ class HostScanProgramRunner:
     1. prepare the fragment once,
     2. publish metadata once,
     3. repeatedly enter host setup,
-    4. execute points until pause, restart request, or completion,
-    5. write each completed observation through the scan-site writer.
+    4. execute one batch of points,
+    5. publish that completed batch,
+    6. then consider pause, restart request, or completion.
     """
 
     def __init__(
@@ -761,50 +814,46 @@ class HostScanProgramRunner:
         )
 
         self._executor.install()
-        points = iter(self._program.point_source)
-        current_point = next(points, None)
+        current_batch = list()
+        batch_offset = 0
 
         try:
-            while current_point is not None:
+            while True:
+                if batch_offset >= len(current_batch):
+                    if self._program.point_source.is_finished():
+                        break
+                    current_batch = self._next_batch()
+                    batch_offset = 0
+
                 self._fragment.recompute_param_defaults()
 
                 restart_host_context = False
-                should_pause = False
+                completed_batch: list[PointObservation] = []
 
                 self._fragment.host_setup()
                 try:
-                    while current_point is not None:
+                    while batch_offset < len(current_batch):
                         observation = self._executor.execute_point(
-                            current_point,
+                            current_batch[batch_offset],
                             self._program.site_writer.next_point_index,
                         )
                         if observation is None:
                             restart_host_context = True
                             break
 
-                        self._program.site_writer.append_observation(observation)
-                        self._program.point_source.observe(observation)
-                        result.record(
-                            observation, self._program.axes, self._program.channels
-                        )
-
-                        current_point = next(points, None)
-                        if current_point is not None and self._scheduler.check_pause():
-                            should_pause = True
-                            break
+                        completed_batch.append(observation)
+                        batch_offset += 1
                 finally:
                     self._fragment.host_cleanup()
 
+                self._finish_completed_batch(completed_batch, result)
+
                 if restart_host_context:
-                    # ``flush()`` is currently a no-op, but this marks the intended
-                    # boundary where future buffered writers should publish any
-                    # completed points before the host context is re-entered.
-                    self._program.site_writer.flush()
                     continue
-                if should_pause:
-                    # Pause points are another natural batching boundary: keep the
-                    # semantics explicit now so buffered writers can hook in later.
-                    self._program.site_writer.flush()
+
+                current_batch = []
+                batch_offset = 0
+                if self._has_more_work() and self._scheduler.check_pause():
                     self._scheduler.pause()
         finally:
             self._executor.remove()
@@ -818,6 +867,67 @@ class HostScanProgramRunner:
         self._program.site_writer.set_completed(True)
         self._program.site_writer.close()
         return result
+
+    def _next_batch(self):
+        requested_size = self._effective_batch_size()
+        batch = self._program.point_source.next_batch(requested_size)
+        if batch:
+            return batch
+        if self._program.point_source.is_finished():
+            return []
+        raise RuntimeError(
+            f"{type(self._program.point_source).__name__} returned no points before finishing"
+        )
+
+    def _effective_batch_size(self) -> int:
+        """Return the point count upper bound for the next execution batch.
+
+        The request owns the hard upper bound because batching is fundamentally a
+        runtime/persistence choice. The point policy may still ask for a smaller
+        natural batch size when, for example, it wants one ask/tell step per batch.
+        """
+
+        request_limit = self._program.request.max_points_per_batch
+        if request_limit is None:
+            request_limit = 1
+
+        preferred = self._program.point_source.preferred_batch_size(request_limit)
+        if preferred <= 0:
+            raise ValueError("preferred_batch_size() must return a positive integer")
+        return min(request_limit, preferred)
+
+    def _finish_completed_batch(
+        self,
+        completed_batch: Sequence[PointObservation],
+        result: HostScanRunResult,
+    ) -> None:
+        """Publish one completed batch at the runtime boundary.
+
+        The order here is intentional:
+
+        1. persist raw point observations,
+        2. update the in-memory mirror,
+        3. run future batch-level online analyses,
+        4. let the point policy observe the completed batch,
+        5. flush pending writer state before pause/restart/completion decisions.
+
+        Keeping that boundary explicit makes later online analysis and writer-side
+        buffering extensions much easier to reason about.
+        """
+
+        if not completed_batch:
+            return
+
+        self._program.site_writer.append_observations(completed_batch)
+        result.record_batch(completed_batch, self._program.axes, self._program.channels)
+        self._program.analysis_plan.observe_batch(
+            completed_batch, result, self._program.site_writer
+        )
+        self._program.point_source.observe_batch(completed_batch)
+        self._program.site_writer.flush()
+
+    def _has_more_work(self) -> bool:
+        return not self._program.point_source.is_finished()
 
 
 class HostScanSession:

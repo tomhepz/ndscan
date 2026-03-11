@@ -5,18 +5,25 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
+from artiq.language.core import TerminationRequested
 from mock_environment import HasEnvironmentCase
 
 from ndscan.experiment import (
     CartesianPointSource,
+    ConcatPointSource,
     CustomAnalysis,
     ExpFragment,
     ExplicitPointSource,
     FloatChannel,
     FloatParam,
+    PointObservation,
+    ProductPointSource,
+    RecursiveMidpointPointSource1D,
     HostScanSession,
     ScanRequest,
     ScanSite,
+    RestartKernelTransitoryError,
+    UntilConditionPointSource,
     ZipPointSource,
     annotations,
     kernel,
@@ -48,6 +55,90 @@ class PointSourceTest(unittest.TestCase):
             [(0, 10), (3, 13)],
         )
 
+    def test_explicit_point_source_next_batch(self):
+        source = ExplicitPointSource(2, [(0, 10), (3, 13), (4, 14)])
+        self.assertEqual(
+            [point.axis_values for point in source.next_batch(2)],
+            [(0, 10), (3, 13)],
+        )
+        self.assertFalse(source.is_finished())
+        self.assertEqual(
+            [point.axis_values for point in source.next_batch(2)],
+            [(4, 14)],
+        )
+        self.assertTrue(source.is_finished())
+
+    def test_concat_point_source_runs_children_in_sequence(self):
+        source = ConcatPointSource(
+            [
+                ExplicitPointSource(1, [(0,), (1,)]),
+                ExplicitPointSource(1, [(10,), (11,)]),
+            ]
+        )
+        self.assertEqual(
+            [point.axis_values for point in source],
+            [(0,), (1,), (10,), (11,)],
+        )
+        self.assertEqual(
+            source.describe()["children"][0]["kind"],
+            "explicit",
+        )
+
+    def test_product_point_source_combines_child_axes(self):
+        source = ProductPointSource(
+            [
+                ExplicitPointSource(1, [(0,), (1,)]),
+                ExplicitPointSource(2, [(10, 100), (20, 200)]),
+            ]
+        )
+        self.assertEqual(
+            [point.axis_values for point in source],
+            [
+                (0, 10, 100),
+                (0, 20, 200),
+                (1, 10, 100),
+                (1, 20, 200),
+            ],
+        )
+
+    def test_recursive_midpoint_point_source_refines_breadth_first(self):
+        source = RecursiveMidpointPointSource1D(0.0, 8.0, max_depth=3)
+        self.assertEqual(
+            [point.axis_values for point in source],
+            [(0.0,), (8.0,), (4.0,), (2.0,), (6.0,), (1.0,), (3.0,), (5.0,), (7.0,)],
+        )
+
+    def test_until_condition_point_source_stops_after_predicate_matches(self):
+        source = UntilConditionPointSource(
+            ExplicitPointSource(1, [(0,), (1,), (2,), (3,)]),
+            lambda observation: observation.channel_values["channel_0"] >= 30,
+            predicate_description="channel_0 >= 30",
+        )
+
+        first = source.next_batch(1)
+        self.assertEqual([point.axis_values for point in first], [(0,)])
+
+        source.observe(
+            PointObservation(
+                point_index=0,
+                axis_values={"axis_0": 0},
+                channel_values={"channel_0": 10},
+            )
+        )
+        self.assertFalse(source.is_finished())
+
+        second = source.next_batch(1)
+        self.assertEqual([point.axis_values for point in second], [(1,)])
+        source.observe(
+            PointObservation(
+                point_index=1,
+                axis_values={"axis_0": 1},
+                channel_values={"channel_0": 30},
+            )
+        )
+        self.assertTrue(source.is_finished())
+        self.assertEqual(source.next_batch(1), [])
+
 
 class TwoParamAddFragment(ExpFragment):
     def build_fragment(self):
@@ -77,6 +168,82 @@ class VisibleAndHiddenNumericFragment(ExpFragment):
     def run_once(self):
         self.visible.push(self.value.get() + 1.0)
         self.hidden.push(self.value.get() + 10.0)
+
+
+class CountingLifecycleFragment(ExpFragment):
+    """Fragment whose host lifecycle is easy to assert against in batching tests."""
+
+    def build_fragment(self):
+        self.setattr_param("value", FloatParam, "value", 0.0)
+        self.setattr_result("result", FloatChannel)
+        self.host_setup_calls = 0
+        self.host_cleanup_calls = 0
+
+    def host_setup(self):
+        self.host_setup_calls += 1
+
+    def host_cleanup(self):
+        self.host_cleanup_calls += 1
+
+    def run_once(self):
+        self.result.push(self.value.get() + 1.0)
+
+
+class RestartOnceFragment(ExpFragment):
+    """Fragment that forces one host-context restart for a chosen scan point."""
+
+    def build_fragment(self):
+        self.setattr_param("value", FloatParam, "value", 0.0)
+        self.setattr_result("result", FloatChannel)
+        self.host_setup_calls = 0
+        self.host_cleanup_calls = 0
+        self._restart_values = {2.0}
+
+    def host_setup(self):
+        self.host_setup_calls += 1
+
+    def host_cleanup(self):
+        self.host_cleanup_calls += 1
+
+    def run_once(self):
+        value = self.value.get()
+        if value in self._restart_values:
+            self._restart_values.remove(value)
+            raise RestartKernelTransitoryError("restart host context")
+        self.result.push(value + 1.0)
+
+
+class RecordingBatchPointSource(ExplicitPointSource):
+    """Explicit source that records how the runner consumes batched points."""
+
+    def __init__(
+        self,
+        axis_count,
+        points,
+        *,
+        preferred_batch_size=None,
+    ):
+        super().__init__(axis_count, points)
+        self._preferred_batch_size = preferred_batch_size
+        self.requested_batch_limits = []
+        self.observed_batches = []
+
+    def next_batch(self, max_points: int):
+        self.requested_batch_limits.append(max_points)
+        return super().next_batch(max_points)
+
+    def preferred_batch_size(self, default: int) -> int:
+        if self._preferred_batch_size is None:
+            return default
+        return self._preferred_batch_size
+
+    def observe(self, observation):
+        raise AssertionError("Host runtime should call observe_batch() at batch boundaries")
+
+    def observe_batch(self, observations):
+        self.observed_batches.append(
+            [observation.axis_values["axis_0"] for observation in observations]
+        )
 
 
 class HostCallsKernelHelperFragment(ExpFragment):
@@ -333,6 +500,81 @@ class HostRuntimeCase(HasEnvironmentCase):
             [1001.0, 1002.0, 1003.0],
         )
 
+    def test_host_scan_session_executes_and_observes_points_in_batches(self):
+        fragment = self.create(CountingLifecycleFragment, [])
+        point_source = RecordingBatchPointSource(
+            1,
+            [(0.0,), (1.0,), (2.0,), (3.0,), (4.0,)],
+            preferred_batch_size=2,
+        )
+        request = ScanRequest(
+            axes=(fragment.value,),
+            point_source=point_source,
+            max_points_per_batch=4,
+        )
+
+        session = HostScanSession(fragment, fragment, request)
+        session.run()
+
+        prefix = "ndscan.rid_0.site.root."
+        self.assertEqual(point_source.requested_batch_limits, [2, 2, 2])
+        self.assertEqual(point_source.observed_batches, [[0.0, 1.0], [2.0, 3.0], [4.0]])
+        self.assertEqual(fragment.host_setup_calls, 3)
+        self.assertEqual(fragment.host_cleanup_calls, 3)
+        self.assertEqual(self.scheduler.num_check_pause_calls, 2)
+        self.assertEqual(self.d(prefix, "points.axis_0"), [0.0, 1.0, 2.0, 3.0, 4.0])
+        self.assertEqual(self.d(prefix, "points.channel_0"), [1.0, 2.0, 3.0, 4.0, 5.0])
+
+    def test_host_scan_session_flushes_completed_batch_before_pause(self):
+        fragment = self.create(CountingLifecycleFragment, [])
+        point_source = RecordingBatchPointSource(
+            1,
+            [(0.0,), (1.0,), (2.0,), (3.0,)],
+            preferred_batch_size=2,
+        )
+        request = ScanRequest(
+            axes=(fragment.value,),
+            point_source=point_source,
+            max_points_per_batch=2,
+        )
+        self.scheduler.num_check_pause_calls_until_termination = 1
+
+        session = HostScanSession(fragment, fragment, request)
+        with self.assertRaises(TerminationRequested):
+            session.run()
+
+        prefix = "ndscan.rid_0.site.root."
+        self.assertEqual(point_source.observed_batches, [[0.0, 1.0]])
+        self.assertEqual(fragment.host_setup_calls, 1)
+        self.assertEqual(fragment.host_cleanup_calls, 1)
+        self.assertEqual(self.scheduler.num_check_pause_calls, 1)
+        self.assertEqual(self.d(prefix, "points.axis_0"), [0.0, 1.0])
+        self.assertEqual(self.d(prefix, "points.channel_0"), [1.0, 2.0])
+        self.assertEqual(self.d(prefix, "state.num_points"), 2)
+
+    def test_host_scan_session_flushes_partial_batch_before_restarting(self):
+        fragment = self.create(RestartOnceFragment, [])
+        point_source = RecordingBatchPointSource(
+            1,
+            [(0.0,), (1.0,), (2.0,), (3.0,)],
+        )
+        request = ScanRequest(
+            axes=(fragment.value,),
+            point_source=point_source,
+            max_points_per_batch=3,
+        )
+
+        session = HostScanSession(fragment, fragment, request)
+        session.run()
+
+        prefix = "ndscan.rid_0.site.root."
+        self.assertEqual(point_source.requested_batch_limits, [3, 3])
+        self.assertEqual(point_source.observed_batches, [[0.0, 1.0], [2.0], [3.0]])
+        self.assertEqual(fragment.host_setup_calls, 3)
+        self.assertEqual(fragment.host_cleanup_calls, 3)
+        self.assertEqual(self.d(prefix, "points.axis_0"), [0.0, 1.0, 2.0, 3.0])
+        self.assertEqual(self.d(prefix, "points.channel_0"), [1.0, 2.0, 3.0, 4.0])
+
     def test_numeric_channels_can_opt_out_of_save_by_default(self):
         fragment = self.create(VisibleAndHiddenNumericFragment, [])
         request = ScanRequest.explicit([fragment.value], [[1.0], [2.0]])
@@ -376,6 +618,24 @@ class HostRuntimeCase(HasEnvironmentCase):
             self.d(prefix, "points.channel_0"),
             [11.0, 22.0, 33.0],
         )
+
+    def test_host_scan_session_respects_until_condition_point_source(self):
+        fragment = self.create(PlainAddOneFragment, [])
+        request = ScanRequest(
+            axes=(fragment.value,),
+            point_source=UntilConditionPointSource(
+                ExplicitPointSource(1, [(0.0,), (1.0,), (2.0,), (3.0,)]),
+                lambda observation: observation.channel_values["channel_0"] >= 3.0,
+                predicate_description="channel_0 >= 3.0",
+            ),
+        )
+
+        session = HostScanSession(fragment, fragment, request)
+        session.run()
+
+        prefix = "ndscan.rid_0.site.root."
+        self.assertEqual(self.d(prefix, "points.axis_0"), [0.0, 1.0, 2.0])
+        self.assertEqual(self.d(prefix, "points.channel_0"), [1.0, 2.0, 3.0])
 
     def test_host_scan_session_executes_default_analyses_after_run(self):
         fragment = self.create(AnalysedLineFragment, [])

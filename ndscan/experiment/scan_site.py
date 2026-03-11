@@ -14,7 +14,7 @@ kept in the host runtime.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -244,14 +244,32 @@ class ScanSiteDatasetWriter:
         the dedicated `points.acquired_at_unix` stream rather than being mixed into the
         ordinary axis/channel payload arrays.
         """
+        self.append_observations((observation,))
 
-        for key, value in observation.axis_values.items():
-            self._get_point_sink(key).push(value)
-        for key, value in observation.channel_values.items():
-            self._get_point_sink(key).push(value)
-        if observation.acquired_at_unix is not None:
-            self._get_point_sink("acquired_at_unix").push(observation.acquired_at_unix)
-        self._next_point_index += 1
+    def append_observations(
+        self, observations: Sequence["PointObservation"]
+    ) -> None:
+        """Append a completed execution batch to the site's point datasets.
+
+        The first writer implementation still pushes individual point payloads through
+        immediately, but batching them in one method keeps the runtime boundary
+        explicit and lets future buffered writers update batch-level bookkeeping only
+        once per completed batch.
+        """
+
+        if not observations:
+            return
+
+        for observation in observations:
+            for key, value in observation.axis_values.items():
+                self._get_point_sink(key).push(value)
+            for key, value in observation.channel_values.items():
+                self._get_point_sink(key).push(value)
+            if observation.acquired_at_unix is not None:
+                self._get_point_sink("acquired_at_unix").push(
+                    observation.acquired_at_unix
+                )
+            self._next_point_index += 1
         self._push_scalar("state.num_points", self._next_point_index)
 
     def set_completed(self, completed: bool = True) -> None:
