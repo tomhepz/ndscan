@@ -98,3 +98,15 @@ class TestMisc(HasEnvironmentCase):
         self.assertEqual(a.make_namespaced_identifier("foo"), "a/foo")
         b = self.create(AddOneFragment, ["b", "c", "d"])
         self.assertEqual(b.make_namespaced_identifier("foo"), "b/c/d/foo")
+
+    def test_setattr_fragment_detached_shortcut(self):
+        class Parent(Fragment):
+            def build_fragment(self):
+                self.setattr_fragment("child", AddOneFragment, detached=True)
+
+        parent = self.create(Parent, [])
+        self.assertIn(parent.child, parent._detached_subfragments)
+
+        channels = {}
+        parent._collect_result_channels(channels)
+        self.assertEqual(channels, {})

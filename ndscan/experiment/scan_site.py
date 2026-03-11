@@ -93,6 +93,11 @@ class ScanSiteDatasetWriter:
     The writer keeps only enough mutable state to manage append-only datasets and
     open/closed segment tracking. It does not know how points are chosen or how a
     fragment is executed.
+
+    The first implementation writes each update through to the dataset manager
+    immediately. ``flush()``/``close()`` are nevertheless part of the interface from
+    the start: future batching should live here rather than leaking into the runtime or
+    fragment APIs.
     """
 
     def __init__(self, owner: HasEnvironment, site: ScanSite):
@@ -216,6 +221,24 @@ class ScanSiteDatasetWriter:
             sink = ScalarDatasetSink(self._owner, self.prefix + "analysis_result." + key)
             self._analysis_result_sinks[key] = sink
         sink.push(value)
+
+    def flush(self) -> None:
+        """Flush any buffered writes to the dataset manager.
+
+        This writer currently pushes every update immediately, so ``flush()`` is a
+        no-op today. The method exists intentionally to reserve a clean extension point
+        for future batching strategies such as "flush every N points" or "flush on a
+        timer", without forcing callers to change shape later on.
+        """
+
+    def close(self) -> None:
+        """Finalize the writer after the scan has finished.
+
+        Today this is just ``flush()``. Keeping a separate method makes the intended
+        lifecycle explicit and leaves room for future buffered implementations to do
+        any end-of-run draining in one place.
+        """
+        self.flush()
 
     def _get_point_sink(self, point_key: str) -> AppendingDatasetSink:
         sink = self._point_sinks.get(point_key, None)

@@ -6,7 +6,6 @@ Key differences from the legacy ``SubscanExpFragment`` approach:
 
 - no ``SubscanExpFragment`` subclasses,
 - no ``setattr_subscan(...)``,
-- no implicit default-analysis pipeline,
 - nested scans are launched explicitly with ``run_host_scan(...)``,
 - child scan sites are derived explicitly with ``make_child_scan_site(...)``.
 
@@ -15,10 +14,11 @@ The runtime model is intentionally simple:
 1. the top-level experiment executes exactly one root point,
 2. that root point launches a scan over ``p``,
 3. each ``p`` point launches a scan over ``x``,
-4. each level performs its own post-run analysis synchronously in plain Python.
+4. the scanned fragments declare default analyses, and the parent level consumes the
+   returned ``analysis_results`` explicitly.
 
 This keeps the recursive structure obvious and makes it easy to inspect how data flows
-through the new runtime before a dedicated analysis pipeline is added.
+through the new runtime while still reusing ndscan's fragment-side analysis API.
 """
 
 from __future__ import annotations
@@ -26,11 +26,13 @@ from __future__ import annotations
 import numpy as np
 
 from ndscan.experiment import (
+    CustomAnalysis,
     ExpFragment,
     FloatChannel,
     FloatParam,
     OpaqueChannel,
     ScanRequest,
+    annotations,
     make_child_scan_site,
     make_fragment_host_scan_exp,
     run_host_scan,
@@ -75,30 +77,47 @@ class LineFragment(ExpFragment):
     def run_once(self):
         self.y.push((self.p.get() ** self.e.get()) * self.x.get())
 
+    def get_default_analyses(self):
+        return [
+            CustomAnalysis(
+                [self.x],
+                self._analyse_gradient,
+                [
+                    FloatChannel("m", "Extracted slope"),
+                    OpaqueChannel("fit_xs", save_by_default=False),
+                    OpaqueChannel("fit_ys", save_by_default=False),
+                ],
+            )
+        ]
+
+    def _analyse_gradient(self, axis_values, result_values, analysis_results):
+        xs = np.asarray(axis_values[self.x], dtype=float)
+        ys = np.asarray(result_values[self.y], dtype=float)
+
+        m = fit_line_through_origin(xs, ys)
+        fit_xs = np.linspace(xs.min(), xs.max(), 50)
+        fit_ys = m * fit_xs
+
+        analysis_results["m"].push(m)
+        analysis_results["fit_xs"].push(fit_xs)
+        analysis_results["fit_ys"].push(fit_ys)
+        return [
+            annotations.curve_1d(
+                x_axis=self.x,
+                x_values=fit_xs,
+                y_axis=self.y,
+                y_values=fit_ys,
+            )
+        ]
+
 
 class ScanXFragment(ExpFragment):
-    """Scan ``x`` for one fixed choice of ``p`` and extract the slope ``m``.
-
-    This fragment owns the first nested scan site. The scanned child fragment is
-    detached so its result channels are not treated as ordinary parent outputs; instead
-    they belong to the nested scan launched in ``run_once()``.
-    """
+    """Scan ``x`` for one fixed choice of ``p`` and expose the fitted slope ``m``."""
 
     def build_fragment(self):
-        self.setattr_fragment("line", LineFragment)
-        self.detach_fragment(self.line)
+        self.setattr_fragment("line", LineFragment, detached=True)
 
         self.setattr_result("m", FloatChannel, description="Extracted slope")
-        self.setattr_result(
-            "fit_xs",
-            OpaqueChannel,
-            save_by_default=False,
-        )
-        self.setattr_result(
-            "fit_ys",
-            OpaqueChannel,
-            save_by_default=False,
-        )
 
     def run_once(self):
         x_points = np.linspace(0.0, 5.0, 6).tolist()
@@ -106,21 +125,37 @@ class ScanXFragment(ExpFragment):
             [(self.line.x, x_points)],
             site=make_child_scan_site(
                 "scan_x",
-                extra_metadata={"analysis_note": "manual slope fit"},
+                extra_metadata={"analysis_note": "default-analysis slope fit"},
             ),
         )
         x_result = run_host_scan(self, self.line, x_request)
+        self.m.push(x_result.analysis_results["m"])
 
-        xs = np.asarray(next(iter(x_result.coordinates.values())), dtype=float)
-        ys = np.asarray(x_result.values[self.line.y], dtype=float)
+    def get_default_analyses(self):
+        return [
+            CustomAnalysis(
+                [self.line.p],
+                self._analyse_exponent,
+                [
+                    FloatChannel("fit_e", "Extracted exponent"),
+                    OpaqueChannel("fit_ps", save_by_default=False),
+                    OpaqueChannel("fit_ms", save_by_default=False),
+                ],
+            )
+        ]
 
-        m = fit_line_through_origin(xs, ys)
-        fit_xs = np.linspace(xs.min(), xs.max(), 50)
-        fit_ys = m * fit_xs
+    def _analyse_exponent(self, axis_values, result_values, analysis_results):
+        ps = np.asarray(axis_values[self.line.p], dtype=float)
+        ms = np.asarray(result_values[self.m], dtype=float)
 
-        self.fit_xs.push(fit_xs)
-        self.fit_ys.push(fit_ys)
-        self.m.push(m)
+        fit_e = fit_power_law_exponent(ps, ms)
+        fit_ps = np.linspace(ps.min(), ps.max(), 100)
+        fit_ms = fit_ps**fit_e
+
+        analysis_results["fit_e"].push(fit_e)
+        analysis_results["fit_ps"].push(fit_ps)
+        analysis_results["fit_ms"].push(fit_ms)
+        return []
 
 
 class HowDoesPVaryFragment(ExpFragment):
@@ -133,20 +168,9 @@ class HowDoesPVaryFragment(ExpFragment):
     """
 
     def build_fragment(self):
-        self.setattr_fragment("scan_x", ScanXFragment)
-        self.detach_fragment(self.scan_x)
+        self.setattr_fragment("scan_x", ScanXFragment, detached=True)
 
         self.setattr_result("fit_e", FloatChannel, description="Extracted exponent")
-        self.setattr_result(
-            "fit_ps",
-            OpaqueChannel,
-            save_by_default=False,
-        )
-        self.setattr_result(
-            "fit_ms",
-            OpaqueChannel,
-            save_by_default=False,
-        )
 
     def run_once(self):
         # Start at p = 1 to keep the log-space fit well-defined.
@@ -155,21 +179,11 @@ class HowDoesPVaryFragment(ExpFragment):
             [(self.scan_x.line.p, p_points)],
             site=make_child_scan_site(
                 "scan_p",
-                extra_metadata={"analysis_note": "manual exponent fit"},
+                extra_metadata={"analysis_note": "default-analysis exponent fit"},
             ),
         )
         p_result = run_host_scan(self, self.scan_x, p_request)
-
-        ps = np.asarray(next(iter(p_result.coordinates.values())), dtype=float)
-        ms = np.asarray(p_result.values[self.scan_x.m], dtype=float)
-
-        fit_e = fit_power_law_exponent(ps, ms)
-        fit_ps = np.linspace(ps.min(), ps.max(), 100)
-        fit_ms = fit_ps**fit_e
-
-        self.fit_ps.push(fit_ps)
-        self.fit_ms.push(fit_ms)
-        self.fit_e.push(fit_e)
+        self.fit_e.push(p_result.analysis_results["fit_e"])
 
 
 HostRuntimeHowDoesPVary = make_fragment_host_scan_exp(
@@ -180,3 +194,4 @@ HostRuntimeHowDoesPVary = make_fragment_host_scan_exp(
         metadata={"demo_name": "host_runtime_nested_p_variation"}
     ),
 )
+HostRuntimeHowDoesPVary.__doc__ = "Host-runtime nested p-variation scan"

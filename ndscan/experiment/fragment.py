@@ -332,7 +332,12 @@ class Fragment(HasEnvironment):
         )
 
     def setattr_fragment(
-        self, name: str, fragment_class: type["Fragment"], *args, **kwargs
+        self,
+        name: str,
+        fragment_class: type["Fragment"],
+        *args,
+        detached: bool = False,
+        **kwargs,
     ) -> "Fragment":
         """Create a subfragment of the given name and type.
 
@@ -343,6 +348,10 @@ class Fragment(HasEnvironment):
         :param fragment_class: The type of the subfragment to instantiate.
         :param args: Any extra arguments to forward to the subfragment
             :meth:`build_fragment` call.
+        :param detached: If ``True``, immediately detach the new fragment from the
+            parent's normal traversal/lifecycle. This is equivalent to a subsequent
+            :meth:`detach_fragment` call on the returned fragment, but keeps the common
+            "construct a fragment only to drive it explicitly later" pattern concise.
         :param kwargs: Any extra keyword arguments to forward to the subfragment
             :meth:`build_fragment` call.
         :return: The newly created fragment instance.
@@ -357,6 +366,8 @@ class Fragment(HasEnvironment):
         frag = fragment_class(self, self._fragment_path + [name], *args, **kwargs)
         self._subfragments.append(frag)
         setattr(self, name, frag)
+        if detached:
+            self.detach_fragment(frag)
 
         return frag
 

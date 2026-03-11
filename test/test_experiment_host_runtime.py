@@ -4,11 +4,11 @@ import json
 import unittest
 
 import numpy as np
-from fixtures import AddOneFragment
 from mock_environment import HasEnvironmentCase
 
 from ndscan.experiment import (
     CartesianPointSource,
+    CustomAnalysis,
     ExpFragment,
     ExplicitPointSource,
     FloatChannel,
@@ -17,6 +17,7 @@ from ndscan.experiment import (
     ScanRequest,
     ScanSite,
     ZipPointSource,
+    annotations,
     kernel,
     make_child_scan_site,
     make_fragment_host_scan_exp,
@@ -57,6 +58,26 @@ class TwoParamAddFragment(ExpFragment):
         self.sum.push(self.a.get() + self.b.get())
 
 
+class PlainAddOneFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("value", FloatParam, "value", 0.0)
+        self.setattr_result("result", FloatChannel)
+
+    def run_once(self):
+        self.result.push(self.value.get() + 1.0)
+
+
+class VisibleAndHiddenNumericFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("value", FloatParam, "value", 0.0)
+        self.setattr_result("visible", FloatChannel)
+        self.setattr_result("hidden", FloatChannel, save_by_default=False)
+
+    def run_once(self):
+        self.visible.push(self.value.get() + 1.0)
+        self.hidden.push(self.value.get() + 10.0)
+
+
 class HostCallsKernelHelperFragment(ExpFragment):
     """Show that the host runtime can orchestrate scans around kernel helper calls."""
 
@@ -90,8 +111,7 @@ class NestedChildScanParent(ExpFragment):
 
     def build_fragment(self):
         self.setattr_param("outer", FloatParam, "outer", 0.0)
-        self.setattr_fragment("child", AddOneFragment)
-        self.detach_fragment(self.child)
+        self.setattr_fragment("child", PlainAddOneFragment, detached=True)
         self.setattr_result("child_total", FloatChannel)
 
     def run_once(self):
@@ -106,8 +126,7 @@ class NestedChildScanParent(ExpFragment):
 class RecursiveLeafScanFragment(ExpFragment):
     def build_fragment(self):
         self.setattr_param("base", FloatParam, "base", 0.0)
-        self.setattr_fragment("leaf", AddOneFragment)
-        self.detach_fragment(self.leaf)
+        self.setattr_fragment("leaf", PlainAddOneFragment, detached=True)
         self.setattr_result("leaf_total", FloatChannel)
 
     def run_once(self):
@@ -125,8 +144,7 @@ class RecursiveScanParent(ExpFragment):
 
     def build_fragment(self):
         self.setattr_param("outer", FloatParam, "outer", 0.0)
-        self.setattr_fragment("middle", RecursiveLeafScanFragment)
-        self.detach_fragment(self.middle)
+        self.setattr_fragment("middle", RecursiveLeafScanFragment, detached=True)
         self.setattr_result("middle_total", FloatChannel)
 
     def run_once(self):
@@ -153,7 +171,7 @@ def _fit_power_law_exponent(ps, ms) -> float:
     return float(np.dot(log_p, log_m) / np.dot(log_p, log_p))
 
 
-class ManualLineAnalysisFragment(ExpFragment):
+class AnalysedLineFragment(ExpFragment):
     def build_fragment(self):
         self.setattr_param("p", FloatParam, "p", 2.0)
         self.setattr_param("e", FloatParam, "e", 2.0)
@@ -163,11 +181,37 @@ class ManualLineAnalysisFragment(ExpFragment):
     def run_once(self):
         self.y.push((self.p.get() ** self.e.get()) * self.x.get())
 
+    def get_default_analyses(self):
+        return [
+            CustomAnalysis(
+                [self.x],
+                self._analyse_gradient,
+                [FloatChannel("m", "Extracted slope")],
+            )
+        ]
 
-class ManualScanXFragment(ExpFragment):
+    def _analyse_gradient(self, axis_values, result_values, analysis_results):
+        xs = axis_values[self.x]
+        ys = result_values[self.y]
+
+        m = _fit_line_through_origin(xs, ys)
+        fit_xs = np.linspace(min(xs), max(xs), 20)
+        fit_ys = m * fit_xs
+
+        analysis_results["m"].push(m)
+        return [
+            annotations.curve_1d(
+                x_axis=self.x,
+                x_values=fit_xs,
+                y_axis=self.y,
+                y_values=fit_ys,
+            )
+        ]
+
+
+class AnalysedScanXFragment(ExpFragment):
     def build_fragment(self):
-        self.setattr_fragment("line", ManualLineAnalysisFragment)
-        self.detach_fragment(self.line)
+        self.setattr_fragment("line", AnalysedLineFragment, detached=True)
         self.setattr_result("m", FloatChannel)
 
     def run_once(self):
@@ -177,15 +221,29 @@ class ManualScanXFragment(ExpFragment):
             site=make_child_scan_site("scan_x"),
         )
         result = run_host_scan(self, self.line, request)
-        xs = next(iter(result.coordinates.values()))
-        ys = result.values[self.line.y]
-        self.m.push(_fit_line_through_origin(xs, ys))
+        self.m.push(result.analysis_results["m"])
+
+    def get_default_analyses(self):
+        return [
+            CustomAnalysis(
+                [self.line.p],
+                self._analyse_exponent,
+                [FloatChannel("fit_e", "Extracted exponent")],
+            )
+        ]
+
+    def _analyse_exponent(self, axis_values, result_values, analysis_results):
+        ps = axis_values[self.line.p]
+        ms = result_values[self.m]
+
+        fit_e = _fit_power_law_exponent(ps, ms)
+        analysis_results["fit_e"].push(fit_e)
+        return []
 
 
-class ManualHowDoesPVaryFragment(ExpFragment):
+class AnalysedHowDoesPVaryFragment(ExpFragment):
     def build_fragment(self):
-        self.setattr_fragment("scan_x", ManualScanXFragment)
-        self.detach_fragment(self.scan_x)
+        self.setattr_fragment("scan_x", AnalysedScanXFragment, detached=True)
         self.setattr_result("fit_e", FloatChannel)
 
     def run_once(self):
@@ -195,15 +253,13 @@ class ManualHowDoesPVaryFragment(ExpFragment):
             site=make_child_scan_site("scan_p"),
         )
         result = run_host_scan(self, self.scan_x, request)
-        ps = next(iter(result.coordinates.values()))
-        ms = result.values[self.scan_x.m]
-        self.fit_e.push(_fit_power_law_exponent(ps, ms))
+        self.fit_e.push(result.analysis_results["fit_e"])
 
 
 class HostRuntimeCase(HasEnvironmentCase):
     def test_host_scan_session_writes_root_scan_site(self):
         self.dataset_db.data["system_id"] = (True, "system")
-        fragment = self.create(AddOneFragment, [])
+        fragment = self.create(PlainAddOneFragment, [])
         request = ScanRequest.cartesian([(fragment.value, [0.0, 1.0, 2.0])])
 
         session = HostScanSession(fragment, fragment, request)
@@ -211,7 +267,10 @@ class HostRuntimeCase(HasEnvironmentCase):
 
         prefix = result.site_prefix
         self.assertEqual(prefix, "ndscan.rid_0.site.root.")
-        self.assertEqual(self.dataset_db.get(prefix + "fragment_fqn"), "fixtures.AddOneFragment")
+        self.assertEqual(
+            self.dataset_db.get(prefix + "fragment_fqn"),
+            f"{__name__}.PlainAddOneFragment",
+        )
         self.assertEqual(self.dataset_db.get(prefix + "source_id"), "system_0")
         self.assertEqual(self.dataset_db.get(prefix + "completed"), True)
         self.assertEqual(json.loads(self.dataset_db.get(prefix + "site_path")), [])
@@ -224,9 +283,25 @@ class HostRuntimeCase(HasEnvironmentCase):
             [1.0, 2.0, 3.0],
         )
         self.assertEqual(
-            result.coordinates[("fixtures.AddOneFragment.value", "")],
+            result.coordinates[(f"{__name__}.PlainAddOneFragment.value", "")],
             [0.0, 1.0, 2.0],
         )
+
+    def test_numeric_channels_can_opt_out_of_save_by_default(self):
+        fragment = self.create(VisibleAndHiddenNumericFragment, [])
+        request = ScanRequest.explicit([fragment.value], [[1.0], [2.0]])
+
+        session = HostScanSession(fragment, fragment, request)
+        result = session.run()
+
+        prefix = result.site_prefix
+        self.assertEqual(
+            self.dataset_db.get(prefix + "points.channel_0"),
+            [2.0, 3.0],
+        )
+        self.assertNotIn(prefix + "points.channel_1", self.dataset_db.data)
+        self.assertIn(fragment.visible, result.values)
+        self.assertNotIn(fragment.hidden, result.values)
 
     def test_host_scan_session_supports_zipped_points(self):
         fragment = self.create(TwoParamAddFragment, [])
@@ -256,10 +331,33 @@ class HostRuntimeCase(HasEnvironmentCase):
             [11.0, 22.0, 33.0],
         )
 
+    def test_host_scan_session_executes_default_analyses_after_run(self):
+        fragment = self.create(AnalysedLineFragment, [])
+        request = ScanRequest.explicit(
+            [fragment.x],
+            [[0.0], [1.0], [2.0], [3.0], [4.0], [5.0]],
+        )
+
+        session = HostScanSession(fragment, fragment, request)
+        result = session.run()
+
+        prefix = result.site_prefix
+        self.assertAlmostEqual(result.analysis_results["m"], 4.0, places=6)
+        self.assertAlmostEqual(self.dataset_db.get(prefix + "analysis_result.m"), 4.0)
+
+        metadata = json.loads(self.dataset_db.get(prefix + "analysis_results"))
+        self.assertIn("m", metadata)
+        self.assertEqual(metadata["m"]["path"], "m")
+
+        annotations_data = json.loads(self.dataset_db.get(prefix + "annotations"))
+        self.assertEqual(len(annotations_data), 1)
+        self.assertEqual(annotations_data[0]["kind"], "curve")
+        self.assertEqual(result.annotations, annotations_data)
+
     def test_host_scan_experiment_adapter_runs(self):
         self.dataset_db.data["system_id"] = (True, "system")
         HostAddOneScan = make_fragment_host_scan_exp(
-            AddOneFragment,
+            PlainAddOneFragment,
             lambda fragment: ScanRequest.explicit(
                 [fragment.value],
                 [[5.0], [7.0]],
@@ -378,10 +476,10 @@ class HostRuntimeCase(HasEnvironmentCase):
             [2.0, 2.5, 12.0, 12.5, 3.0, 3.5, 13.0, 13.5],
         )
 
-    def test_manual_nested_analysis_chain_matches_example_style(self):
-        parent = self.create(ManualHowDoesPVaryFragment, [])
+    def test_nested_default_analyses_chain_matches_example_style(self):
+        parent = self.create(AnalysedHowDoesPVaryFragment, [])
         session = HostScanSession(parent, parent, ScanRequest.single())
-        session.run()
+        result = session.run()
 
         root_prefix = "ndscan.rid_0.site.root."
         p_prefix = "ndscan.rid_0.site.root.scan_p."
@@ -401,3 +499,6 @@ class HostRuntimeCase(HasEnvironmentCase):
             [1.0, 4.0, 9.0, 16.0, 25.0],
         )
         self.assertEqual(self.dataset_db.get(x_prefix + "starts"), [0, 6, 12, 18, 24])
+        self.assertAlmostEqual(result.values[parent.fit_e][0], 2.0, places=6)
+        self.assertAlmostEqual(self.dataset_db.get(p_prefix + "analysis_result.fit_e"), 2.0)
+        self.assertAlmostEqual(self.dataset_db.get(x_prefix + "analysis_result.m"), 25.0)

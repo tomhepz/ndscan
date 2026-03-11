@@ -301,6 +301,9 @@ class NumericChannel(ResultChannel):
     :param unit: Name of the unit the results are given in (e.g. ``"ms"``, ``"kHz"``).
     :param scale: Unit scaling. If ``None``, the default scaling as per ARTIQ's unit
         handling machinery (``artiq.language.units``) is used.
+    :param save_by_default: Whether scans should save/publish this channel unless a
+        caller explicitly chooses otherwise. Numeric channels used for intermediate or
+        debugging-only values benefit from the same opt-out as opaque channels.
     """
 
     def __init__(
@@ -308,12 +311,13 @@ class NumericChannel(ResultChannel):
         path: str,
         description: str = "",
         display_hints: dict[str, Any] | None = None,
+        save_by_default: bool = True,
         min=None,
         max=None,
         unit: str = "",
         scale=None,
     ):
-        super().__init__(path, description, display_hints)
+        super().__init__(path, description, display_hints, save_by_default)
         self.min = min
         self.max = max
 
