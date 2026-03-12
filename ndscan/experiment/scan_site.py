@@ -295,6 +295,19 @@ class ScanSiteDatasetWriter:
 
         self._push_scalar("analysis.online_result." + key, value)
 
+    def set_online_analysis_annotations(
+        self, key: str, annotations: list[dict[str, Any]]
+    ) -> None:
+        """Publish the latest annotations for one online analysis.
+
+        Online annotations are rewritten at each batch boundary just like the matching
+        online outputs. This keeps the write-side contract symmetric and lets adaptive
+        readers treat online analyses as "latest snapshot" state rather than as a
+        second append-only history.
+        """
+
+        self._push_scalar("analysis.online_annotation." + key, annotations)
+
     def flush(self) -> None:
         """Flush any buffered writes to the dataset manager.
 

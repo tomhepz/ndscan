@@ -9,10 +9,12 @@ from artiq.language.core import TerminationRequested
 from mock_environment import HasEnvironmentCase
 
 from ndscan.experiment import (
+    AnalysisFeedback,
     BatchFeedback,
     CartesianPointSource,
     ConcatPointSource,
     CustomAnalysis,
+    DefaultAnalysis,
     ExpFragment,
     ExplicitPointSource,
     FloatChannel,
@@ -169,7 +171,7 @@ class PointSourceTest(unittest.TestCase):
                         channel_values={"channel_0": 20},
                     ),
                 ),
-                online_analysis_results={"fit": {"error": 0.05}},
+                online_analyses={"fit": AnalysisFeedback(outputs={"error": 0.05})},
             )
         )
         self.assertTrue(source.is_finished())
@@ -263,6 +265,8 @@ class RecordingBatchPointSource(ExplicitPointSource):
         self.requested_batch_limits = []
         self.observed_batches = []
         self.observed_online_analysis_results = []
+        self.observed_online_analysis_annotations = []
+        self.observed_result_lengths = []
 
     def next_batch(self, max_points: int):
         self.requested_batch_limits.append(max_points)
@@ -282,6 +286,18 @@ class RecordingBatchPointSource(ExplicitPointSource):
         )
         self.observed_online_analysis_results.append(
             dict(feedback.online_analysis_results)
+        )
+        self.observed_online_analysis_annotations.append(
+            {
+                name: list(analysis.annotations)
+                for name, analysis in feedback.online_analyses.items()
+            }
+        )
+        self.observed_result_lengths.append(
+            {
+                channel.path: len(values)
+                for channel, values in feedback.result_data.items()
+            }
         )
 
 
@@ -322,6 +338,63 @@ class OnlineGaussianFragment(ExpFragment):
 
     def get_default_analyses(self):
         return [OnlineFit("gaussian", data={"x": self.x, "y": self.y})]
+
+
+class RunningSummaryAnalysis(DefaultAnalysis):
+    """Small online analysis used to test structured batch feedback."""
+
+    def __init__(self, x_handle, y_channel):
+        self._x_handle = x_handle
+        self._y_channel = y_channel
+
+    def required_axes(self):
+        return {self._x_handle}
+
+    def describe_online_analyses(self, context):
+        return [], {"running_summary": {"kind": "running_summary"}}
+
+    def get_analysis_results(self):
+        return {}
+
+    def execute(self, axis_data, result_data, context):
+        return []
+
+    def execute_online(self, axis_data, result_data, context):
+        xs = list(axis_data[self._x_handle._store.identity])
+        ys = list(result_data[self._y_channel])
+        latest_x = float(xs[-1])
+        latest_y = float(ys[-1])
+        return {
+            "running_summary": AnalysisFeedback(
+                outputs={
+                    "num_points": len(xs),
+                    "latest_x": latest_x,
+                    "latest_y": latest_y,
+                },
+                annotations=[
+                    annotations.curve_1d(
+                        x_axis=self._x_handle,
+                        x_values=np.asarray(xs, dtype=float),
+                        y_axis=self._y_channel,
+                        y_values=np.asarray(ys, dtype=float),
+                    ).describe(context)
+                ],
+            )
+        }
+
+
+class OnlineAnnotatedFragment(ExpFragment):
+    """Fragment with a simple online summary analysis and live annotations."""
+
+    def build_fragment(self):
+        self.setattr_param("x", FloatParam, "x", 0.0)
+        self.setattr_result("y", FloatChannel)
+
+    def run_once(self):
+        self.y.push(self.x.get() + 1.0)
+
+    def get_default_analyses(self):
+        return [RunningSummaryAnalysis(self.x, self.y)]
 
 
 class FourDimQuadraticFragment(ExpFragment):
@@ -645,6 +718,14 @@ class HostRuntimeCase(HasEnvironmentCase):
             point_source.observed_online_analysis_results,
             [{}, {}, {}],
         )
+        self.assertEqual(
+            point_source.observed_result_lengths,
+            [
+                {"result": 2},
+                {"result": 4},
+                {"result": 5},
+            ],
+        )
         self.assertEqual(fragment.host_setup_calls, 3)
         self.assertEqual(fragment.host_cleanup_calls, 3)
         self.assertEqual(self.scheduler.num_check_pause_calls, 2)
@@ -730,6 +811,48 @@ class HostRuntimeCase(HasEnvironmentCase):
             self.j(prefix, "analysis.online_result." + analysis_name),
             point_source.observed_online_analysis_results[-1][analysis_name],
         )
+        self.assertEqual(
+            point_source.observed_online_analysis_annotations[-1][analysis_name],
+            [],
+        )
+
+    def test_host_scan_session_publishes_online_analysis_annotations_and_feedback(self):
+        fragment = self.create(OnlineAnnotatedFragment, [])
+        point_source = RecordingBatchPointSource(
+            1,
+            [(0.0,), (1.0,), (2.0,)],
+            preferred_batch_size=2,
+        )
+        request = ScanRequest(
+            axes=(fragment.x,),
+            point_source=point_source,
+            max_points_per_batch=2,
+        )
+
+        session = HostScanSession(fragment, fragment, request)
+        result = session.run()
+
+        prefix = result.site_prefix
+        online_result = self.j(prefix, "analysis.online_result.running_summary")
+        online_annotations = self.j(prefix, "analysis.online_annotation.running_summary")
+
+        self.assertEqual(online_result["num_points"], 3)
+        self.assertEqual(online_result["latest_x"], 2.0)
+        self.assertEqual(online_result["latest_y"], 3.0)
+        self.assertEqual(result.online_analysis_results["running_summary"], online_result)
+        self.assertEqual(
+            result.online_analysis_annotations["running_summary"],
+            online_annotations,
+        )
+        self.assertEqual(
+            point_source.observed_online_analysis_results[-1]["running_summary"],
+            online_result,
+        )
+        self.assertEqual(
+            point_source.observed_online_analysis_annotations[-1]["running_summary"],
+            online_annotations,
+        )
+        self.assertEqual(online_annotations[0]["kind"], "curve")
 
     def test_host_scan_session_supports_gradient_descent_point_source(self):
         fragment = self.create(FourDimQuadraticFragment, [])

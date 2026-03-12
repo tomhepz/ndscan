@@ -67,22 +67,22 @@ def estimate_probability_from_shots(shots: list[float]) -> tuple[float, float]:
 
 
 def make_probability_precision_stopper(
+    hit_channel,
     *,
     error_threshold: float,
     min_shots: int,
 ):
     """Return a batch predicate for ``UntilConditionPointSource``.
 
-    The returned closure accumulates all completed yes/no observations and stops the
-    dummy repeat scan once the estimated probability error is below the requested
-    threshold.
+    The returned closure looks at the full accumulated result series for the nested
+    repeat scan and stops once the estimated probability error is below the requested
+    threshold. This demonstrates the intended adaptive-runtime pattern: batch feedback
+    already carries the scan state the next-point policy needs, so user code does not
+    need to maintain a second shadow accumulator.
     """
 
-    all_shots: list[float] = []
-
     def stop(feedback) -> bool:
-        for observation in feedback.observations:
-            all_shots.append(float(observation.channel_values["channel_0"]))
+        all_shots = list(feedback.result_data[hit_channel])
 
         if len(all_shots) < min_shots:
             return False
@@ -167,6 +167,7 @@ class ProbabilityAtTimeFragment(ExpFragment):
 
     def run_once(self):
         stop_when_precise = make_probability_precision_stopper(
+            self.detector.hit,
             error_threshold=0.035,
             min_shots=24,
         )

@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from itertools import product
 from typing import Any
 
+from .default_analysis import AnalysisFeedback
+
 __all__ = [
     "BasePoint",
     "BatchFeedback",
@@ -57,13 +59,43 @@ class BatchFeedback:
     """Information available at one completed batch boundary.
 
     Point policies primarily need the completed observations so they can refine later
-    choices. Batch-oriented policies and future early-exit wrappers also benefit from
-    seeing any online-analysis results that were produced from the accumulated data at
-    the same boundary.
+    choices. Adaptive policies also often need the *accumulated* scan state at that
+    same boundary:
+
+    - full axis/result series seen so far,
+    - the latest outputs from any online analyses,
+    - any online annotations derived from that accumulated data.
+
+    Most point policies will ignore the richer fields and just look at the finished
+    observations. The explicit structure is there so adaptive policies do not have to
+    reverse-engineer state from dataset keys or maintain duplicate accumulators in user
+    code.
     """
 
     observations: tuple[Any, ...]
-    online_analysis_results: Mapping[str, Any] = field(default_factory=dict)
+    axis_data: Mapping[Any, tuple[Any, ...]] = field(default_factory=dict)
+    result_data: Mapping[Any, tuple[Any, ...]] = field(default_factory=dict)
+    online_analyses: Mapping[str, AnalysisFeedback] = field(default_factory=dict)
+
+    @property
+    def online_analysis_results(self) -> dict[str, Any]:
+        """Return the latest online-analysis outputs in the old dict-only form.
+
+        This compatibility view keeps existing stop predicates and tests working while
+        newer code can use ``online_analyses`` for the full structured payload.
+        """
+
+        return {name: feedback.outputs for name, feedback in self.online_analyses.items()}
+
+    def latest_axis_value(self, handle: Any) -> Any:
+        """Return the latest accumulated value for one scanned axis handle."""
+
+        return self.axis_data[handle][-1]
+
+    def latest_result_value(self, channel: Any) -> Any:
+        """Return the latest accumulated value for one result channel."""
+
+        return self.result_data[channel][-1]
 
 
 class PointSource:
@@ -335,7 +367,9 @@ class ConcatPointSource(PointSource):
             source.observe_batch(
                 BatchFeedback(
                     observations=tuple(source_observations),
-                    online_analysis_results=feedback.online_analysis_results,
+                    axis_data=feedback.axis_data,
+                    result_data=feedback.result_data,
+                    online_analyses=feedback.online_analyses,
                 )
             )
 

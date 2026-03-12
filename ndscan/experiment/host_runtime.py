@@ -37,6 +37,7 @@ from artiq.language import EnvExperiment, HasEnvironment, kernel, portable
 
 from ..utils import merge_no_duplicates
 from .annotations import AnnotationContext
+from .default_analysis import AnalysisFeedback
 from .fragment import ExpFragment, RestartKernelTransitoryError, TransitoryError
 from .parameters import ParamHandle, ParamStore
 from .point_source import (
@@ -153,8 +154,8 @@ class ScanRequest:
     concept. It caps how many points the runtime will execute before it:
 
     - writes the completed observations through the scan-site writer,
-    - gives the point policy a batched observation callback,
-    - runs future batch-level online analyses,
+    - runs batch-level online analyses on the accumulated data so far,
+    - gives the point policy that full batch feedback,
     - considers yielding to the scheduler.
 
     The point policy can still request a smaller natural batch size through
@@ -302,6 +303,7 @@ class HostScanRunResult:
     coordinates: OrderedDict[tuple[str, str], list[Any]]
     values: dict[ResultChannel, list[Any]]
     online_analysis_results: dict[str, Any]
+    online_analysis_annotations: dict[str, list[dict[str, Any]]]
     analysis_results: dict[str, Any]
     annotations: list[dict[str, Any]]
     site_prefix: str
@@ -320,6 +322,7 @@ class HostScanRunResult:
             ),
             values={binding.channel: [] for binding in channels},
             online_analysis_results={},
+            online_analysis_annotations={},
             analysis_results={},
             annotations=list(initial_annotations),
             site_prefix=site_prefix,
@@ -479,7 +482,7 @@ class _HostScanAnalysisPlan:
         observations: Sequence[PointObservation],
         run_result: HostScanRunResult,
         site_writer: ScanSiteDatasetWriter,
-    ) -> dict[str, Any]:
+    ) -> dict[str, AnalysisFeedback]:
         """Handle one completed execution batch.
 
         Online analyses are re-evaluated on the accumulated scan data after each
@@ -496,7 +499,7 @@ class _HostScanAnalysisPlan:
 
         axis_data = dict(run_result.coordinates)
         result_data = dict(run_result.values)
-        online_results = reduce(
+        raw_online_results = reduce(
             lambda x, y: merge_no_duplicates(x, y, kind="online analysis result"),
             (
                 analysis.execute_online(axis_data, result_data, self._annotation_context)
@@ -504,10 +507,32 @@ class _HostScanAnalysisPlan:
             ),
             {},
         )
-        for name, value in online_results.items():
-            site_writer.set_online_analysis_result(name, value)
-        run_result.online_analysis_results = dict(online_results)
+        online_results = {
+            name: self._normalise_online_feedback(value)
+            for name, value in raw_online_results.items()
+        }
+        for name, feedback in online_results.items():
+            site_writer.set_online_analysis_result(name, feedback.outputs)
+            site_writer.set_online_analysis_annotations(name, feedback.annotations)
+        run_result.online_analysis_results = {
+            name: feedback.outputs for name, feedback in online_results.items()
+        }
+        run_result.online_analysis_annotations = {
+            name: list(feedback.annotations) for name, feedback in online_results.items()
+        }
         return online_results
+
+    def _normalise_online_feedback(self, value: AnalysisFeedback | dict[str, Any]) -> AnalysisFeedback:
+        """Return the structured online-analysis payload for one analysis.
+
+        Older online analyses returned only a dict of outputs. Newer code can return an
+        ``AnalysisFeedback`` directly so outputs and annotations travel through the
+        runtime together.
+        """
+
+        if isinstance(value, AnalysisFeedback):
+            return value
+        return AnalysisFeedback(outputs=dict(value))
 
 
 @dataclass
@@ -961,13 +986,23 @@ class HostScanProgramRunner:
 
         self._program.site_writer.append_observations(completed_batch)
         result.record_batch(completed_batch, self._program.axes, self._program.channels)
-        online_analysis_results = self._program.analysis_plan.observe_batch(
+        online_analyses = self._program.analysis_plan.observe_batch(
             completed_batch, result, self._program.site_writer
         )
         self._program.point_source.observe_batch(
             BatchFeedback(
                 observations=tuple(completed_batch),
-                online_analysis_results=online_analysis_results,
+                axis_data={
+                    axis.handle: tuple(
+                        result.coordinates[(axis.param_schema["fqn"], axis.path)]
+                    )
+                    for axis in self._program.axes
+                },
+                result_data={
+                    binding.channel: tuple(result.values[binding.channel])
+                    for binding in self._program.channels
+                },
+                online_analyses=online_analyses,
             )
         )
         self._program.site_writer.flush()

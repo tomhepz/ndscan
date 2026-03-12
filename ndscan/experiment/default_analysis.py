@@ -19,6 +19,7 @@ in the user interface.
 
 import logging
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -37,6 +38,7 @@ from .result_channels import OpaqueChannel, ResultChannel
 
 __all__ = [
     "Annotation",
+    "AnalysisFeedback",
     "DefaultAnalysis",
     "CustomAnalysis",
     "OnlineFit",
@@ -50,6 +52,20 @@ logger = logging.getLogger(__name__)
 #: an analysis typically doesn't care whether a parameter was for instance scanned via
 #: the path of the particular handle given or a wildcard path spec.
 AxisIdentity = tuple[str, str]
+
+
+@dataclass(frozen=True)
+class AnalysisFeedback:
+    """Latest outputs and annotations for one analysis execution mode.
+
+    The host runtime uses the same shape for online feedback that point policies see
+    and for the online datasets that are published at each completed batch boundary.
+    Keeping the payload structured here avoids a second round of ad-hoc dict wrapping
+    in the runtime.
+    """
+
+    outputs: dict[str, Any] = field(default_factory=dict)
+    annotations: list[dict[str, Any]] = field(default_factory=list)
 
 
 class DefaultAnalysis:
@@ -103,8 +119,8 @@ class DefaultAnalysis:
         axis_data: dict[AxisIdentity, list],
         result_data: dict[ResultChannel, list],
         context: AnnotationContext,
-    ) -> dict[str, dict[str, Any]]:
-        """Return the latest online-analysis results for the current accumulated data.
+    ) -> dict[str, AnalysisFeedback | dict[str, Any]]:
+        """Return the latest online-analysis state for the current accumulated data.
 
         The default implementation reports no executable online analysis. Analyses that
         already describe online metadata, such as ``OnlineFit``, can override this to
@@ -369,10 +385,14 @@ class OnlineFit(DefaultAnalysis):
         axis_data: dict[AxisIdentity, list],
         result_data: dict[ResultChannel, list],
         context: AnnotationContext,
-    ) -> dict[str, dict[str, Any]]:
+    ) -> dict[str, AnalysisFeedback]:
         analysis_identifier, _ = self._resolve_online_identity(context)
         result = self._fit_current_data(axis_data, result_data)
-        return {analysis_identifier: {} if result is None else result}
+        return {
+            analysis_identifier: AnalysisFeedback(
+                outputs={} if result is None else result,
+            )
+        }
 
     def execute(
         self,
@@ -525,5 +545,5 @@ class ResultPrefixAnalysisWrapper(DefaultAnalysis):
         axis_data: dict[AxisIdentity, list],
         result_data: dict[ResultChannel, list],
         context: AnnotationContext,
-    ) -> dict[str, dict[str, Any]]:
+    ) -> dict[str, AnalysisFeedback | dict[str, Any]]:
         return self._wrapped.execute_online(axis_data, result_data, context)
