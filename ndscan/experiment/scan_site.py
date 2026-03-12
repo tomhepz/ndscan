@@ -36,7 +36,7 @@ __all__ = [
 
 # The legacy runtime still writes schema revision 2. The host-runtime scan-site schema
 # has diverged enough that readers should be able to distinguish it explicitly.
-SCAN_SITE_SCHEMA_REVISION = 3
+SCAN_SITE_SCHEMA_REVISION = 4
 
 
 @dataclass(frozen=True)
@@ -103,6 +103,12 @@ class ScanSiteDatasetWriter:
     immediately. ``flush()``/``close()`` are nevertheless part of the interface from
     the start: future batching should live here rather than leaking into the runtime or
     fragment APIs.
+
+    Point-like datasets are intentionally split by role:
+
+    - ``points.pseudoparam_*`` for logical runtime-only scan variables,
+    - ``points.param_*`` for actual fragment parameters whose values varied,
+    - ``points.channel_*`` for result channels.
     """
 
     def __init__(self, owner: HasEnvironment, site: ScanSite):
@@ -261,7 +267,9 @@ class ScanSiteDatasetWriter:
             return
 
         for observation in observations:
-            for key, value in observation.axis_values.items():
+            for key, value in observation.pseudoparam_values.items():
+                self._get_point_sink(key).push(value)
+            for key, value in observation.parameter_values.items():
                 self._get_point_sink(key).push(value)
             for key, value in observation.channel_values.items():
                 self._get_point_sink(key).push(value)

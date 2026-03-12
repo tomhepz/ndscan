@@ -665,9 +665,9 @@ class HostRuntimeCase(HasEnvironmentCase):
         self.assertEqual(self.d(prefix, "state.num_points"), 3)
         self.assertEqual(self.j(prefix, "site.path"), [])
         self.assertEqual(
-            self.j(prefix, "scan.axes"),
+            self.j(prefix, "scan.parameters"),
             {
-                "axis_0": {
+                "param_0": {
                     "path": "",
                     "param": {
                         "description": "value",
@@ -680,12 +680,15 @@ class HostRuntimeCase(HasEnvironmentCase):
                         },
                         "type": "float",
                     },
+                    "is_scanned": True,
+                    "scan_role": "direct",
                 }
             },
         )
+        self.assertEqual(self.j(prefix, "scan.pseudoparams"), {})
         self.assertEqual(list(self.j(prefix, "scan.channels").keys()), ["channel_0"])
         self.assertEqual(
-            self.d(prefix, "points.axis_0"),
+            self.d(prefix, "points.param_0"),
             [0.0, 1.0, 2.0],
         )
         self.assertEqual(
@@ -722,12 +725,13 @@ class HostRuntimeCase(HasEnvironmentCase):
         result = session.run()
 
         prefix = result.site_prefix
-        self.assertEqual(self.d(prefix, "points.axis_0"), [0.0, 1.0, 2.0])
+        self.assertEqual(self.d(prefix, "points.pseudoparam_0"), [0.0, 1.0, 2.0])
+        self.assertEqual(self.d(prefix, "points.param_0"), [0.5, 1.5, 2.5])
         self.assertEqual(self.d(prefix, "points.channel_0"), [1.0, 3.0, 5.0])
         self.assertEqual(
-            self.j(prefix, "scan.axes"),
+            self.j(prefix, "scan.pseudoparams"),
             {
-                "axis_0": {
+                "pseudoparam_0": {
                     "path": "",
                     "variable": {
                         "name": "laser_frequency",
@@ -735,6 +739,27 @@ class HostRuntimeCase(HasEnvironmentCase):
                         "type": "float",
                         "spec": {},
                     },
+                }
+            },
+        )
+        self.assertEqual(
+            self.j(prefix, "scan.parameters"),
+            {
+                "param_0": {
+                    "path": "",
+                    "param": {
+                        "description": "drive",
+                        "default": "0.0",
+                        "fqn": f"{__name__}.PhysicalDriveFragment.drive",
+                        "spec": {
+                            "is_scannable": True,
+                            "scale": 1.0,
+                            "step": 0.1,
+                        },
+                        "type": "float",
+                    },
+                    "is_scanned": False,
+                    "scan_role": "derived",
                 }
             },
         )
@@ -761,8 +786,8 @@ class HostRuntimeCase(HasEnvironmentCase):
                     ],
                     "dependencies": [
                         {
-                            "kind": "axis",
-                            "axis": "axis_0",
+                            "kind": "pseudoparam",
+                            "key": "pseudoparam_0",
                         }
                     ],
                 }
@@ -783,7 +808,8 @@ class HostRuntimeCase(HasEnvironmentCase):
         result = session.run()
 
         prefix = result.site_prefix
-        self.assertEqual(self.d(prefix, "points.axis_0"), [0.0, 1.0, 2.0])
+        self.assertEqual(self.d(prefix, "points.param_0"), [0.0, 1.0, 2.0])
+        self.assertEqual(self.d(prefix, "points.param_1"), [0.5, 1.5, 2.5])
         self.assertEqual(self.d(prefix, "points.channel_0"), [1.0, 3.0, 5.0])
         self.assertEqual(
             self.j(prefix, "scan.channels"),
@@ -797,6 +823,44 @@ class HostRuntimeCase(HasEnvironmentCase):
                 }
             },
         )
+        self.assertEqual(
+            self.j(prefix, "scan.parameters"),
+            {
+                "param_0": {
+                    "path": "",
+                    "param": {
+                        "description": "logical drive",
+                        "default": "0.0",
+                        "fqn": f"{__name__}.WrapperRebindFragment.logical_drive",
+                        "spec": {
+                            "is_scannable": True,
+                            "scale": 1.0,
+                            "step": 0.1,
+                        },
+                        "type": "float",
+                    },
+                    "is_scanned": True,
+                    "scan_role": "direct",
+                },
+                "param_1": {
+                    "path": "child",
+                    "param": {
+                        "description": "drive",
+                        "default": "0.0",
+                        "fqn": f"{__name__}.PhysicalDriveFragment.drive",
+                        "spec": {
+                            "is_scannable": True,
+                            "scale": 1.0,
+                            "step": 0.1,
+                        },
+                        "type": "float",
+                    },
+                    "is_scanned": False,
+                    "scan_role": "derived",
+                },
+            },
+        )
+        self.assertEqual(self.j(prefix, "scan.pseudoparams"), {})
         self.assertEqual(
             self.j(prefix, "scan.parameter_mappings"),
             {
@@ -820,8 +884,8 @@ class HostRuntimeCase(HasEnvironmentCase):
                     ],
                     "dependencies": [
                         {
-                            "kind": "axis",
-                            "axis": "axis_0",
+                            "kind": "parameter",
+                            "key": "param_0",
                         }
                     ],
                 }
@@ -911,7 +975,7 @@ class HostRuntimeCase(HasEnvironmentCase):
         self.assertEqual(fragment.host_setup_calls, 3)
         self.assertEqual(fragment.host_cleanup_calls, 3)
         self.assertEqual(self.scheduler.num_check_pause_calls, 2)
-        self.assertEqual(self.d(prefix, "points.axis_0"), [0.0, 1.0, 2.0, 3.0, 4.0])
+        self.assertEqual(self.d(prefix, "points.param_0"), [0.0, 1.0, 2.0, 3.0, 4.0])
         self.assertEqual(self.d(prefix, "points.channel_0"), [1.0, 2.0, 3.0, 4.0, 5.0])
 
     def test_host_scan_session_flushes_completed_batch_before_pause(self):
@@ -937,7 +1001,7 @@ class HostRuntimeCase(HasEnvironmentCase):
         self.assertEqual(fragment.host_setup_calls, 1)
         self.assertEqual(fragment.host_cleanup_calls, 1)
         self.assertEqual(self.scheduler.num_check_pause_calls, 1)
-        self.assertEqual(self.d(prefix, "points.axis_0"), [0.0, 1.0])
+        self.assertEqual(self.d(prefix, "points.param_0"), [0.0, 1.0])
         self.assertEqual(self.d(prefix, "points.channel_0"), [1.0, 2.0])
         self.assertEqual(self.d(prefix, "state.num_points"), 2)
 
@@ -961,7 +1025,7 @@ class HostRuntimeCase(HasEnvironmentCase):
         self.assertEqual(point_source.observed_batches, [[0.0, 1.0], [2.0], [3.0]])
         self.assertEqual(fragment.host_setup_calls, 3)
         self.assertEqual(fragment.host_cleanup_calls, 3)
-        self.assertEqual(self.d(prefix, "points.axis_0"), [0.0, 1.0, 2.0, 3.0])
+        self.assertEqual(self.d(prefix, "points.param_0"), [0.0, 1.0, 2.0, 3.0])
         self.assertEqual(self.d(prefix, "points.channel_0"), [1.0, 2.0, 3.0, 4.0])
 
     def test_host_scan_session_executes_online_analyses_at_batch_boundaries(self):
@@ -1107,11 +1171,11 @@ class HostRuntimeCase(HasEnvironmentCase):
         prefix = result.site_prefix
         self.assertEqual(prefix, "ndscan.rid_0.site.root.zipped_demo.")
         self.assertEqual(
-            self.d(prefix, "points.axis_0"),
+            self.d(prefix, "points.param_0"),
             [1.0, 2.0, 3.0],
         )
         self.assertEqual(
-            self.d(prefix, "points.axis_1"),
+            self.d(prefix, "points.param_1"),
             [10.0, 20.0, 30.0],
         )
         self.assertEqual(
@@ -1134,7 +1198,7 @@ class HostRuntimeCase(HasEnvironmentCase):
         session.run()
 
         prefix = "ndscan.rid_0.site.root."
-        self.assertEqual(self.d(prefix, "points.axis_0"), [0.0, 1.0, 2.0])
+        self.assertEqual(self.d(prefix, "points.param_0"), [0.0, 1.0, 2.0])
         self.assertEqual(self.d(prefix, "points.channel_0"), [1.0, 2.0, 3.0])
 
     def test_host_scan_session_executes_default_analyses_after_run(self):
@@ -1175,7 +1239,7 @@ class HostRuntimeCase(HasEnvironmentCase):
         exp.run()
 
         prefix = "ndscan.rid_0.site.root."
-        self.assertEqual(self.d(prefix, "points.axis_0"), [5.0, 7.0])
+        self.assertEqual(self.d(prefix, "points.param_0"), [5.0, 7.0])
         self.assertEqual(self.d(prefix, "points.channel_0"), [6.0, 8.0])
 
     def test_host_scan_session_allows_kernel_helpers_inside_host_methods(self):
@@ -1186,7 +1250,7 @@ class HostRuntimeCase(HasEnvironmentCase):
         session.run()
 
         prefix = "ndscan.rid_0.site.root."
-        self.assertEqual(self.d(prefix, "points.axis_0"), [4.0, 5.0])
+        self.assertEqual(self.d(prefix, "points.param_0"), [4.0, 5.0])
         self.assertEqual(self.d(prefix, "points.channel_0"), [5.0, 6.0])
 
     def test_make_child_scan_site_requires_active_parent_point(self):
@@ -1203,7 +1267,7 @@ class HostRuntimeCase(HasEnvironmentCase):
         root_prefix = "ndscan.rid_0.site.root."
         child_prefix = "ndscan.rid_0.site.root.child_scan."
 
-        self.assertEqual(self.d(root_prefix, "points.axis_0"), [10.0, 20.0])
+        self.assertEqual(self.d(root_prefix, "points.param_0"), [10.0, 20.0])
         self.assertEqual(
             self.d(root_prefix, "points.channel_0"),
             [23.0, 43.0],
@@ -1220,7 +1284,7 @@ class HostRuntimeCase(HasEnvironmentCase):
             [0, 1],
         )
         self.assertEqual(
-            self.d(child_prefix, "points.axis_0"),
+            self.d(child_prefix, "points.param_0"),
             [10.0, 11.0, 20.0, 21.0],
         )
         self.assertEqual(
@@ -1278,7 +1342,7 @@ class HostRuntimeCase(HasEnvironmentCase):
             [0, 1],
         )
         self.assertEqual(
-            self.d(middle_prefix, "points.axis_0"),
+            self.d(middle_prefix, "points.param_0"),
             [1.0, 11.0, 2.0, 12.0],
         )
         self.assertEqual(
@@ -1299,7 +1363,7 @@ class HostRuntimeCase(HasEnvironmentCase):
             [0, 1, 2, 3],
         )
         self.assertEqual(
-            self.d(leaf_prefix, "points.axis_0"),
+            self.d(leaf_prefix, "points.param_0"),
             [1.0, 1.5, 11.0, 11.5, 2.0, 2.5, 12.0, 12.5],
         )
         self.assertEqual(
@@ -1334,7 +1398,7 @@ class HostRuntimeCase(HasEnvironmentCase):
             places=6,
         )
         self.assertEqual(
-            self.d(p_prefix, "points.axis_0"),
+            self.d(p_prefix, "points.param_0"),
             [1.0, 2.0, 3.0, 4.0, 5.0],
         )
         self.assertEqual(

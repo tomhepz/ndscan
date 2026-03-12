@@ -74,6 +74,7 @@ class BatchFeedback:
 
     observations: tuple[Any, ...]
     axis_data: Mapping[Any, tuple[Any, ...]] = field(default_factory=dict)
+    parameter_data: Mapping[Any, tuple[Any, ...]] = field(default_factory=dict)
     result_data: Mapping[Any, tuple[Any, ...]] = field(default_factory=dict)
     online_analyses: Mapping[str, AnalysisFeedback] = field(default_factory=dict)
 
@@ -96,6 +97,11 @@ class BatchFeedback:
         """Return the latest accumulated value for one result channel."""
 
         return self.result_data[channel][-1]
+
+    def latest_parameter_value(self, handle: Any) -> Any:
+        """Return the latest accumulated value for one actual fragment parameter."""
+
+        return self.parameter_data[handle][-1]
 
 
 class PointSource:

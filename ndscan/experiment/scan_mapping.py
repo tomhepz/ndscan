@@ -35,6 +35,11 @@ class ScanVariable:
     corresponding hardware-facing parameters are then supplied by one or more
     ``ParameterMapping`` objects.
 
+    In the persisted scan-site schema these logical coordinates are written under
+    ``scan.pseudoparams`` and ``points.pseudoparam_*`` to distinguish them from
+    actual fragment parameters whose installed values are recorded under
+    ``scan.parameters`` / ``points.param_*``.
+
     Wrapper fragments can often use ordinary fragment parameters instead, which keeps
     those logical coordinates visible to default analyses and other fragment-local
     machinery.
@@ -202,10 +207,12 @@ class ParameterMapping:
         dependencies = []
         for dependency in self.dependencies:
             if dependency in axis_keys:
+                key = axis_keys[dependency]
+                kind = "pseudoparam" if key.startswith("pseudoparam_") else "parameter"
                 dependencies.append(
                     {
-                        "kind": "axis",
-                        "axis": axis_keys[dependency],
+                        "kind": kind,
+                        "key": key,
                     }
                 )
                 continue

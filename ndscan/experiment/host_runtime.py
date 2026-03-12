@@ -304,10 +304,17 @@ class ScanRequest:
 
 @dataclass(frozen=True)
 class BoundScanAxis:
-    """Runtime-bound scan axis metadata."""
+    """Runtime-bound scan input metadata.
+
+    ``key`` remains the internal point-policy position key (``axis_<n>``), while
+    ``point_key`` is the persisted scan-site key. For direct fragment-parameter scan
+    inputs that becomes ``param_<n>``; for runtime-only logical scan variables it
+    becomes ``pseudoparam_<n>``.
+    """
 
     source: ParamHandle | ScanVariable
     key: str
+    point_key: str
     path: str
     schema: dict[str, Any]
     identity: tuple[str, str]
@@ -324,6 +331,30 @@ class BoundScanAxis:
         return {
             "path": self.path,
             "variable": self.schema,
+        }
+
+
+@dataclass(frozen=True)
+class BoundScanParameter:
+    """Runtime-bound actual fragment parameter recorded point-by-point."""
+
+    handle: ParamHandle
+    key: str
+    path: str
+    param_schema: dict[str, Any]
+    is_scanned: bool
+    scan_role: str
+
+    @property
+    def identity(self) -> tuple[str, str]:
+        return self.handle._store.identity
+
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "param": self.param_schema,
+            "is_scanned": self.is_scanned,
+            "scan_role": self.scan_role,
         }
 
 
@@ -350,11 +381,19 @@ class PointObservation:
 
     ``acquired_at_unix`` is recorded on the host once the point body has returned and
     all point results have been collected successfully.
+
+    ``axis_values`` are kept as the internal point-policy view of the executed point,
+    keyed by positional ``axis_<n>`` names. Persisted scan-site data is split more
+    explicitly into ``pseudoparam_values`` for logical runtime-only scan variables and
+    ``parameter_values`` for actual fragment parameters whose installed values varied
+    for this point.
     """
 
     point_index: int
     axis_values: OrderedDict[str, Any]
     channel_values: OrderedDict[str, Any]
+    pseudoparam_values: OrderedDict[str, Any] = field(default_factory=OrderedDict)
+    parameter_values: OrderedDict[str, Any] = field(default_factory=OrderedDict)
     acquired_at_unix: float | None = None
 
 
@@ -368,6 +407,7 @@ class HostScanRunResult:
     """
 
     coordinates: OrderedDict[tuple[str, str], list[Any]]
+    parameters: OrderedDict[tuple[str, str], list[Any]]
     values: dict[ResultChannel, list[Any]]
     online_analysis_results: dict[str, Any]
     online_analysis_annotations: dict[str, list[dict[str, Any]]]
@@ -379,6 +419,7 @@ class HostScanRunResult:
     def empty(
         cls,
         axes: Sequence[BoundScanAxis],
+        parameters: Sequence[BoundScanParameter],
         channels: Sequence[BoundResultChannel],
         site_prefix: str,
         initial_annotations: Sequence[dict[str, Any]] = (),
@@ -387,6 +428,7 @@ class HostScanRunResult:
             coordinates=OrderedDict(
                 (axis.identity, []) for axis in axes
             ),
+            parameters=OrderedDict((param.identity, []) for param in parameters),
             values={binding.channel: [] for binding in channels},
             online_analysis_results={},
             online_analysis_annotations={},
@@ -395,9 +437,17 @@ class HostScanRunResult:
             site_prefix=site_prefix,
         )
 
-    def record(self, observation: PointObservation, axes: Sequence[BoundScanAxis], channels: Sequence[BoundResultChannel]) -> None:
+    def record(
+        self,
+        observation: PointObservation,
+        axes: Sequence[BoundScanAxis],
+        parameters: Sequence[BoundScanParameter],
+        channels: Sequence[BoundResultChannel],
+    ) -> None:
         for axis in axes:
             self.coordinates[axis.identity].append(observation.axis_values[axis.key])
+        for param in parameters:
+            self.parameters[param.identity].append(observation.parameter_values[param.key])
         for channel in channels:
             self.values[channel.channel].append(observation.channel_values[channel.key])
 
@@ -405,11 +455,12 @@ class HostScanRunResult:
         self,
         observations: Sequence[PointObservation],
         axes: Sequence[BoundScanAxis],
+        parameters: Sequence[BoundScanParameter],
         channels: Sequence[BoundResultChannel],
     ) -> None:
         """Record a completed batch of observations into the in-memory mirror."""
         for observation in observations:
-            self.record(observation, axes, channels)
+            self.record(observation, axes, parameters, channels)
 
 
 class _TemporaryAnalysisResultSinks:
@@ -478,9 +529,9 @@ class _HostScanAnalysisPlan:
         analysable_axes = [axis for axis in axes if axis.param_store is not None]
         analyses = filter_default_analyses(fragment, analysable_axes)
 
-        axis_indices = {
-            axis.param_store.identity: index
-            for index, axis in enumerate(axes)
+        axis_keys = {
+            axis.param_store.identity: axis.point_key
+            for axis in axes
             if axis.param_store is not None
         }
         # AnnotationContext expects bare channel names and adds the "channel_" prefix
@@ -496,7 +547,7 @@ class _HostScanAnalysisPlan:
         exported_analysis_channels = set(analysis_results.values())
 
         context = AnnotationContext(
-            lambda handle: axis_indices[handle._store.identity],
+            lambda handle: axis_keys[handle._store.identity],
             lambda channel: channel_names[channel],
             lambda channel: channel in exported_analysis_channels,
         )
@@ -674,6 +725,7 @@ class _HostPointExecutor:
         self,
         fragment: ExpFragment,
         axes: Sequence[BoundScanAxis],
+        parameters: Sequence[BoundScanParameter],
         channels: Sequence[BoundResultChannel],
         parameter_mappings: Sequence[_BoundParameterMapping],
         site_path: tuple[str, ...],
@@ -683,6 +735,7 @@ class _HostPointExecutor:
     ):
         self._fragment = fragment
         self._axes = tuple(axes)
+        self._parameters = tuple(parameters)
         self._channels = tuple(channels)
         self._parameter_mappings = tuple(parameter_mappings)
         self._site_path = site_path
@@ -720,9 +773,12 @@ class _HostPointExecutor:
         axis_map = OrderedDict(
             (axis.key, value) for axis, value in zip(self._axes, point.axis_values, strict=True)
         )
+        pseudoparam_map = OrderedDict()
         for axis, value in zip(self._axes, point.axis_values, strict=True):
             if axis.param_store is not None:
                 axis.param_store.set_value(value)
+            else:
+                pseudoparam_map[axis.point_key] = value
 
         dependency_values = {
             axis.source: value
@@ -742,6 +798,10 @@ class _HostPointExecutor:
                 target._store.set_value(value)
                 dependency_values[target] = value
 
+        parameter_map = OrderedDict(
+            (parameter.key, parameter.handle.get()) for parameter in self._parameters
+        )
+
         with _push_scan_context(ActiveScanContext(self._site_path, site_point_index)):
             if not self._runner.run():
                 return None
@@ -750,6 +810,8 @@ class _HostPointExecutor:
         return PointObservation(
             point_index=site_point_index,
             axis_values=axis_map,
+            pseudoparam_values=pseudoparam_map,
+            parameter_values=parameter_map,
             channel_values=channel_values,
             acquired_at_unix=time.time(),
         )
@@ -843,6 +905,7 @@ class HostScanProgram:
         fragment: ExpFragment,
         request: ScanRequest,
         axes: Sequence[BoundScanAxis],
+        parameters: Sequence[BoundScanParameter],
         channels: Sequence[BoundResultChannel],
         parameter_mappings: Sequence[_BoundParameterMapping],
         site_writer: ScanSiteDatasetWriter,
@@ -851,6 +914,7 @@ class HostScanProgram:
         self.fragment = fragment
         self.request = request
         self.axes = tuple(axes)
+        self.parameters = tuple(parameters)
         self.channels = tuple(channels)
         self.parameter_mappings = tuple(parameter_mappings)
         self.point_source = request.point_source
@@ -861,9 +925,14 @@ class HostScanProgram:
         metadata = {
             "site.fragment_fqn": self.fragment.fqn,
             "scan.point_source": self.point_source.describe(),
-            "scan.axes": {
-                axis.key: axis.metadata()
+            "scan.parameters": {
+                parameter.key: parameter.metadata()
+                for parameter in self.parameters
+            },
+            "scan.pseudoparams": {
+                axis.point_key: axis.metadata()
                 for axis in self.axes
+                if isinstance(axis.source, ScanVariable)
             },
             "scan.channels": {
                 binding.key: binding.channel.describe()
@@ -873,7 +942,7 @@ class HostScanProgram:
         if self.parameter_mappings:
             metadata["scan.parameter_mappings"] = {
                 f"mapping_{index}": mapping.mapping.describe(
-                    {axis.source: axis.key for axis in self.axes}
+                    {axis.source: axis.point_key for axis in self.axes}
                 )
                 for index, mapping in enumerate(self.parameter_mappings)
             }
@@ -896,6 +965,8 @@ def _build_bound_axes(
 ) -> list[BoundScanAxis]:
     bound_axes = []
     seen = set[tuple[Any, ...]]()
+    next_pseudoparam_index = 0
+    next_param_index = 0
     for index, source in enumerate(axes):
         key = _axis_source_key(source)
         if key in seen:
@@ -919,25 +990,79 @@ def _build_bound_axes(
                 BoundScanAxis(
                     source=source,
                     key=f"axis_{index}",
+                    point_key=f"param_{next_param_index}",
                     path=source.owner._stringize_path(),
                     schema=source.parameter.describe(),
                     identity=source._store.identity,
                     param_store=source._store,
                 )
             )
+            next_param_index += 1
             continue
 
         bound_axes.append(
             BoundScanAxis(
                 source=source,
                 key=f"axis_{index}",
+                point_key=f"pseudoparam_{next_pseudoparam_index}",
                 path="",
                 schema=source.describe(),
                 identity=(source.fqn, ""),
                 param_store=None,
             )
         )
+        next_pseudoparam_index += 1
     return bound_axes
+
+
+def _build_bound_parameters(
+    axes: Sequence[BoundScanAxis],
+    parameter_mappings: Sequence[_BoundParameterMapping],
+) -> list[BoundScanParameter]:
+    """Return the actual fragment parameters that vary point-to-point."""
+
+    parameters = []
+    seen = set[tuple[int, str]]()
+    next_index = 0
+
+    for axis in axes:
+        if not isinstance(axis.source, ParamHandle):
+            continue
+        key = _mapping_target_key(axis.source)
+        if key in seen:
+            continue
+        seen.add(key)
+        parameters.append(
+            BoundScanParameter(
+                handle=axis.source,
+                key=f"param_{next_index}",
+                path=axis.source.owner._stringize_path(),
+                param_schema=axis.source.parameter.describe(),
+                is_scanned=True,
+                scan_role="direct",
+            )
+        )
+        next_index += 1
+
+    for mapping in parameter_mappings:
+        for target in mapping.targets:
+            key = _mapping_target_key(target)
+            if key in seen:
+                continue
+            seen.add(key)
+            parameters.append(
+                BoundScanParameter(
+                    handle=target,
+                    key=f"param_{next_index}",
+                    path=target.owner._stringize_path(),
+                    param_schema=target.parameter.describe(),
+                    is_scanned=False,
+                    scan_role="derived",
+                )
+            )
+            next_index += 1
+
+    return parameters
 
 
 def _collect_parameter_mappings(
@@ -1065,12 +1190,14 @@ class HostScanProgramBuilder:
         ]
 
         parameter_mappings = _collect_parameter_mappings(fragment, request, axes)
+        parameters = _build_bound_parameters(axes, parameter_mappings)
         site_writer = ScanSiteDatasetWriter(self._owner, request.site)
         analysis_plan = _HostScanAnalysisPlan.build(fragment, axes, channels)
         return HostScanProgram(
             fragment,
             request,
             axes,
+            parameters,
             channels,
             parameter_mappings,
             site_writer,
@@ -1104,6 +1231,7 @@ class HostScanProgramRunner:
         self._executor = _HostPointExecutor(
             program.fragment,
             program.axes,
+            program.parameters,
             program.channels,
             program.parameter_mappings,
             program.request.site.path,
@@ -1129,6 +1257,7 @@ class HostScanProgramRunner:
 
         result = HostScanRunResult.empty(
             self._program.axes,
+            self._program.parameters,
             self._program.channels,
             self._program.site_writer.prefix,
             initial_annotations=self._program.analysis_plan.initial_annotations(),
@@ -1241,7 +1370,12 @@ class HostScanProgramRunner:
             return
 
         self._program.site_writer.append_observations(completed_batch)
-        result.record_batch(completed_batch, self._program.axes, self._program.channels)
+        result.record_batch(
+            completed_batch,
+            self._program.axes,
+            self._program.parameters,
+            self._program.channels,
+        )
         online_analyses = self._program.analysis_plan.observe_batch(
             completed_batch, result, self._program.site_writer
         )
@@ -1251,6 +1385,10 @@ class HostScanProgramRunner:
                 axis_data={
                     axis.source: tuple(result.coordinates[axis.identity])
                     for axis in self._program.axes
+                },
+                parameter_data={
+                    parameter.handle: tuple(result.parameters[parameter.identity])
+                    for parameter in self._program.parameters
                 },
                 result_data={
                     binding.channel: tuple(result.values[binding.channel])

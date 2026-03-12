@@ -81,7 +81,10 @@ class AnnotationContext:
 
     def describe_coordinate(self, obj) -> str:
         if isinstance(obj, ParamHandle):
-            return f"axis_{self._get_axis_index(obj)}"
+            coordinate = self._get_axis_index(obj)
+            if isinstance(coordinate, str):
+                return coordinate
+            return f"axis_{coordinate}"
         if isinstance(obj, ResultChannel):
             return "channel_" + self._name_channel(obj)
         if isinstance(obj, AxisAssociatedKeyRef):
