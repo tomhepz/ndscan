@@ -10,6 +10,7 @@ from ..utils import strip_prefix
 from .default_analysis import DefaultAnalysis, ResultPrefixAnalysisWrapper
 from .parameters import ParamBase, ParamHandle, ParamStore
 from .result_channels import FloatChannel, ResultChannel
+from .scan_mapping import ParameterMapping
 from .utils import is_kernel, path_matches_spec
 
 __all__ = [
@@ -79,6 +80,9 @@ class Fragment(HasEnvironment):
         #: Subfragments detached from the normal fragment execution (setup/cleanup,
         #: result channels; e.g. for subscans).
         self._detached_subfragments = set()
+
+        #: Per-point parameter mappings declared on this fragment.
+        self._parameter_mappings = []
 
         klass = self.__class__
         mod = klass.__module__
@@ -600,6 +604,58 @@ class Fragment(HasEnvironment):
         )
 
         return param
+
+    def add_parameter_mapping(self, mapping: ParameterMapping) -> ParameterMapping:
+        """Register a per-point parameter mapping on this fragment.
+
+        This is intended for wrapper fragments and other higher-level abstractions that
+        want to keep low-level fragments hardware-facing while still expressing a
+        logical scan basis. The actual mapping execution still happens in the host
+        runtime just before each point runs.
+
+        Can only be called during :meth:`build_fragment`.
+        """
+
+        assert self._building, (
+            "Can only call add_parameter_mapping() during build_fragment()"
+        )
+        if not isinstance(mapping, ParameterMapping):
+            raise TypeError("mapping must be a ParameterMapping instance")
+        self._parameter_mappings.append(mapping)
+        return mapping
+
+    def rebind_param(
+        self,
+        target: ParamHandle,
+        dependencies: Iterable[ParamHandle],
+        evaluate: Callable[[dict[ParamHandle, Any]], Any],
+        *,
+        description: str = "",
+    ) -> ParameterMapping:
+        """Convenience wrapper registering a single-target parameter mapping.
+
+        ``rebind_param()`` is the wrapper-fragment counterpart to the ad hoc
+        host-runtime ``ParameterMapping`` path. It keeps the fragment-side code small
+        while still feeding the same runtime execution machinery:
+
+        - the wrapper fragment exposes its own logical parameters,
+        - the registered mapping drives the real child parameter before each point,
+        - the underlying fragment remains explicit about the hardware-near parameters
+          it actually uses.
+
+        The target must be a real fragment parameter handle. ``dependencies`` are
+        typically wrapper-fragment parameters, but can be any already-initialised
+        parameter handles whose current values should participate in the mapping.
+        """
+
+        mapping = ParameterMapping.single_target(
+            target,
+            tuple(dependencies),
+            evaluate,
+            description=description,
+        )
+        self.add_parameter_mapping(mapping)
+        return mapping
 
     def _collect_params(
         self,

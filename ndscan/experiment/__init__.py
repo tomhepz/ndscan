@@ -26,6 +26,7 @@ from . import (
     parameters,
     point_source,
     result_channels,
+    scan_mapping,
     scan_generator,
     scan_runner,
     scan_site,
@@ -38,6 +39,7 @@ from .host_runtime import *
 from .parameters import *
 from .point_source import *
 from .result_channels import *
+from .scan_mapping import *
 from .scan_generator import *
 from .scan_runner import *
 from .scan_site import *
@@ -52,6 +54,7 @@ __all__.extend(host_runtime.__all__)
 __all__.extend(parameters.__all__)
 __all__.extend(point_source.__all__)
 __all__.extend(result_channels.__all__)
+__all__.extend(scan_mapping.__all__)
 __all__.extend(scan_generator.__all__)
 __all__.extend(scan_runner.__all__)
 __all__.extend(scan_site.__all__)

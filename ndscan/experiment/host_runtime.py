@@ -49,12 +49,15 @@ from .point_source import (
     ZipPointSource,
 )
 from .result_channels import LastValueSink, ResultChannel, SingleUseSink
+from .scan_mapping import ParameterMapping, ScanVariable
 from .scan_runner import describe_analyses, filter_default_analyses
 from .scan_site import ScanSite, ScanSiteDatasetWriter
 from .utils import is_kernel
 
 __all__ = [
     "ExecutionPolicy",
+    "ScanVariable",
+    "ParameterMapping",
     "ScanRequest",
     "ActiveScanContext",
     "current_scan_context",
@@ -166,25 +169,32 @@ class ExecutionPolicy:
 class ScanRequest:
     """User-facing host-runtime scan request.
 
-    The first implementation is deliberately code-first: callers provide the actual
-    parameter handles to scan and a ``PointSource`` describing the point strategy. A
-    future dashboard adapter can resolve selector syntax into the same object without
-    changing the runtime core again.
+    The first implementation is deliberately code-first: callers provide either real
+    ``ParamHandle`` scan axes or logical ``ScanVariable`` axes, together with a
+    ``PointSource`` describing the point strategy. A future dashboard adapter can
+    resolve selector syntax or text formulas into the same objects without changing
+    the runtime core again.
 
     Runtime scheduling choices live in ``execution_policy`` rather than in the request
     itself. That keeps the request focused on the scan shape while still letting the
     runner batch, flush, and pause at well-defined boundaries.
     """
 
-    axes: tuple[ParamHandle, ...]
+    axes: tuple[ParamHandle | ScanVariable, ...]
     point_source: PointSource
     site: ScanSite = field(default_factory=ScanSite)
     metadata: Mapping[str, Any] = field(default_factory=dict)
     execution_policy: ExecutionPolicy = field(default_factory=ExecutionPolicy)
+    parameter_mappings: tuple[ParameterMapping, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.execution_policy, ExecutionPolicy):
             raise TypeError("execution_policy must be an ExecutionPolicy instance")
+        for mapping in self.parameter_mappings:
+            if not isinstance(mapping, ParameterMapping):
+                raise TypeError(
+                    "parameter_mappings must contain ParameterMapping instances"
+                )
 
     def with_site(self, site: ScanSite) -> "ScanRequest":
         """Return this request with a different scan-site placement.
@@ -201,6 +211,26 @@ class ScanRequest:
             site=site,
             metadata=self.metadata,
             execution_policy=self.execution_policy,
+            parameter_mappings=self.parameter_mappings,
+        )
+
+    def with_parameter_mappings(
+        self, parameter_mappings: Sequence[ParameterMapping]
+    ) -> "ScanRequest":
+        """Return this request with extra parameter mappings appended.
+
+        This is the code-first counterpart of the future GUI formula path: ad hoc
+        reparameterisations stay attached to the request rather than having to mutate
+        the fragment tree.
+        """
+
+        return ScanRequest(
+            axes=self.axes,
+            point_source=self.point_source,
+            site=self.site,
+            metadata=self.metadata,
+            execution_policy=self.execution_policy,
+            parameter_mappings=self.parameter_mappings + tuple(parameter_mappings),
         )
 
     @classmethod
@@ -222,7 +252,7 @@ class ScanRequest:
     @classmethod
     def cartesian(
         cls,
-        axes: Sequence[tuple[ParamHandle, Sequence[Any]]],
+        axes: Sequence[tuple[ParamHandle | ScanVariable, Sequence[Any]]],
         *,
         site: ScanSite | None = None,
         metadata: Mapping[str, Any] | None = None,
@@ -239,7 +269,7 @@ class ScanRequest:
     @classmethod
     def zipped(
         cls,
-        axes: Sequence[tuple[ParamHandle, Sequence[Any]]],
+        axes: Sequence[tuple[ParamHandle | ScanVariable, Sequence[Any]]],
         *,
         site: ScanSite | None = None,
         metadata: Mapping[str, Any] | None = None,
@@ -256,7 +286,7 @@ class ScanRequest:
     @classmethod
     def explicit(
         cls,
-        axes: Sequence[ParamHandle],
+        axes: Sequence[ParamHandle | ScanVariable],
         points: Sequence[Sequence[Any]],
         *,
         site: ScanSite | None = None,
@@ -276,11 +306,34 @@ class ScanRequest:
 class BoundScanAxis:
     """Runtime-bound scan axis metadata."""
 
-    handle: ParamHandle
+    source: ParamHandle | ScanVariable
     key: str
     path: str
-    param_schema: dict[str, Any]
-    param_store: ParamStore
+    schema: dict[str, Any]
+    identity: tuple[str, str]
+    param_store: ParamStore | None = None
+
+    def metadata(self) -> dict[str, Any]:
+        """Return serialisable metadata for this concrete bound axis."""
+
+        if isinstance(self.source, ParamHandle):
+            return {
+                "path": self.path,
+                "param": self.schema,
+            }
+        return {
+            "path": self.path,
+            "variable": self.schema,
+        }
+
+
+@dataclass(frozen=True)
+class _BoundParameterMapping:
+    """Validated parameter mapping ready for point-by-point execution."""
+
+    mapping: ParameterMapping
+    targets: tuple[ParamHandle, ...]
+    dependencies: tuple[ParamHandle | ScanVariable, ...]
 
 
 @dataclass(frozen=True)
@@ -332,7 +385,7 @@ class HostScanRunResult:
     ) -> "HostScanRunResult":
         return cls(
             coordinates=OrderedDict(
-                ((axis.param_schema["fqn"], axis.path), []) for axis in axes
+                (axis.identity, []) for axis in axes
             ),
             values={binding.channel: [] for binding in channels},
             online_analysis_results={},
@@ -344,9 +397,7 @@ class HostScanRunResult:
 
     def record(self, observation: PointObservation, axes: Sequence[BoundScanAxis], channels: Sequence[BoundResultChannel]) -> None:
         for axis in axes:
-            self.coordinates[(axis.param_schema["fqn"], axis.path)].append(
-                observation.axis_values[axis.key]
-            )
+            self.coordinates[axis.identity].append(observation.axis_values[axis.key])
         for channel in channels:
             self.values[channel.channel].append(observation.channel_values[channel.key])
 
@@ -424,10 +475,13 @@ class _HostScanAnalysisPlan:
         axes: Sequence[BoundScanAxis],
         channels: Sequence[BoundResultChannel],
     ) -> "_HostScanAnalysisPlan":
-        analyses = filter_default_analyses(fragment, axes)
+        analysable_axes = [axis for axis in axes if axis.param_store is not None]
+        analyses = filter_default_analyses(fragment, analysable_axes)
 
         axis_indices = {
-            axis.param_store.identity: index for index, axis in enumerate(axes)
+            axis.param_store.identity: index
+            for index, axis in enumerate(axes)
+            if axis.param_store is not None
         }
         # AnnotationContext expects bare channel names and adds the "channel_" prefix
         # itself when serialising coordinate references.
@@ -621,6 +675,7 @@ class _HostPointExecutor:
         fragment: ExpFragment,
         axes: Sequence[BoundScanAxis],
         channels: Sequence[BoundResultChannel],
+        parameter_mappings: Sequence[_BoundParameterMapping],
         site_path: tuple[str, ...],
         *,
         max_rtio_underflow_retries: int,
@@ -629,6 +684,7 @@ class _HostPointExecutor:
         self._fragment = fragment
         self._axes = tuple(axes)
         self._channels = tuple(channels)
+        self._parameter_mappings = tuple(parameter_mappings)
         self._site_path = site_path
         self._collector = _PointResultCollector(channels)
         self._runner = _PointInvocationRunner(
@@ -650,13 +706,41 @@ class _HostPointExecutor:
         Returns a completed observation on success. Returns ``None`` when a
         ``RestartKernelTransitoryError`` asks the caller to leave and re-enter the host
         setup context before retrying the same point.
+
+        The per-point installation order is:
+
+        1. direct values for any scanned ``ParamHandle`` axes,
+        2. declared ``ParameterMapping`` updates derived from the current logical state,
+        3. ``device_setup()`` / ``run_once()`` / ``device_cleanup()``.
+
+        Keeping mappings here means both wrapper-fragment reparameterisations and ad
+        hoc request-level mappings feed through the same runtime path.
         """
 
         axis_map = OrderedDict(
             (axis.key, value) for axis, value in zip(self._axes, point.axis_values, strict=True)
         )
         for axis, value in zip(self._axes, point.axis_values, strict=True):
-            axis.param_store.set_value(value)
+            if axis.param_store is not None:
+                axis.param_store.set_value(value)
+
+        dependency_values = {
+            axis.source: value
+            for axis, value in zip(self._axes, point.axis_values, strict=True)
+        }
+        for mapping in self._parameter_mappings:
+            for dependency in mapping.dependencies:
+                if isinstance(dependency, ParamHandle) and dependency not in dependency_values:
+                    dependency_values[dependency] = dependency.get()
+
+            updates = mapping.mapping.compute(dependency_values)
+            for target, value in updates.items():
+                if target._store is None:
+                    raise ValueError(
+                        f"Cannot apply parameter mapping to unbound parameter '{target.name}'"
+                    )
+                target._store.set_value(value)
+                dependency_values[target] = value
 
         with _push_scan_context(ActiveScanContext(self._site_path, site_point_index)):
             if not self._runner.run():
@@ -760,6 +844,7 @@ class HostScanProgram:
         request: ScanRequest,
         axes: Sequence[BoundScanAxis],
         channels: Sequence[BoundResultChannel],
+        parameter_mappings: Sequence[_BoundParameterMapping],
         site_writer: ScanSiteDatasetWriter,
         analysis_plan: _HostScanAnalysisPlan,
     ):
@@ -767,6 +852,7 @@ class HostScanProgram:
         self.request = request
         self.axes = tuple(axes)
         self.channels = tuple(channels)
+        self.parameter_mappings = tuple(parameter_mappings)
         self.point_source = request.point_source
         self.site_writer = site_writer
         self.analysis_plan = analysis_plan
@@ -776,10 +862,7 @@ class HostScanProgram:
             "site.fragment_fqn": self.fragment.fqn,
             "scan.point_source": self.point_source.describe(),
             "scan.axes": {
-                axis.key: {
-                    "path": axis.path,
-                    "param": axis.param_schema,
-                }
+                axis.key: axis.metadata()
                 for axis in self.axes
             },
             "scan.channels": {
@@ -787,8 +870,169 @@ class HostScanProgram:
                 for binding in self.channels
             },
         }
+        if self.parameter_mappings:
+            metadata["scan.parameter_mappings"] = {
+                f"mapping_{index}": mapping.mapping.describe(
+                    {axis.source: axis.key for axis in self.axes}
+                )
+                for index, mapping in enumerate(self.parameter_mappings)
+            }
         metadata.update(self.analysis_plan.metadata())
         return metadata
+
+
+def _axis_source_key(source: ParamHandle | ScanVariable) -> tuple[Any, ...]:
+    if isinstance(source, ParamHandle):
+        return ("param", id(source.owner), source.name)
+    return ("variable", source.name)
+
+
+def _mapping_target_key(handle: ParamHandle) -> tuple[int, str]:
+    return (id(handle.owner), handle.name)
+
+
+def _build_bound_axes(
+    axes: Sequence[ParamHandle | ScanVariable],
+) -> list[BoundScanAxis]:
+    bound_axes = []
+    seen = set[tuple[Any, ...]]()
+    for index, source in enumerate(axes):
+        key = _axis_source_key(source)
+        if key in seen:
+            if isinstance(source, ParamHandle):
+                raise ValueError(
+                    f"Scan axis '{source.owner._stringize_path()}/{source.name}' "
+                    "was specified more than once"
+                )
+            raise ValueError(
+                f"Scan variable '{source.name}' was specified more than once"
+            )
+        seen.add(key)
+
+        if isinstance(source, ParamHandle):
+            if source._store is None:
+                raise ValueError(
+                    f"Parameter handle '{source.name}' is not bound to a store yet; "
+                    "initialise fragment parameters before building a host scan"
+                )
+            bound_axes.append(
+                BoundScanAxis(
+                    source=source,
+                    key=f"axis_{index}",
+                    path=source.owner._stringize_path(),
+                    schema=source.parameter.describe(),
+                    identity=source._store.identity,
+                    param_store=source._store,
+                )
+            )
+            continue
+
+        bound_axes.append(
+            BoundScanAxis(
+                source=source,
+                key=f"axis_{index}",
+                path="",
+                schema=source.describe(),
+                identity=(source.fqn, ""),
+                param_store=None,
+            )
+        )
+    return bound_axes
+
+
+def _collect_parameter_mappings(
+    fragment: ExpFragment,
+    request: ScanRequest,
+    axes: Sequence[BoundScanAxis],
+) -> list[_BoundParameterMapping]:
+    """Merge, validate, and dependency-order all parameter mappings."""
+
+    mappings = tuple(fragment._parameter_mappings) + tuple(request.parameter_mappings)
+    if not mappings:
+        return []
+
+    axis_sources = {axis.source for axis in axes}
+    scanned_param_targets = {
+        _mapping_target_key(axis.source)
+        for axis in axes
+        if isinstance(axis.source, ParamHandle)
+    }
+    producers = {}
+    for mapping in mappings:
+        for target in mapping.targets:
+            key = _mapping_target_key(target)
+            if key in scanned_param_targets:
+                raise ValueError(
+                    f"Parameter '{target.owner._stringize_path()}/{target.name}' "
+                    "cannot be both a direct scan axis and a mapping target"
+                )
+            if key in producers:
+                raise ValueError(
+                    f"Parameter '{target.owner._stringize_path()}/{target.name}' "
+                    "is produced by more than one parameter mapping"
+                )
+            if target._store is None:
+                raise ValueError(
+                    f"Cannot map unbound parameter '{target.owner._stringize_path()}/{target.name}'"
+                )
+            producers[key] = mapping
+
+    for mapping in mappings:
+        for dependency in mapping.dependencies:
+            if isinstance(dependency, ScanVariable) and dependency not in axis_sources:
+                raise ValueError(
+                    f"Scan variable dependency '{dependency.name}' is not present in the scan axes"
+                )
+            if isinstance(dependency, ParamHandle) and dependency._store is None:
+                raise ValueError(
+                    f"Parameter dependency '{dependency.owner._stringize_path()}/{dependency.name}' "
+                    "is not bound to a store"
+                )
+
+    ordered = _order_parameter_mappings(mappings)
+    return [
+        _BoundParameterMapping(
+            mapping=mapping,
+            targets=tuple(mapping.targets),
+            dependencies=tuple(mapping.dependencies),
+        )
+        for mapping in ordered
+    ]
+
+
+def _order_parameter_mappings(
+    mappings: Sequence[ParameterMapping],
+) -> list[ParameterMapping]:
+    """Topologically order mappings by target/dependency relationships."""
+
+    producers = {}
+    for mapping in mappings:
+        for target in mapping.targets:
+            producers[_mapping_target_key(target)] = mapping
+
+    dependencies = {mapping: set() for mapping in mappings}
+    for mapping in mappings:
+        for dependency in mapping.dependencies:
+            if not isinstance(dependency, ParamHandle):
+                continue
+            producer = producers.get(_mapping_target_key(dependency), None)
+            if producer is not None and producer is not mapping:
+                dependencies[mapping].add(producer)
+
+    ordered = []
+    ready = [mapping for mapping in mappings if not dependencies[mapping]]
+    while ready:
+        mapping = ready.pop(0)
+        ordered.append(mapping)
+        for other in mappings:
+            if mapping in dependencies[other]:
+                dependencies[other].remove(mapping)
+                if not dependencies[other] and other not in ordered and other not in ready:
+                    ready.append(other)
+
+    if len(ordered) != len(mappings):
+        raise ValueError("Parameter mappings contain a dependency cycle")
+    return ordered
 
 
 class HostScanProgramBuilder:
@@ -809,22 +1053,7 @@ class HostScanProgramBuilder:
                 "Point source dimensionality does not match the number of requested axes"
             )
 
-        axes = []
-        for index, handle in enumerate(request.axes):
-            if handle._store is None:
-                raise ValueError(
-                    f"Parameter handle '{handle.name}' is not bound to a store yet; "
-                    "initialise fragment parameters before building a host scan"
-                )
-            axes.append(
-                BoundScanAxis(
-                    handle=handle,
-                    key=f"axis_{index}",
-                    path=handle.owner._stringize_path(),
-                    param_schema=handle.parameter.describe(),
-                    param_store=handle._store,
-                )
-            )
+        axes = _build_bound_axes(request.axes)
 
         channel_dict = dict[str, ResultChannel]()
         fragment._collect_result_channels(channel_dict)
@@ -835,10 +1064,17 @@ class HostScanProgramBuilder:
             )
         ]
 
+        parameter_mappings = _collect_parameter_mappings(fragment, request, axes)
         site_writer = ScanSiteDatasetWriter(self._owner, request.site)
         analysis_plan = _HostScanAnalysisPlan.build(fragment, axes, channels)
         return HostScanProgram(
-            fragment, request, axes, channels, site_writer, analysis_plan
+            fragment,
+            request,
+            axes,
+            channels,
+            parameter_mappings,
+            site_writer,
+            analysis_plan,
         )
 
 
@@ -869,6 +1105,7 @@ class HostScanProgramRunner:
             program.fragment,
             program.axes,
             program.channels,
+            program.parameter_mappings,
             program.request.site.path,
             max_rtio_underflow_retries=max_rtio_underflow_retries,
             max_transitory_error_retries=max_transitory_error_retries,
@@ -1012,9 +1249,7 @@ class HostScanProgramRunner:
             BatchFeedback(
                 observations=tuple(completed_batch),
                 axis_data={
-                    axis.handle: tuple(
-                        result.coordinates[(axis.param_schema["fqn"], axis.path)]
-                    )
+                    axis.source: tuple(result.coordinates[axis.identity])
                     for axis in self._program.axes
                 },
                 result_data={
@@ -1070,7 +1305,9 @@ class HostScanSession:
     ):
         if _fragment_tree_needs_param_initialisation(fragment):
             fragment.init_params(overrides={} if overrides is None else overrides)
-        self._axis_bindings = _install_scan_axis_stores(request.axes)
+        self._axis_bindings = _install_scan_axis_stores(
+            [axis for axis in request.axes if isinstance(axis, ParamHandle)]
+        )
         builder = HostScanProgramBuilder(owner)
         self.program = builder.build(fragment, request)
         self._runner = HostScanProgramRunner(

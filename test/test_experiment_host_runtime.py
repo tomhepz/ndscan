@@ -26,7 +26,9 @@ from ndscan.experiment import (
     RecursiveMidpointPointSource1D,
     HostScanSession,
     OnlineFit,
+    ParameterMapping,
     ScanRequest,
+    ScanVariable,
     ScanSite,
     RestartKernelTransitoryError,
     UntilConditionPointSource,
@@ -195,6 +197,39 @@ class PlainAddOneFragment(ExpFragment):
 
     def run_once(self):
         self.result.push(self.value.get() + 1.0)
+
+
+class PhysicalDriveFragment(ExpFragment):
+    """Hardware-facing fragment used to test runtime parameter mappings."""
+
+    def build_fragment(self):
+        self.setattr_param("drive", FloatParam, "drive", 0.0)
+        self.setattr_result("result", FloatChannel)
+
+    def run_once(self):
+        self.result.push(2.0 * self.drive.get())
+
+
+class WrapperRebindFragment(ExpFragment):
+    """Wrapper fragment using ``rebind_param()`` to drive child hardware params.
+
+    The child stays attached to the ordinary fragment lifecycle, so the wrapper only
+    needs to invoke ``child.run_once()``. The child result channel itself later appears
+    in the scan-site metadata and point data with its deeper path.
+    """
+
+    def build_fragment(self):
+        self.setattr_fragment("child", PhysicalDriveFragment)
+        self.setattr_param("logical_drive", FloatParam, "logical drive", 0.0)
+        self.rebind_param(
+            self.child.drive,
+            [self.logical_drive],
+            lambda values: values[self.logical_drive] + 0.5,
+            description="Offset the child hardware drive from the logical wrapper axis",
+        )
+
+    def run_once(self):
+        self.child.run_once()
 
 
 class VisibleAndHiddenNumericFragment(ExpFragment):
@@ -661,6 +696,168 @@ class HostRuntimeCase(HasEnvironmentCase):
             result.coordinates[(f"{__name__}.PlainAddOneFragment.value", "")],
             [0.0, 1.0, 2.0],
         )
+
+    def test_host_scan_session_supports_ad_hoc_scan_variables_and_parameter_mappings(
+        self,
+    ):
+        fragment = self.create(PhysicalDriveFragment, [])
+        logical_drive = ScanVariable(
+            "laser_frequency",
+            description="Logical scan axis for the compensated drive",
+        )
+        request = ScanRequest.cartesian(
+            [(logical_drive, [0.0, 1.0, 2.0])]
+        ).with_parameter_mappings(
+            [
+                ParameterMapping.single_target(
+                    fragment.drive,
+                    [logical_drive],
+                    lambda values: values[logical_drive] + 0.5,
+                    description="Offset the physical drive from the logical scan axis",
+                )
+            ]
+        )
+
+        session = HostScanSession(fragment, fragment, request)
+        result = session.run()
+
+        prefix = result.site_prefix
+        self.assertEqual(self.d(prefix, "points.axis_0"), [0.0, 1.0, 2.0])
+        self.assertEqual(self.d(prefix, "points.channel_0"), [1.0, 3.0, 5.0])
+        self.assertEqual(
+            self.j(prefix, "scan.axes"),
+            {
+                "axis_0": {
+                    "path": "",
+                    "variable": {
+                        "name": "laser_frequency",
+                        "description": "Logical scan axis for the compensated drive",
+                        "type": "float",
+                        "spec": {},
+                    },
+                }
+            },
+        )
+        self.assertEqual(
+            self.j(prefix, "scan.parameter_mappings"),
+            {
+                "mapping_0": {
+                    "description": "Offset the physical drive from the logical scan axis",
+                    "targets": [
+                        {
+                            "path": "",
+                            "param": {
+                                "description": "drive",
+                                "default": "0.0",
+                                "fqn": f"{__name__}.PhysicalDriveFragment.drive",
+                                "spec": {
+                                    "is_scannable": True,
+                                    "scale": 1.0,
+                                    "step": 0.1,
+                                },
+                                "type": "float",
+                            },
+                        }
+                    ],
+                    "dependencies": [
+                        {
+                            "kind": "axis",
+                            "axis": "axis_0",
+                        }
+                    ],
+                }
+            },
+        )
+        self.assertEqual(
+            result.coordinates[("scan_variable.laser_frequency", "")],
+            [0.0, 1.0, 2.0],
+        )
+
+    def test_wrapper_fragment_rebind_param_uses_same_runtime_mapping_path(self):
+        fragment = self.create(WrapperRebindFragment, [])
+        request = ScanRequest.cartesian(
+            [(fragment.logical_drive, [0.0, 1.0, 2.0])]
+        )
+
+        session = HostScanSession(fragment, fragment, request)
+        result = session.run()
+
+        prefix = result.site_prefix
+        self.assertEqual(self.d(prefix, "points.axis_0"), [0.0, 1.0, 2.0])
+        self.assertEqual(self.d(prefix, "points.channel_0"), [1.0, 3.0, 5.0])
+        self.assertEqual(
+            self.j(prefix, "scan.channels"),
+            {
+                "channel_0": {
+                    "path": "child/result",
+                    "description": "",
+                    "type": "float",
+                    "scale": 1.0,
+                    "unit": "",
+                }
+            },
+        )
+        self.assertEqual(
+            self.j(prefix, "scan.parameter_mappings"),
+            {
+                "mapping_0": {
+                    "description": "Offset the child hardware drive from the logical wrapper axis",
+                    "targets": [
+                        {
+                            "path": "child",
+                            "param": {
+                                "description": "drive",
+                                "default": "0.0",
+                                "fqn": f"{__name__}.PhysicalDriveFragment.drive",
+                                "spec": {
+                                    "is_scannable": True,
+                                    "scale": 1.0,
+                                    "step": 0.1,
+                                },
+                                "type": "float",
+                            },
+                        }
+                    ],
+                    "dependencies": [
+                        {
+                            "kind": "axis",
+                            "axis": "axis_0",
+                        }
+                    ],
+                }
+            },
+        )
+
+    def test_parameter_mapping_from_text_is_reserved_for_future_gui_compilation(self):
+        fragment = self.create(PhysicalDriveFragment, [])
+        logical_drive = ScanVariable("logical_drive")
+
+        with self.assertRaises(NotImplementedError):
+            ParameterMapping.from_text(
+                targets=[fragment.drive],
+                dependencies=[logical_drive],
+                expression="logical_drive + 0.5",
+                description="Future GUI formula",
+            )
+
+    def test_host_scan_session_rejects_scan_axes_that_are_also_mapping_targets(self):
+        fragment = self.create(PhysicalDriveFragment, [])
+        request = ScanRequest.cartesian([(fragment.drive, [0.0, 1.0, 2.0])]).with_parameter_mappings(
+            [
+                ParameterMapping.single_target(
+                    fragment.drive,
+                    [fragment.drive],
+                    lambda values: values[fragment.drive] + 1.0,
+                    description="Invalid self-targeting mapping",
+                )
+            ]
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "cannot be both a direct scan axis and a mapping target",
+        ):
+            HostScanSession(fragment, fragment, request)
 
     def test_host_scan_session_records_root_and_point_unix_timestamps(self):
         fragment = self.create(PlainAddOneFragment, [])

@@ -204,6 +204,7 @@ Static scan description.
 - `scan.axes`: JSON object keyed by `axis_<n>`.
 - `scan.channels`: JSON object keyed by `channel_<n>`.
 - `scan.point_source`: JSON object describing the point source kind and parameters.
+- `scan.parameter_mappings`: optional JSON object keyed by `mapping_<n>`.
 
 Example:
 
@@ -216,6 +217,23 @@ scan.axes = {
       "description": "x",
       "type": "float",
       "default": "0.0"
+    }
+  }
+}
+```
+
+Logical runtime-only axes are represented explicitly rather than being forced into the
+fragment-parameter schema:
+
+```json
+scan.axes = {
+  "axis_0": {
+    "path": "",
+    "variable": {
+      "name": "laser_frequency",
+      "description": "Logical frequency axis",
+      "type": "float",
+      "spec": {}
     }
   }
 }
@@ -235,6 +253,33 @@ scan.channels = {
 
 Using objects keyed by `axis_0` / `channel_0` removes the redundant `"key"` field and
 makes the mapping to `points.axis_0` / `points.channel_0` direct.
+
+Parameter mappings record how logical axes and existing parameter values are converted
+into concrete parameter-store updates before each point runs:
+
+```json
+scan.parameter_mappings = {
+  "mapping_0": {
+    "description": "Offset the physical drive from the logical axis",
+    "targets": [
+      {
+        "path": "",
+        "param": {
+          "fqn": "example.HardwareDriveFragment.drive",
+          "description": "drive",
+          "type": "float"
+        }
+      }
+    ],
+    "dependencies": [
+      {
+        "kind": "axis",
+        "axis": "axis_0"
+      }
+    ]
+  }
+}
+```
 
 ### `points.*`
 
