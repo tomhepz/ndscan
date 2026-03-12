@@ -48,8 +48,15 @@ Runtime scheduling policy.
 Today it is intentionally small:
 
 - `max_points_per_batch`
+- `preview_policy`
 
 This answers: "how should the host runtime schedule the work?"
+
+`preview_policy` is root-run scoped. Nested scans inherit the active root preview
+coordinator rather than configuring their own snapshot cadence.
+
+If `PreviewPolicy.path` is omitted, the runtime uses the same RID/class-name naming
+scheme as ARTIQ's final HDF5 file and inserts `.preview` before the `.h5` suffix.
 
 ### `PointSource`
 
@@ -164,7 +171,8 @@ runner does this in order:
 4. run online analyses on accumulated data
 5. hand batch feedback to the point policy
 6. flush the site writer
-7. check whether the scheduler wants to pause
+7. maybe write a preview HDF5 snapshot if the configured time interval has elapsed
+8. check whether the scheduler wants to pause
 
 That ordering is intentional:
 
@@ -198,10 +206,49 @@ while not point_source.is_finished():
     )
 
     site_writer.flush()
+    preview_coordinator.maybe_write_preview()
     maybe_pause()
 
 analysis_plan.execute(run_result, site_writer)
 site_writer.close()
+```
+
+## Preview HDF5 Snapshots
+
+Preview snapshots are coordinated by a root-scoped `RunContext` and
+`PreviewCoordinator`.
+
+Important properties:
+
+- the preview cadence is time-based
+- snapshots are still only taken on completed batch boundaries
+- nested scans share the same coordinator and can trigger the next snapshot
+- snapshots are written to a separate preview file, not ARTIQ's final results file
+- by default the preview file is removed after a successful completed run so preview
+  snapshots do not permanently double disk usage
+
+The coordinator flushes all registered `ScanSiteDatasetWriter`s before calling the
+worker-local `DatasetManager.write_hdf5(...)` path, then atomically replaces the
+preview file.
+
+Default filename shape:
+
+```text
+000002484-SlowPreviewFragment.preview.h5
+```
+
+Useful filesystem watch command:
+
+```bash
+inotifywait -m -e create -e close_write -e moved_to -e delete results/*/*
+```
+
+Typical event sequence:
+
+```text
+CREATE 000002484-SlowPreviewFragment.preview.h5.tmp
+CLOSE_WRITE,CLOSE 000002484-SlowPreviewFragment.preview.h5.tmp
+MOVED_TO 000002484-SlowPreviewFragment.preview.h5
 ```
 
 ## Nested Scans

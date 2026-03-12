@@ -1,9 +1,12 @@
 """Tests for the new host-only runtime."""
 
 import json
+import os
+import tempfile
 import unittest
 from unittest.mock import patch
 
+import h5py
 import numpy as np
 from artiq.language.core import TerminationRequested
 from mock_environment import HasEnvironmentCase
@@ -22,6 +25,7 @@ from ndscan.experiment import (
     GradientDescentPointSource,
     IntChannel,
     PointObservation,
+    PreviewPolicy,
     ProductPointSource,
     RecursiveMidpointPointSource1D,
     RepeatPointSource,
@@ -1006,7 +1010,7 @@ class HostRuntimeCase(HasEnvironmentCase):
 
         with patch(
             "ndscan.experiment.host_runtime.time.time",
-            side_effect=[1000.0, 1001.0, 1002.0, 1003.0],
+            side_effect=[999.0, 1000.0, 1001.0, 1002.0, 1003.0],
         ):
             session = HostScanSession(fragment, fragment, request)
             session.run()
@@ -1104,6 +1108,169 @@ class HostRuntimeCase(HasEnvironmentCase):
         self.assertEqual(fragment.host_cleanup_calls, 3)
         self.assertEqual(self.d(prefix, "points.param_0"), [0.0, 1.0, 2.0, 3.0])
         self.assertEqual(self.d(prefix, "points.channel_0"), [1.0, 2.0, 3.0, 4.0])
+
+    def test_host_scan_session_writes_preview_hdf5_on_elapsed_batch_boundary(self):
+        fragment = self.create(CountingLifecycleFragment, [])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            preview_path = os.path.join(tmpdir, "preview.h5")
+            request = ScanRequest(
+                axes=(fragment.value,),
+                point_source=ExplicitPointSource(1, [(0.0,), (1.0,), (2.0,)]),
+                execution_policy=ExecutionPolicy(
+                    max_points_per_batch=1,
+                    preview_policy=PreviewPolicy(
+                        path=preview_path,
+                        min_interval_s=120.0,
+                        write_on_completion=False,
+                        remove_on_completion=False,
+                    ),
+                ),
+            )
+            with patch(
+                "ndscan.experiment.host_runtime.time.monotonic",
+                side_effect=[0.0, 60.0, 119.0, 121.0],
+            ):
+                session = HostScanSession(fragment, fragment, request)
+                session.run()
+
+            self.assertTrue(os.path.exists(preview_path))
+            with h5py.File(preview_path, "r") as preview_file:
+                self.assertEqual(preview_file["rid"][()], 0)
+                self.assertFalse(bool(preview_file["preview_complete"][()]))
+                self.assertIn("datasets", preview_file)
+                datasets = preview_file["datasets"]
+                self.assertEqual(
+                    datasets["ndscan.rid_0.site.root.points.param_0"][()].tolist(),
+                    [0.0, 1.0, 2.0],
+                )
+                self.assertEqual(
+                    datasets["ndscan.rid_0.site.root.points.channel_0"][()].tolist(),
+                    [1.0, 2.0, 3.0],
+                )
+                self.assertEqual(
+                    datasets["ndscan.rid_0.site.root.state.num_points"][()],
+                    3,
+                )
+                self.assertFalse(
+                    bool(datasets["ndscan.rid_0.site.root.state.completed"][()])
+                )
+
+    def test_host_scan_session_writes_completion_preview_when_enabled(self):
+        fragment = self.create(PlainAddOneFragment, [])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            preview_path = os.path.join(tmpdir, "preview.h5")
+            request = ScanRequest.explicit(
+                [fragment.value],
+                [[5.0]],
+                execution_policy=ExecutionPolicy(
+                    max_points_per_batch=1,
+                    preview_policy=PreviewPolicy(
+                        path=preview_path,
+                        min_interval_s=9999.0,
+                        write_on_completion=True,
+                        remove_on_completion=False,
+                    ),
+                ),
+            )
+
+            with patch(
+                "ndscan.experiment.host_runtime.time.monotonic",
+                side_effect=[0.0, 1.0, 2.0],
+            ):
+                session = HostScanSession(fragment, fragment, request)
+                session.run()
+
+            self.assertTrue(os.path.exists(preview_path))
+            with h5py.File(preview_path, "r") as preview_file:
+                self.assertTrue(bool(preview_file["preview_complete"][()]))
+                datasets = preview_file["datasets"]
+                self.assertTrue(
+                    bool(datasets["ndscan.rid_0.site.root.state.completed"][()])
+                )
+                self.assertEqual(
+                    datasets["ndscan.rid_0.site.root.points.channel_0"][()].tolist(),
+                    [6.0],
+                )
+
+    def test_nested_scans_share_one_preview_coordinator(self):
+        parent = self.create(NestedChildScanParent, [])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            preview_path = os.path.join(tmpdir, "preview.h5")
+            request = ScanRequest.explicit(
+                [parent.outer],
+                [[10.0]],
+                execution_policy=ExecutionPolicy(
+                    max_points_per_batch=1,
+                    preview_policy=PreviewPolicy(
+                        path=preview_path,
+                        min_interval_s=120.0,
+                        write_on_completion=False,
+                        remove_on_completion=False,
+                    ),
+                ),
+            )
+
+            with patch(
+                "ndscan.experiment.host_runtime.time.monotonic",
+                side_effect=[0.0, 60.0, 121.0, 122.0],
+            ):
+                session = HostScanSession(parent, parent, request)
+                session.run()
+
+            self.assertTrue(os.path.exists(preview_path))
+            with h5py.File(preview_path, "r") as preview_file:
+                datasets = preview_file["datasets"]
+                self.assertEqual(
+                    datasets["ndscan.rid_0.site.root.child_scan.points.param_0"][
+                        ()
+                    ].tolist(),
+                    [10.0, 11.0],
+                )
+                self.assertEqual(
+                    datasets["ndscan.rid_0.site.root.child_scan.points.channel_0"][
+                        ()
+                    ].tolist(),
+                    [11.0, 12.0],
+                )
+
+    def test_preview_policy_defaults_to_rid_and_owner_class_name(self):
+        fragment = self.create(PlainAddOneFragment, [])
+        self.scheduler.rid = 2484
+        self.assertEqual(
+            PreviewPolicy().resolve_path(fragment),
+            "000002484-PlainAddOneFragment.preview.h5",
+        )
+
+    def test_preview_file_is_removed_after_successful_completion_by_default(self):
+        fragment = self.create(PlainAddOneFragment, [])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            previous_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                request = ScanRequest.explicit(
+                    [fragment.value],
+                    [[5.0]],
+                    execution_policy=ExecutionPolicy(
+                        max_points_per_batch=1,
+                        preview_policy=PreviewPolicy(
+                            min_interval_s=0.0,
+                            write_on_completion=False,
+                        ),
+                    ),
+                )
+
+                with patch(
+                    "ndscan.experiment.host_runtime.time.monotonic",
+                    side_effect=[0.0, 1.0],
+                ):
+                    session = HostScanSession(fragment, fragment, request)
+                    session.run()
+
+                self.assertFalse(
+                    os.path.exists("000000000-PlainAddOneFragment.preview.h5")
+                )
+            finally:
+                os.chdir(previous_cwd)
 
     def test_host_scan_session_executes_online_analyses_at_batch_boundaries(self):
         fragment = self.create(OnlineGaussianFragment, [])
@@ -1398,7 +1565,20 @@ class HostRuntimeCase(HasEnvironmentCase):
 
         with patch(
             "ndscan.experiment.host_runtime.time.time",
-            side_effect=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
+            side_effect=[
+                0.0,
+                1.0,
+                2.0,
+                3.0,
+                4.0,
+                5.0,
+                6.0,
+                7.0,
+                8.0,
+                9.0,
+                10.0,
+                11.0,
+            ],
         ):
             session = HostScanSession(parent, parent, request)
             session.run()

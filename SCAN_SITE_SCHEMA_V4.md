@@ -18,6 +18,8 @@ It does not describe:
 
 - the legacy `entry_point.py` top-level dataset layout
 - the legacy `subscan.py` compatibility exports
+- the separate preview HDF5 snapshot file, which reuses the same dataset tree and
+  simply adds preview-specific top-level metadata such as `preview_time`
 
 ## Design Principles
 
@@ -56,6 +58,26 @@ Nested sites:
 ndscan.rid_<rid>.site.root.<child_name>.
 ndscan.rid_<rid>.site.root.<child_name>.<grandchild_name>.
 ```
+
+## Preview Snapshot Files
+
+When enabled, the host runtime writes preview snapshots to a separate HDF5 file.
+
+Default filename shape:
+
+```text
+000002484-SlowPreviewFragment.preview.h5
+```
+
+The file reuses the same `datasets/` and `archive/` tree as the final ARTIQ results
+file and adds preview-specific top-level metadata such as:
+
+- `preview_time`
+- `preview_complete`
+- `run_start_unix_time`
+
+By default, successful completed runs remove the preview file so it does not remain as
+a second full copy of the archived dataset state.
 
 ## Required Datasets
 

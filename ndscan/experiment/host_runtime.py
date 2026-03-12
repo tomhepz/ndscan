@@ -23,6 +23,7 @@ visible to the host collector by the time a point returns.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
@@ -31,7 +32,12 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import reduce
 from typing import Any
+from weakref import WeakSet
 
+import h5py
+from sipyco import pyon
+
+from artiq import __version__ as artiq_version
 from artiq.coredevice.exceptions import RTIOUnderflow
 from artiq.language import EnvExperiment, HasEnvironment, kernel, portable
 
@@ -56,6 +62,7 @@ from .utils import is_kernel
 
 __all__ = [
     "ExecutionPolicy",
+    "PreviewPolicy",
     "ScanVariable",
     "ParameterMapping",
     "ScanRequest",
@@ -94,11 +101,166 @@ _active_scan_context: ContextVar[tuple[ActiveScanContext, ...]] = ContextVar(
 )
 
 
+@dataclass(frozen=True)
+class PreviewPolicy:
+    """Configuration for periodic preview HDF5 snapshots.
+
+    Preview files are rewritten only on completed batch boundaries. The cadence is
+    still time-based, but delaying the decision until a safe batch boundary keeps the
+    snapshot self-consistent even for nested scans and future buffered writers.
+    """
+
+    path: str | None = None
+    min_interval_s: float = 120.0
+    write_on_completion: bool = False
+    remove_on_completion: bool = True
+
+    def __post_init__(self) -> None:
+        if self.min_interval_s < 0.0:
+            raise ValueError("min_interval_s must be non-negative")
+
+    def resolve_path(self, owner: HasEnvironment) -> str:
+        """Return the preview file path for this root run.
+
+        When no explicit path is given, the preview file mirrors ARTIQ's canonical
+        RID/class-name pattern and simply inserts `.preview` before the `.h5`
+        suffix.
+        """
+
+        if self.path is not None:
+            return self.path
+        scheduler = owner.get_device("scheduler")
+        rid = getattr(scheduler, "rid", 0)
+        return f"{rid:09d}-{owner.__class__.__name__}.preview.h5"
+
+
+class PreviewCoordinator:
+    """Root-scoped coordination for preview HDF5 snapshots.
+
+    This object is intentionally narrow. It does not own execution. It only owns:
+
+    - the shared preview cadence for one root run,
+    - the preview file path,
+    - the set of scan-site writers that must be flushed before snapshotting.
+
+    Nested scans reuse the same coordinator through a run context, so any completed
+    batch anywhere in the active scan tree can trigger a preview once enough time has
+    elapsed.
+    """
+
+    def __init__(
+        self,
+        owner: HasEnvironment,
+        policy: PreviewPolicy,
+        *,
+        run_start_unix_time: float,
+    ):
+        self.policy = policy
+        self._owner = owner
+        self._run_start_unix_time = run_start_unix_time
+        self._path = policy.resolve_path(owner)
+        self._writers: WeakSet[ScanSiteDatasetWriter] = WeakSet()
+        self._last_preview_monotonic = time.monotonic()
+        self._write_in_progress = False
+
+    def register_writer(self, writer: ScanSiteDatasetWriter) -> None:
+        """Register a site writer whose buffered state must reach preview files."""
+
+        self._writers.add(writer)
+
+    def unregister_writer(self, writer: ScanSiteDatasetWriter) -> None:
+        """Remove a site writer from the preview flush set."""
+
+        self._writers.discard(writer)
+
+    def maybe_write_preview(self) -> None:
+        """Write a preview snapshot when the configured interval has elapsed."""
+
+        if self._write_in_progress:
+            return
+        now = time.monotonic()
+        if now - self._last_preview_monotonic < self.policy.min_interval_s:
+            return
+        self._write_preview(preview_complete=False, monotonic_time=now)
+
+    def write_completion_preview(self) -> None:
+        """Write a final preview snapshot after the run has finished.
+
+        This still targets the separate preview file rather than ARTIQ's canonical
+        results file. The final worker-managed HDF5 write remains the source of truth
+        for the completed run artifact.
+        """
+
+        if self.policy.remove_on_completion:
+            self.remove_preview()
+            return
+        if not self.policy.write_on_completion or self._write_in_progress:
+            return
+        self._write_preview(preview_complete=True, monotonic_time=time.monotonic())
+
+    def remove_preview(self) -> None:
+        """Remove the preview file after a successful completed run."""
+
+        if self._write_in_progress:
+            return
+        try:
+            os.remove(self._path)
+        except FileNotFoundError:
+            pass
+
+    def _write_preview(self, *, preview_complete: bool, monotonic_time: float) -> None:
+        self._write_in_progress = True
+        try:
+            for writer in tuple(self._writers):
+                writer.flush()
+
+            dataset_mgr = self._owner._HasEnvironment__dataset_mgr
+            scheduler = self._owner.get_device("scheduler")
+            directory = os.path.dirname(self._path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+
+            tmp_path = self._path + ".tmp"
+            with h5py.File(tmp_path, "w") as h5_file:
+                dataset_mgr.write_hdf5(h5_file)
+                h5_file["artiq_version"] = artiq_version
+                h5_file["rid"] = getattr(scheduler, "rid", 0)
+                expid = getattr(scheduler, "expid", None)
+                if expid is not None:
+                    h5_file["expid"] = pyon.encode(expid)
+                h5_file["preview_time"] = time.time()
+                h5_file["preview_complete"] = preview_complete
+                h5_file["run_start_unix_time"] = self._run_start_unix_time
+            os.replace(tmp_path, self._path)
+            self._last_preview_monotonic = monotonic_time
+        finally:
+            self._write_in_progress = False
+
+
+@dataclass(frozen=True)
+class RunContext:
+    """Root-scoped coordination state shared by nested host-runtime sessions."""
+
+    run_start_unix_time: float
+    preview: PreviewCoordinator | None = None
+
+
+_active_run_context: ContextVar[RunContext | None] = ContextVar(
+    "_active_run_context", default=None
+)
+
+
 def current_scan_context() -> ActiveScanContext | None:
     """Return the currently executing parent scan context, if any."""
 
     stack = _active_scan_context.get()
     return stack[-1] if stack else None
+
+
+def current_run_context() -> RunContext | None:
+    """Return the root-scoped runtime context for the current host scan tree."""
+
+    return _active_run_context.get()
 
 
 @contextmanager
@@ -109,6 +271,15 @@ def _push_scan_context(context: ActiveScanContext):
         yield
     finally:
         _active_scan_context.reset(token)
+
+
+@contextmanager
+def _push_run_context(context: RunContext):
+    token = _active_run_context.set(context)
+    try:
+        yield
+    finally:
+        _active_run_context.reset(token)
 
 
 def make_child_scan_site(
@@ -156,13 +327,21 @@ class ExecutionPolicy:
     Keeping these controls out of ``ScanRequest`` leaves room for more runtime-only
     settings later without turning the request itself into a mixed scan-and-scheduler
     object.
+
+    ``preview_policy`` is root-run scoped. Nested scans inherit the active root
+    preview coordinator rather than configuring a second independent cadence.
     """
 
     max_points_per_batch: int | None = None
+    preview_policy: PreviewPolicy | None = None
 
     def __post_init__(self) -> None:
         if self.max_points_per_batch is not None and self.max_points_per_batch <= 0:
             raise ValueError("max_points_per_batch must be positive when specified")
+        if self.preview_policy is not None and not isinstance(
+            self.preview_policy, PreviewPolicy
+        ):
+            raise TypeError("preview_policy must be a PreviewPolicy instance")
 
 
 @dataclass(frozen=True)
@@ -1223,10 +1402,13 @@ class HostScanProgramRunner:
         owner: HasEnvironment,
         program: HostScanProgram,
         *,
+        run_context: RunContext | None,
         max_rtio_underflow_retries: int,
         max_transitory_error_retries: int,
     ):
+        self._owner = owner
         self._program = program
+        self._run_context = run_context
         self._fragment = program.fragment
         self._executor = _HostPointExecutor(
             program.fragment,
@@ -1241,82 +1423,123 @@ class HostScanProgramRunner:
         self._scheduler = owner.get_device("scheduler")
 
     def run(self) -> HostScanRunResult:
-        self._fragment.prepare()
-        site_start_unix_time = time.time()
-        self._program.site_writer.publish_metadata(
-            self._program.metadata(),
-            extra_metadata=self._program.request.metadata,
-            start_unix_time=site_start_unix_time,
-        )
-        if self._program.request.site.segmented:
-            parent = current_scan_context()
-            self._program.site_writer.start_segment(
-                parent_point_index=None if parent is None else parent.point_index,
-                start_unix_time=time.time(),
-            )
-
-        result = HostScanRunResult.empty(
-            self._program.axes,
-            self._program.parameters,
-            self._program.channels,
-            self._program.site_writer.prefix,
-            initial_annotations=self._program.analysis_plan.initial_annotations(),
-        )
-
-        self._executor.install()
-        current_batch = list()
-        batch_offset = 0
+        run_context = self._resolved_run_context()
+        preview = run_context.preview
+        if preview is not None:
+            preview.register_writer(self._program.site_writer)
 
         try:
-            while True:
-                if batch_offset >= len(current_batch):
-                    if self._program.point_source.is_finished():
-                        break
-                    current_batch = self._next_batch()
-                    batch_offset = 0
+            with _push_run_context(run_context):
+                self._fragment.prepare()
+                site_start_unix_time = time.time()
+                self._program.site_writer.publish_metadata(
+                    self._program.metadata(),
+                    extra_metadata=self._program.request.metadata,
+                    start_unix_time=site_start_unix_time,
+                )
+                if self._program.request.site.segmented:
+                    parent = current_scan_context()
+                    self._program.site_writer.start_segment(
+                        parent_point_index=None if parent is None else parent.point_index,
+                        start_unix_time=time.time(),
+                    )
 
-                self._fragment.recompute_param_defaults()
+                result = HostScanRunResult.empty(
+                    self._program.axes,
+                    self._program.parameters,
+                    self._program.channels,
+                    self._program.site_writer.prefix,
+                    initial_annotations=self._program.analysis_plan.initial_annotations(),
+                )
 
-                restart_host_context = False
-                completed_batch: list[PointObservation] = []
-
-                self._fragment.host_setup()
-                try:
-                    while batch_offset < len(current_batch):
-                        observation = self._executor.execute_point(
-                            current_batch[batch_offset],
-                            self._program.site_writer.next_point_index,
-                        )
-                        if observation is None:
-                            restart_host_context = True
-                            break
-
-                        completed_batch.append(observation)
-                        batch_offset += 1
-                finally:
-                    self._fragment.host_cleanup()
-
-                self._finish_completed_batch(completed_batch, result)
-
-                if restart_host_context:
-                    continue
-
-                current_batch = []
+                self._executor.install()
+                current_batch = list()
                 batch_offset = 0
-                if self._should_pause_after_batch():
-                    self._pause_after_batch()
-        finally:
-            self._executor.remove()
 
-        if self._program.request.site.segmented:
-            self._program.site_writer.finish_segment()
-        # Finish the point stream before analyses run; later buffered implementations
-        # should make this flush any still-pending point data.
-        self._program.site_writer.flush()
-        self._program.analysis_plan.execute(result, self._program.site_writer)
-        self._program.site_writer.set_completed(True)
-        self._program.site_writer.close()
-        return result
+                try:
+                    while True:
+                        if batch_offset >= len(current_batch):
+                            if self._program.point_source.is_finished():
+                                break
+                            current_batch = self._next_batch()
+                            batch_offset = 0
+
+                        self._fragment.recompute_param_defaults()
+
+                        restart_host_context = False
+                        completed_batch: list[PointObservation] = []
+
+                        self._fragment.host_setup()
+                        try:
+                            while batch_offset < len(current_batch):
+                                observation = self._executor.execute_point(
+                                    current_batch[batch_offset],
+                                    self._program.site_writer.next_point_index,
+                                )
+                                if observation is None:
+                                    restart_host_context = True
+                                    break
+
+                                completed_batch.append(observation)
+                                batch_offset += 1
+                        finally:
+                            self._fragment.host_cleanup()
+
+                        self._finish_completed_batch(completed_batch, result)
+
+                        if restart_host_context:
+                            continue
+
+                        current_batch = []
+                        batch_offset = 0
+                        if self._should_pause_after_batch():
+                            self._pause_after_batch()
+                finally:
+                    self._executor.remove()
+
+                if self._program.request.site.segmented:
+                    self._program.site_writer.finish_segment()
+                # Finish the point stream before analyses run; later buffered
+                # implementations should make this flush any still-pending point data.
+                self._program.site_writer.flush()
+                self._program.analysis_plan.execute(result, self._program.site_writer)
+                self._program.site_writer.set_completed(True)
+                self._program.site_writer.close()
+                if preview is not None:
+                    preview.write_completion_preview()
+                return result
+        finally:
+            if preview is not None:
+                preview.unregister_writer(self._program.site_writer)
+
+    def _resolved_run_context(self) -> RunContext:
+        if self._run_context is not None:
+            return self._run_context
+
+        inherited = current_run_context()
+        preview_policy = self._program.request.execution_policy.preview_policy
+        if inherited is not None:
+            if preview_policy is not None:
+                raise ValueError(
+                    "Nested scans cannot configure their own preview policy; "
+                    "preview cadence is owned by the root run"
+                )
+            self._run_context = inherited
+            return inherited
+
+        run_start_unix_time = time.time()
+        preview = None
+        if preview_policy is not None:
+            preview = PreviewCoordinator(
+                self._owner,
+                preview_policy,
+                run_start_unix_time=run_start_unix_time,
+            )
+        self._run_context = RunContext(
+            run_start_unix_time=run_start_unix_time,
+            preview=preview,
+        )
+        return self._run_context
 
     def _next_batch(self):
         requested_size = self._effective_batch_size()
@@ -1360,7 +1583,9 @@ class HostScanProgramRunner:
         2. update the in-memory mirror,
         3. run future batch-level online analyses,
         4. let the point policy observe the completed batch,
-        5. flush pending writer state before pause/restart/completion decisions.
+        5. flush pending writer state,
+        6. maybe emit a preview snapshot,
+        7. then let pause/restart/completion decisions happen.
 
         Keeping that boundary explicit makes later online analysis and writer-side
         buffering extensions much easier to reason about.
@@ -1398,6 +1623,8 @@ class HostScanProgramRunner:
             )
         )
         self._program.site_writer.flush()
+        if self._run_context is not None and self._run_context.preview is not None:
+            self._run_context.preview.maybe_write_preview()
 
     def _has_more_work(self) -> bool:
         return not self._program.point_source.is_finished()
@@ -1438,6 +1665,7 @@ class HostScanSession:
         request: ScanRequest,
         *,
         overrides: dict[str, list[tuple[str, ParamStore]]] | None = None,
+        run_context: RunContext | None = None,
         max_rtio_underflow_retries: int = 3,
         max_transitory_error_retries: int = 10,
     ):
@@ -1451,6 +1679,7 @@ class HostScanSession:
         self._runner = HostScanProgramRunner(
             owner,
             self.program,
+            run_context=run_context,
             max_rtio_underflow_retries=max_rtio_underflow_retries,
             max_transitory_error_retries=max_transitory_error_retries,
         )
