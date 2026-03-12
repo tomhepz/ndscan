@@ -27,10 +27,10 @@ from ndscan.experiment import (
     FloatChannel,
     FloatParam,
     IntChannel,
-    IntParam,
     OpaqueChannel,
+    RepeatPointSource,
     ScanRequest,
-    UntilConditionPointSource,
+    SinglePointSource,
     annotations,
     make_fragment_host_scan_exp,
     run_subscan,
@@ -114,7 +114,6 @@ class YesNoAtTimeWithAnalysisFragment(ExpFragment):
 
     def build_fragment(self):
         self.setattr_param("t", FloatParam, "t", default=0.0)
-        self.setattr_param("repeat_index", IntParam, "repeat index", default=0)
         self.setattr_result("hit", FloatChannel)
         self._rng = np.random.default_rng(seed=12345)
 
@@ -125,7 +124,7 @@ class YesNoAtTimeWithAnalysisFragment(ExpFragment):
     def get_default_analyses(self):
         return [
             CustomAnalysis(
-                [self.repeat_index],
+                [],
                 self._analyse_repeat_statistics,
                 analysis_results=[
                     FloatChannel("probability", "Observed success probability"),
@@ -157,20 +156,20 @@ class ProbabilityAtTimeViaAnalysisFragment(ExpFragment):
         self.setattr_result("num_shots", IntChannel)
 
     def run_once(self):
+        # A dummy ScanVariable would still be a valid choice if "repeat index" carried
+        # scientific meaning for a particular experiment. Here it does not, so repeated
+        # shots stay as execution policy rather than becoming a pseudoparam.
         repeat_request = ScanRequest(
-            axes=(self.detector.repeat_index,),
-            point_source=UntilConditionPointSource(
-                ScanRequest.explicit(
-                    [self.detector.repeat_index],
-                    [[i] for i in range(256)],
-                ).point_source,
-                make_online_precision_stopper(
+            axes=(),
+            point_source=RepeatPointSource(
+                SinglePointSource(),
+                stop_predicate=make_online_precision_stopper(
                     error_threshold=0.035,
                     min_shots=24,
                 ),
+                min_repeats=24,
+                max_repeats=256,
                 predicate_description="repeat_stats.probability_error <= 0.035",
-                min_observations=1,
-                per_batch=True,
             ),
             execution_policy=ExecutionPolicy(max_points_per_batch=16),
         )

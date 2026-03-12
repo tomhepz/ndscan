@@ -3,7 +3,7 @@
 This example combines several of the new host-runtime ideas in one place:
 
 - a leaf fragment that returns stochastic yes/no outcomes,
-- a nested scan over a dummy repeat index to gather shot statistics,
+- a nested repeated-shot policy to gather shot statistics without a native repeat axis,
 - early exit once the estimated probability error is small enough,
 - an outer scan over time ``t``,
 - a default analysis on that outer scan that fits a sine-wave frequency.
@@ -29,10 +29,10 @@ from ndscan.experiment import (
     FloatChannel,
     FloatParam,
     IntChannel,
-    IntParam,
     OpaqueChannel,
+    RepeatPointSource,
     ScanRequest,
-    UntilConditionPointSource,
+    SinglePointSource,
     annotations,
     make_fragment_host_scan_exp,
     run_subscan,
@@ -73,7 +73,7 @@ def make_probability_precision_stopper(
     error_threshold: float,
     min_shots: int,
 ):
-    """Return a batch predicate for ``UntilConditionPointSource``.
+    """Return a batch predicate for ``RepeatPointSource``.
 
     The returned closure looks at the full accumulated result series for the nested
     repeat scan and stops once the estimated probability error is below the requested
@@ -143,7 +143,6 @@ class YesNoAtTimeFragment(ExpFragment):
 
     def build_fragment(self):
         self.setattr_param("t", FloatParam, "t", default=0.0)
-        self.setattr_param("repeat_index", IntParam, "repeat index", default=0)
         self.setattr_result("hit", FloatChannel)
         self._rng = np.random.default_rng(seed=12345)
 
@@ -155,9 +154,8 @@ class YesNoAtTimeFragment(ExpFragment):
 class ProbabilityAtTimeFragment(ExpFragment):
     """Estimate the yes-probability for one fixed time point ``t``.
 
-    The fragment launches a nested scan over a dummy repeat index. That inner scan is
-    only a vehicle for repeated acquisitions; the actual independent variable for the
-    outer curve is ``t``.
+    The fragment launches a nested repeated-shot scan with no scientific repeat axis of
+    its own. The actual independent variable for the outer curve is ``t``.
     """
 
     def build_fragment(self):
@@ -172,17 +170,18 @@ class ProbabilityAtTimeFragment(ExpFragment):
             error_threshold=0.035,
             min_shots=24,
         )
+        # If a repeat count were itself scientifically meaningful, we could model it as
+        # an explicit dummy ScanVariable and it would then appear in the datasets as a
+        # pseudoparam. Here repetition is just execution policy, so we keep it out of
+        # the scan coordinates entirely.
         repeat_request = ScanRequest(
-            axes=(self.detector.repeat_index,),
-            point_source=UntilConditionPointSource(
-                ScanRequest.explicit(
-                    [self.detector.repeat_index],
-                    [[i] for i in range(256)],
-                ).point_source,
-                stop_when_precise,
+            axes=(),
+            point_source=RepeatPointSource(
+                SinglePointSource(),
+                stop_predicate=stop_when_precise,
+                min_repeats=24,
+                max_repeats=256,
                 predicate_description="probability error <= 0.035",
-                min_observations=1,
-                per_batch=True,
             ),
             execution_policy=ExecutionPolicy(max_points_per_batch=16),
         )

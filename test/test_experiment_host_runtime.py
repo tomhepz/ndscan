@@ -24,6 +24,7 @@ from ndscan.experiment import (
     PointObservation,
     ProductPointSource,
     RecursiveMidpointPointSource1D,
+    RepeatPointSource,
     HostScanSession,
     OnlineFit,
     ParameterMapping,
@@ -31,6 +32,7 @@ from ndscan.experiment import (
     ScanVariable,
     ScanSite,
     RestartKernelTransitoryError,
+    SinglePointSource,
     UntilConditionPointSource,
     ZipPointSource,
     annotations,
@@ -179,6 +181,68 @@ class PointSourceTest(unittest.TestCase):
         )
         self.assertTrue(source.is_finished())
 
+    def test_repeat_point_source_repeats_each_logical_point_fixed_times(self):
+        source = RepeatPointSource(
+            ExplicitPointSource(1, [(0,), (1,)]),
+            repeats=3,
+        )
+
+        emitted = []
+        while not source.is_finished():
+            batch = source.next_batch(2)
+            emitted.extend(point.axis_values for point in batch)
+            source.observe_batch(
+                BatchFeedback(
+                    observations=tuple(
+                        PointObservation(
+                            point_index=point.index,
+                            axis_values={"axis_0": point.axis_values[0]},
+                            channel_values={"channel_0": point.axis_values[0]},
+                        )
+                        for point in batch
+                    ),
+                    axis_data={"axis_0": tuple(point.axis_values[0] for point in batch)},
+                    result_data={
+                        "channel_0": tuple(point.axis_values[0] for point in batch)
+                    },
+                )
+            )
+
+        self.assertEqual(
+            emitted,
+            [(0,), (0,), (0,), (1,), (1,), (1,)],
+        )
+
+    def test_repeat_point_source_can_stop_current_point_from_batch_feedback(self):
+        source = RepeatPointSource(
+            ExplicitPointSource(1, [(5.0,)]),
+            stop_predicate=lambda feedback: len(feedback.result_data["channel_0"]) >= 3,
+            min_repeats=1,
+            max_repeats=5,
+            predicate_description="three repeats seen",
+        )
+
+        num_observations = 0
+        while not source.is_finished():
+            batch = source.next_batch(1)
+            num_observations += len(batch)
+            source.observe_batch(
+                BatchFeedback(
+                    observations=tuple(
+                        PointObservation(
+                            point_index=point.index,
+                            axis_values={"axis_0": point.axis_values[0]},
+                            channel_values={"channel_0": 1.0},
+                        )
+                        for point in batch
+                    ),
+                    axis_data={"axis_0": (5.0,) * num_observations},
+                    result_data={"channel_0": (1.0,) * num_observations},
+                )
+            )
+
+        self.assertEqual(num_observations, 3)
+
 
 class TwoParamAddFragment(ExpFragment):
     def build_fragment(self):
@@ -197,6 +261,19 @@ class PlainAddOneFragment(ExpFragment):
 
     def run_once(self):
         self.result.push(self.value.get() + 1.0)
+
+
+class SequentialHitFragment(ExpFragment):
+    """Leaf fragment emitting a deterministic sequence of Bernoulli-like shots."""
+
+    def build_fragment(self):
+        self.setattr_result("hit", FloatChannel)
+        self._shots = [1.0, 0.0, 1.0, 1.0, 0.0]
+        self._next_shot = 0
+
+    def run_once(self):
+        self.hit.push(self._shots[self._next_shot])
+        self._next_shot += 1
 
 
 class PhysicalDriveFragment(ExpFragment):
@@ -1200,6 +1277,29 @@ class HostRuntimeCase(HasEnvironmentCase):
         prefix = "ndscan.rid_0.site.root."
         self.assertEqual(self.d(prefix, "points.param_0"), [0.0, 1.0, 2.0])
         self.assertEqual(self.d(prefix, "points.channel_0"), [1.0, 2.0, 3.0])
+
+    def test_host_scan_session_supports_repeated_points_without_dummy_axis(self):
+        fragment = self.create(SequentialHitFragment, [])
+        request = ScanRequest(
+            axes=(),
+            point_source=RepeatPointSource(
+                SinglePointSource(),
+                stop_predicate=lambda feedback: len(feedback.result_data[fragment.hit]) >= 3,
+                min_repeats=1,
+                max_repeats=5,
+                predicate_description="three shots gathered",
+            ),
+            execution_policy=ExecutionPolicy(max_points_per_batch=1),
+        )
+
+        session = HostScanSession(fragment, fragment, request)
+        session.run()
+
+        prefix = "ndscan.rid_0.site.root."
+        self.assertEqual(self.d(prefix, "points.channel_0"), [1.0, 0.0, 1.0])
+        self.assertEqual(self.d(prefix, "state.num_points"), 3)
+        self.assertNotIn(prefix + "points.param_0", self.dataset_db.data)
+        self.assertEqual(self.j(prefix, "scan.parameters"), {})
 
     def test_host_scan_session_executes_default_analyses_after_run(self):
         fragment = self.create(AnalysedLineFragment, [])

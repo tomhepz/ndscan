@@ -424,16 +424,82 @@ If a change requires touching all of:
 
 then the boundary design is still wrong.
 
+## Current Implementation Snapshot
+
+The current host runtime has now moved beyond the early sketch above. The main
+implemented flow is:
+
+```mermaid
+flowchart TD
+    REQ[ScanRequest] --> BUILD[HostScanProgramBuilder]
+    FRAG[Fragment] --> BUILD
+    BUILD --> PROG[HostScanProgram]
+
+    PROG --> RUN[HostScanProgramRunner]
+    RUN --> SRC[PointSource.next_batch]
+    RUN --> EXEC[_HostPointExecutor]
+    RUN --> WRITE[ScanSiteDatasetWriter]
+    RUN --> ANALYSIS[_HostScanAnalysisPlan]
+
+    SRC --> EXEC
+    EXEC --> OBS[PointObservation...]
+    OBS --> WRITE
+    OBS --> MEM[HostScanRunResult]
+    MEM --> ANALYSIS
+    ANALYSIS --> FB[BatchFeedback]
+    FB --> SRC
+```
+
+The batch boundary order is now explicit:
+
+```mermaid
+sequenceDiagram
+    participant PS as PointSource
+    participant EX as Executor
+    participant W as SiteWriter
+    participant A as AnalysisPlan
+    participant S as Scheduler
+
+    PS->>EX: next_batch(...)
+    loop For each point in batch
+        EX->>EX: apply params / mappings
+        EX->>EX: device_setup()
+        EX->>EX: run_once()
+        EX->>EX: collect result channels
+    end
+    EX-->>W: PointObservation[]
+    W->>W: append point data
+    A->>A: run online analyses on accumulated data
+    A-->>PS: BatchFeedback
+    W->>W: flush()
+    S->>S: check_pause()
+```
+
+The most important schema-level consequence of recent work is that persisted point-like
+data is now split by role:
+
+- `points.pseudoparam_*` for runtime-only logical scan variables
+- `points.param_*` for actual fragment parameters whose installed values changed
+- `points.channel_*` for result channels
+
+Repeated acquisition is also now a point-policy concern rather than a native axis:
+
+- repeated points simply re-emit the same logical point
+- no built-in repeat index is written
+- if a repeat index is scientifically meaningful, it should be introduced explicitly as
+  a `ScanVariable`
+
 ## Intended execution shape
 
 The target mental model is:
 
 ```python
-while batch := point_source.next_batch():
+while not point_source.is_finished():
+    batch = point_source.next_batch(batch_limit)
     observations = executor.execute_batch(fragment, batch)
-    for obs in observations:
-        site_writer.append_point(obs)
-        point_source.observe(obs)
+    site_writer.append_points(observations)
+    online_feedback = analysis.observe_batch(observations)
+    point_source.observe_batch(online_feedback)
 ```
 
 Later, if parameter transforms are added, they fit between point selection and

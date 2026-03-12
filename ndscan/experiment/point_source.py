@@ -36,6 +36,7 @@ __all__ = [
     "ConcatPointSource",
     "ProductPointSource",
     "RecursiveMidpointPointSource1D",
+    "RepeatPointSource",
     "UntilConditionPointSource",
     "GradientDescentPointSource",
 ]
@@ -374,6 +375,7 @@ class ConcatPointSource(PointSource):
                 BatchFeedback(
                     observations=tuple(source_observations),
                     axis_data=feedback.axis_data,
+                    parameter_data=feedback.parameter_data,
                     result_data=feedback.result_data,
                     online_analyses=feedback.online_analyses,
                 )
@@ -417,6 +419,185 @@ class ProductPointSource(_FinitePointSource):
             "axis_count": self.axis_count,
             "children": [source.describe() for source in self._sources],
         }
+
+
+class RepeatPointSource(PointSource):
+    """Repeat each logical point from an inner source before advancing.
+
+    This wrapper is the intended replacement for "dummy repeat axes" when repetition is
+    an execution concern rather than a meaningful scan coordinate. Each logical point
+    from ``inner`` is executed repeatedly, one batch at a time, until either:
+
+    - a fixed repeat count has been reached, or
+    - an optional stop predicate says the current point is precise enough.
+
+    The stop predicate runs on batch boundaries and sees only the accumulated data for
+    the *current logical point*. That keeps repeated-shot statistics local and avoids
+    smearing one point's error budget across later points. If a repeat index is
+    scientifically meaningful, it should still be modelled explicitly as a
+    ``ScanVariable`` instead.
+    """
+
+    def __init__(
+        self,
+        inner: PointSource,
+        *,
+        repeats: int | None = None,
+        stop_predicate: Callable[[BatchFeedback], bool] | None = None,
+        min_repeats: int = 1,
+        max_repeats: int | None = None,
+        predicate_description: str = "custom",
+    ):
+        if repeats is not None and max_repeats is not None:
+            raise ValueError("Specify either repeats or max_repeats, not both")
+        if repeats is not None:
+            if repeats < 1:
+                raise ValueError("repeats must be at least 1")
+            min_repeats = repeats
+            max_repeats = repeats
+        if min_repeats < 1:
+            raise ValueError("min_repeats must be at least 1")
+        if max_repeats is None and stop_predicate is None:
+            raise ValueError(
+                "RepeatPointSource requires either a fixed repeat count or a stop predicate"
+            )
+        if max_repeats is not None and max_repeats < min_repeats:
+            raise ValueError("max_repeats must be at least min_repeats")
+
+        self._inner = inner
+        self._stop_predicate = stop_predicate
+        self._predicate_description = predicate_description
+        self._min_repeats = min_repeats
+        self._max_repeats = max_repeats
+
+        self._next_index = 0
+        self._current_point: BasePoint | None = None
+        self._current_repeats = 0
+        self._pending_batch_size = 0
+        self._current_axis_data = dict[Any, list[Any]]()
+        self._current_parameter_data = dict[Any, list[Any]]()
+        self._current_result_data = dict[Any, list[Any]]()
+
+    @property
+    def axis_count(self) -> int:
+        return self._inner.axis_count
+
+    def next_batch(self, max_points: int) -> list[BasePoint]:
+        if max_points <= 0:
+            raise ValueError("max_points must be positive")
+
+        if self._current_point is None:
+            inner_batch = self._inner.next_batch(1)
+            if not inner_batch:
+                if self._inner.is_finished():
+                    return []
+                raise RuntimeError(
+                    f"{type(self._inner).__name__} returned no points before finishing"
+                )
+            self._current_point = inner_batch[0]
+            self._current_repeats = 0
+            self._current_axis_data.clear()
+            self._current_parameter_data.clear()
+            self._current_result_data.clear()
+
+        remaining = max_points
+        if self._max_repeats is not None:
+            remaining = min(remaining, self._max_repeats - self._current_repeats)
+        if remaining <= 0:
+            raise RuntimeError(
+                "RepeatPointSource reached a non-positive remaining repeat count"
+            )
+
+        self._pending_batch_size = remaining
+        batch = []
+        for _ in range(remaining):
+            batch.append(
+                BasePoint(index=self._next_index, axis_values=self._current_point.axis_values)
+            )
+            self._next_index += 1
+        return batch
+
+    def is_finished(self) -> bool:
+        return self._current_point is None and self._inner.is_finished()
+
+    def preferred_batch_size(self, default: int) -> int:
+        if self._max_repeats is None:
+            return default
+        return min(default, self._max_repeats)
+
+    def observe_batch(self, feedback: BatchFeedback) -> None:
+        if self._current_point is None or self._pending_batch_size == 0:
+            raise RuntimeError(
+                "Received batch feedback for RepeatPointSource before requesting a batch"
+            )
+        if len(feedback.observations) != self._pending_batch_size:
+            raise ValueError(
+                "RepeatPointSource received the wrong number of observations for its "
+                f"batch: expected {self._pending_batch_size}, got {len(feedback.observations)}"
+            )
+
+        batch_size = len(feedback.observations)
+        for key, values in feedback.axis_data.items():
+            self._current_axis_data.setdefault(key, []).extend(values[-batch_size:])
+        for key, values in feedback.parameter_data.items():
+            self._current_parameter_data.setdefault(key, []).extend(values[-batch_size:])
+        for key, values in feedback.result_data.items():
+            self._current_result_data.setdefault(key, []).extend(values[-batch_size:])
+        self._current_repeats += len(feedback.observations)
+        self._pending_batch_size = 0
+
+        current_point_feedback = BatchFeedback(
+            observations=feedback.observations,
+            axis_data={key: tuple(values) for key, values in self._current_axis_data.items()},
+            parameter_data={
+                key: tuple(values) for key, values in self._current_parameter_data.items()
+            },
+            result_data={
+                key: tuple(values) for key, values in self._current_result_data.items()
+            },
+            online_analyses=feedback.online_analyses,
+        )
+
+        if not self._current_point_is_complete(current_point_feedback):
+            return
+
+        # The inner point policy emitted one logical point, not one observation per
+        # repeat. Forward one representative observation together with the repeated
+        # point's accumulated data so composition with other wrappers remains possible
+        # without inventing a native repeat axis.
+        self._inner.observe_batch(
+            BatchFeedback(
+                observations=(feedback.observations[-1],),
+                axis_data=current_point_feedback.axis_data,
+                parameter_data=current_point_feedback.parameter_data,
+                result_data=current_point_feedback.result_data,
+                online_analyses=current_point_feedback.online_analyses,
+            )
+        )
+        self._current_point = None
+        self._current_repeats = 0
+
+    def describe(self) -> dict[str, Any]:
+        description = {
+            "kind": "repeat",
+            "axis_count": self.axis_count,
+            "min_repeats": self._min_repeats,
+            "inner": self._inner.describe(),
+        }
+        if self._max_repeats is not None:
+            description["max_repeats"] = self._max_repeats
+        if self._stop_predicate is not None:
+            description["predicate"] = self._predicate_description
+        return description
+
+    def _current_point_is_complete(self, feedback: BatchFeedback) -> bool:
+        if self._current_repeats < self._min_repeats:
+            return False
+        if self._stop_predicate is not None and self._stop_predicate(feedback):
+            return True
+        if self._max_repeats is not None and self._current_repeats >= self._max_repeats:
+            return True
+        return False
 
 
 class RecursiveMidpointPointSource1D(_FinitePointSource):
