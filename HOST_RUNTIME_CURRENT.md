@@ -282,6 +282,13 @@ The current schema distinguishes three point-like roles:
 - `channel_*`
   - result channels
 
+The site metadata also records:
+
+- `scan.fixed_parameters`
+  - real fragment parameters in the target fragment tree that did not vary point to
+    point for this scan
+  - includes schema plus the fixed value captured at run start
+
 This is deliberate:
 
 - direct scientific/logical scan variables can exist without polluting low-level

@@ -30,11 +30,13 @@ from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from enum import Enum
 from functools import reduce
 from typing import Any
 from weakref import WeakSet
 
 import h5py
+import numpy as np
 from sipyco import pyon
 
 from artiq import __version__ as artiq_version
@@ -1113,6 +1115,10 @@ class HostScanProgram:
                 for axis in self.axes
                 if isinstance(axis.source, ScanVariable)
             },
+            "scan.fixed_parameters": _collect_fixed_parameter_metadata(
+                self.fragment,
+                self.parameters,
+            ),
             "scan.channels": {
                 binding.key: binding.channel.describe()
                 for binding in self.channels
@@ -1127,6 +1133,59 @@ class HostScanProgram:
             }
         metadata.update(self.analysis_plan.metadata())
         return metadata
+
+
+def _parameter_value_for_metadata(value: Any) -> Any:
+    """Return a JSON-friendly representation of a parameter value."""
+
+    if isinstance(value, Enum):
+        return value.name
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    return value
+
+
+def _collect_fixed_parameter_metadata(
+    fragment: ExpFragment,
+    varying_parameters: Sequence[BoundScanParameter],
+) -> dict[str, Any]:
+    """Return metadata for all real parameters that stayed fixed for this scan.
+
+    The legacy runtime used ARTIQ's submission-time `expid` payload to preserve the
+    non-scanned parameter state. Programmatic host-runtime scans do not naturally go
+    through that path, so the scan site records the same information explicitly in its
+    own schema.
+    """
+
+    varying_keys = {
+        _mapping_target_key(parameter.handle) for parameter in varying_parameters
+    }
+    fixed_parameters = []
+
+    def walk(current: ExpFragment) -> None:
+        for name, param in current._free_params.items():
+            handle = getattr(current, name)
+            key = _mapping_target_key(handle)
+            if key in varying_keys or handle._store is None:
+                continue
+            fixed_parameters.append(
+                {
+                    "path": current._stringize_path(),
+                    "param": param.describe(),
+                    "value": _parameter_value_for_metadata(handle._store.get_value()),
+                }
+            )
+        for child in current._subfragments:
+            if child in current._detached_subfragments:
+                continue
+            walk(child)
+
+    walk(fragment)
+    return {
+        f"fixed_param_{index}": entry for index, entry in enumerate(fixed_parameters)
+    }
 
 
 def _axis_source_key(source: ParamHandle | ScanVariable) -> tuple[Any, ...]:

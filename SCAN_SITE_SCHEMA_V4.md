@@ -107,6 +107,7 @@ For one site prefix `<site>`, the runtime may write:
 <site>scan.point_source
 <site>scan.pseudoparams
 <site>scan.parameters
+<site>scan.fixed_parameters
 <site>scan.channels
 <site>scan.parameter_mappings
 ```
@@ -218,6 +219,17 @@ Example:
   }
 }
 ```
+
+### `scan.fixed_parameters`
+
+Real fragment parameters in the target fragment tree that stayed fixed for this scan.
+
+This is the host-runtime replacement for relying on ARTIQ submission-time `expid`
+state to reconstruct non-scanned parameter values later. Each entry includes:
+
+- `path`
+- `param`
+- `value`
 
 ### `scan.channels`
 

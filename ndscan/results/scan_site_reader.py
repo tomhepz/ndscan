@@ -28,6 +28,7 @@ _STRUCTURED_KEYS = {
     "scan.point_source",
     "scan.pseudoparams",
     "scan.parameters",
+    "scan.fixed_parameters",
     "scan.channels",
     "scan.parameter_mappings",
     "analysis.online",
@@ -118,6 +119,7 @@ class HostRuntimeSiteData:
     fragment_fqn: str
     pseudoparams: dict[str, Any]
     parameters: dict[str, Any]
+    fixed_parameters: dict[str, Any]
     channels: dict[str, Any]
     point_data: dict[str, Any]
     analysis_outputs_schema: dict[str, Any]
@@ -187,6 +189,7 @@ def read_host_runtime_snapshot(path: str | Path) -> HostRuntimeSnapshot:
             fragment_fqn=datasets[prefix + "site.fragment_fqn"],
             pseudoparams=datasets.get(prefix + "scan.pseudoparams", {}),
             parameters=datasets.get(prefix + "scan.parameters", {}),
+            fixed_parameters=datasets.get(prefix + "scan.fixed_parameters", {}),
             channels=datasets.get(prefix + "scan.channels", {}),
             point_data=_point_keys_for_prefix(datasets, prefix),
             analysis_outputs_schema=datasets.get(prefix + "analysis.outputs", {}),

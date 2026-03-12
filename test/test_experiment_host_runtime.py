@@ -267,6 +267,17 @@ class PlainAddOneFragment(ExpFragment):
         self.result.push(self.value.get() + 1.0)
 
 
+class LinearResponseFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("slope", FloatParam, "Slope", default=2.0)
+        self.setattr_param("offset", FloatParam, "Offset", default=1.0)
+        self.setattr_param("x", FloatParam, "x", default=0.0)
+        self.setattr_result("y", FloatChannel)
+
+    def run_once(self):
+        self.y.push(self.slope.get() * self.x.get() + self.offset.get())
+
+
 class SequentialHitFragment(ExpFragment):
     """Leaf fragment emitting a deterministic sequence of Bernoulli-like shots."""
 
@@ -613,6 +624,41 @@ class NestedHelperSiteOptionsParent(ExpFragment):
         self.child_result.push(result.values[self.child.result][0])
 
 
+class FixedParameterSubscanLeaf(ExpFragment):
+    """Leaf fragment with fixed parameters that still participate in point results."""
+
+    def build_fragment(self):
+        self.setattr_param("gain", FloatParam, "gain", 2.0)
+        self.setattr_param("offset", FloatParam, "offset", 1.0)
+        self.setattr_param("x", FloatParam, "x", 0.0)
+        self.setattr_result("y", FloatChannel)
+
+    def run_once(self):
+        self.y.push(self.gain.get() * self.x.get() + self.offset.get())
+
+
+class FixedParameterSubscanParent(ExpFragment):
+    """Parent fragment whose root and child sites each have their own fixed params."""
+
+    def build_fragment(self):
+        self.setattr_param("outer", FloatParam, "outer", 0.0)
+        self.setattr_param("multiplier", FloatParam, "multiplier", 3.0)
+        self.setattr_fragment("child", FixedParameterSubscanLeaf, detached=True)
+        self.setattr_result("total", FloatChannel)
+
+    def run_once(self):
+        child_result = run_subscan(
+            self,
+            self.child,
+            ScanRequest.explicit(
+                [self.child.x],
+                [[self.outer.get()], [self.outer.get() + 1.0]],
+            ),
+            name="inner",
+        )
+        self.total.push(self.multiplier.get() * sum(child_result.values[self.child.y]))
+
+
 def _fit_line_through_origin(xs, ys) -> float:
     xs = np.asarray(xs, dtype=float)
     ys = np.asarray(ys, dtype=float)
@@ -779,6 +825,50 @@ class HostRuntimeCase(HasEnvironmentCase):
         self.assertEqual(
             result.coordinates[(f"{__name__}.PlainAddOneFragment.value", "")],
             [0.0, 1.0, 2.0],
+        )
+
+    def test_host_scan_session_records_non_scanned_fixed_parameters(self):
+        fragment = self.create(LinearResponseFragment, [])
+        request = ScanRequest.cartesian([(fragment.x, [0.0, 1.0])])
+
+        session = HostScanSession(fragment, fragment, request)
+        result = session.run()
+
+        prefix = result.site_prefix
+        self.assertEqual(
+            self.j(prefix, "scan.fixed_parameters"),
+            {
+                "fixed_param_0": {
+                    "path": "",
+                    "param": {
+                        "description": "Slope",
+                        "default": "2.0",
+                        "fqn": f"{__name__}.LinearResponseFragment.slope",
+                        "spec": {
+                            "is_scannable": True,
+                            "scale": 1.0,
+                            "step": 0.1,
+                        },
+                        "type": "float",
+                    },
+                    "value": 2.0,
+                },
+                "fixed_param_1": {
+                    "path": "",
+                    "param": {
+                        "description": "Offset",
+                        "default": "1.0",
+                        "fqn": f"{__name__}.LinearResponseFragment.offset",
+                        "spec": {
+                            "is_scannable": True,
+                            "scale": 1.0,
+                            "step": 0.1,
+                        },
+                        "type": "float",
+                    },
+                    "value": 1.0,
+                },
+            },
         )
 
     def test_host_scan_session_supports_ad_hoc_scan_variables_and_parameter_mappings(
@@ -1557,6 +1647,72 @@ class HostRuntimeCase(HasEnvironmentCase):
         self.assertEqual(
             self.d(child_prefix, "points.channel_0"),
             [11.0, 12.0, 21.0, 22.0],
+        )
+
+    def test_nested_scan_records_fixed_parameters_per_site(self):
+        parent = self.create(FixedParameterSubscanParent, [])
+        request = ScanRequest.explicit([parent.outer], [[10.0]])
+
+        session = HostScanSession(parent, parent, request)
+        session.run()
+
+        root_prefix = "ndscan.rid_0.site.root."
+        child_prefix = "ndscan.rid_0.site.root.inner."
+
+        self.assertEqual(
+            self.j(root_prefix, "scan.fixed_parameters"),
+            {
+                "fixed_param_0": {
+                    "path": "",
+                    "param": {
+                        "description": "multiplier",
+                        "default": "3.0",
+                        "fqn": f"{__name__}.FixedParameterSubscanParent.multiplier",
+                        "spec": {
+                            "is_scannable": True,
+                            "scale": 1.0,
+                            "step": 0.1,
+                        },
+                        "type": "float",
+                    },
+                    "value": 3.0,
+                }
+            },
+        )
+        self.assertEqual(
+            self.j(child_prefix, "scan.fixed_parameters"),
+            {
+                "fixed_param_0": {
+                    "path": "child",
+                    "param": {
+                        "description": "gain",
+                        "default": "2.0",
+                        "fqn": f"{__name__}.FixedParameterSubscanLeaf.gain",
+                        "spec": {
+                            "is_scannable": True,
+                            "scale": 1.0,
+                            "step": 0.1,
+                        },
+                        "type": "float",
+                    },
+                    "value": 2.0,
+                },
+                "fixed_param_1": {
+                    "path": "child",
+                    "param": {
+                        "description": "offset",
+                        "default": "1.0",
+                        "fqn": f"{__name__}.FixedParameterSubscanLeaf.offset",
+                        "spec": {
+                            "is_scannable": True,
+                            "scale": 1.0,
+                            "step": 0.1,
+                        },
+                        "type": "float",
+                    },
+                    "value": 1.0,
+                },
+            },
         )
 
     def test_nested_child_scan_records_segment_start_unix_timestamps(self):
