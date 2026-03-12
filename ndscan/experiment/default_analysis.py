@@ -34,7 +34,7 @@ from .annotations import (
     computed_curve,
 )
 from .parameters import ParamHandle
-from .result_channels import OpaqueChannel, ResultChannel
+from .result_channels import LastValueSink, OpaqueChannel, ResultChannel
 
 __all__ = [
     "Annotation",
@@ -129,11 +129,41 @@ class DefaultAnalysis:
         return {}
 
 
+class _TemporaryAnalysisResultSinks:
+    """Temporarily bind analysis result channels to in-memory sinks.
+
+    This keeps analysis functions uniform across final and online execution: the
+    function can keep pushing to ordinary result channels, while the surrounding
+    runtime decides whether the resulting values become final analysis outputs or
+    online feedback.
+    """
+
+    def __init__(self, channels: dict[str, ResultChannel]):
+        self._channels = dict(channels)
+        self._original_sinks = dict[ResultChannel, Any]()
+        self._temporary_sinks = dict[str, LastValueSink]()
+
+    def __enter__(self) -> dict[str, LastValueSink]:
+        for name, channel in self._channels.items():
+            self._original_sinks[channel] = channel.sink
+            sink = LastValueSink()
+            channel.set_sink(sink)
+            self._temporary_sinks[name] = sink
+        return self._temporary_sinks
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        for channel, original_sink in self._original_sinks.items():
+            channel.set_sink(original_sink)
+        self._original_sinks.clear()
+        self._temporary_sinks.clear()
+
+
 class CustomAnalysis(DefaultAnalysis):
     r""":class:`DefaultAnalysis` that executes a user-defined analysis function in the
     :meth:`execute` step.
 
-    No analysis is run online.
+    The same user-facing declaration can optionally support both final and online
+    execution. When ``online_fn`` is omitted, the analysis remains final-only.
 
     :param required_axes: List/set/… of parameters that are required as inputs for the
         analysis to run (given by their :class:`.ParamHandle`\ s). The order of elements
@@ -153,6 +183,12 @@ class CustomAnalysis(DefaultAnalysis):
         list of annotations to broadcast can be returned.
     :param analysis_results: Optionally, a number of result channels for analysis
         results. They are later passed to ``analyze_fn``.
+    :param online_fn: Optional online-analysis variant executed after each completed
+        batch on all accumulated data so far. It follows the same calling convention as
+        ``analyze_fn`` and can reuse the same result channels.
+    :param online_analysis_identifier: Optional stable name for the online-analysis
+        snapshot published by the host runtime. When omitted, a name is derived from
+        the declared analysis result channels.
     """
 
     def __init__(
@@ -167,9 +203,22 @@ class CustomAnalysis(DefaultAnalysis):
             list[Annotation] | None,
         ],
         analysis_results: Iterable[ResultChannel] = [],
+        *,
+        online_fn: Callable[
+            [
+                dict[ParamHandle, list],
+                dict[ResultChannel, list],
+                dict[str, ResultChannel],
+            ],
+            list[Annotation] | None,
+        ]
+        | None = None,
+        online_analysis_identifier: str | None = None,
     ):
         self._required_axis_handles = set(required_axes)
         self._analyze_fn = analyze_fn
+        self._online_fn = online_fn
+        self._online_analysis_identifier = online_analysis_identifier
 
         self._result_channels = {}
         for channel in analysis_results:
@@ -193,7 +242,17 @@ class CustomAnalysis(DefaultAnalysis):
         self, context: AnnotationContext
     ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
         ""
-        return [], {}
+        if self._online_fn is None:
+            return [], {}
+        return [], {
+            self._resolve_online_identifier(): {
+                "kind": "custom",
+                "outputs": {
+                    name: channel.describe()
+                    for name, channel in self._result_channels.items()
+                },
+            }
+        }
 
     def get_analysis_results(self) -> dict[str, ResultChannel]:
         ""
@@ -206,27 +265,69 @@ class CustomAnalysis(DefaultAnalysis):
         context: AnnotationContext,
     ) -> list[dict[str, Any]]:
         ""
-        user_axis_data = {}
-        for handle in self._required_axis_handles:
-            user_axis_data[handle] = axis_data[handle._store.identity]
+        feedback = self._run_analysis_fn(
+            self._analyze_fn, axis_data, result_data, context
+        )
+        for name, value in feedback.outputs.items():
+            self._result_channels[name].push(value)
+        return feedback.annotations
 
-        try:
-            annotations = self._analyze_fn(
-                user_axis_data, result_data, self._result_channels
+    def execute_online(
+        self,
+        axis_data: dict[AxisIdentity, list],
+        result_data: dict[ResultChannel, list],
+        context: AnnotationContext,
+    ) -> dict[str, AnalysisFeedback]:
+        if self._online_fn is None:
+            return {}
+        return {
+            self._resolve_online_identifier(): self._run_analysis_fn(
+                self._online_fn, axis_data, result_data, context
             )
-        except TypeError as orignal_exception:
-            # Tolerate old analysis functions that do not take analysis result channels.
+        }
+
+    def _resolve_online_identifier(self) -> str:
+        if self._online_analysis_identifier is not None:
+            return self._online_analysis_identifier
+        if self._result_channels:
+            return "custom_" + "_".join(self._result_channels.keys())
+        return "custom_analysis"
+
+    def _run_analysis_fn(
+        self,
+        analysis_fn: Callable,
+        axis_data: dict[AxisIdentity, list],
+        result_data: dict[ResultChannel, list],
+        context: AnnotationContext,
+    ) -> AnalysisFeedback:
+        user_axis_data = {
+            handle: axis_data[handle._store.identity]
+            for handle in self._required_axis_handles
+        }
+
+        with _TemporaryAnalysisResultSinks(self._result_channels) as sinks:
             try:
-                annotations = self._analyze_fn(user_axis_data, result_data)
-            except TypeError:
-                # KLUDGE: If that also fails (e.g. there is a TypeError in the actual
-                # implementation), let the original exception bubble up.
-                raise orignal_exception from None
+                annotations = analysis_fn(
+                    user_axis_data, result_data, self._result_channels
+                )
+            except TypeError as original_exception:
+                try:
+                    annotations = analysis_fn(user_axis_data, result_data)
+                except TypeError:
+                    raise original_exception from None
+
+            outputs = {
+                name: sink.get_last()
+                for name, sink in sinks.items()
+                if sink.get_last() is not None
+            }
 
         if annotations is None:
-            # Tolerate the user forgetting the return statement.
             annotations = []
-        return [a.describe(context) for a in annotations]
+        return AnalysisFeedback(
+            outputs=outputs,
+            annotations=[a.describe(context) for a in annotations],
+        )
 
 
 #: Default points of interest for various fit types (e.g. highlighting the π time for a

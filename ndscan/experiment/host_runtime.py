@@ -54,6 +54,7 @@ from .scan_site import ScanSite, ScanSiteDatasetWriter
 from .utils import is_kernel
 
 __all__ = [
+    "ExecutionPolicy",
     "ScanRequest",
     "ActiveScanContext",
     "current_scan_context",
@@ -142,6 +143,26 @@ def make_child_scan_site(
 
 
 @dataclass(frozen=True)
+class ExecutionPolicy:
+    """Host-runtime scheduling and flush policy for one scan request.
+
+    The current host runtime only needs one execution knob: the maximum number of
+    points to execute before closing a batch boundary. The point policy can still ask
+    for a smaller natural batch size, but the execution policy owns the hard cap.
+
+    Keeping these controls out of ``ScanRequest`` leaves room for more runtime-only
+    settings later without turning the request itself into a mixed scan-and-scheduler
+    object.
+    """
+
+    max_points_per_batch: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_points_per_batch is not None and self.max_points_per_batch <= 0:
+            raise ValueError("max_points_per_batch must be positive when specified")
+
+
+@dataclass(frozen=True)
 class ScanRequest:
     """User-facing host-runtime scan request.
 
@@ -150,27 +171,20 @@ class ScanRequest:
     future dashboard adapter can resolve selector syntax into the same object without
     changing the runtime core again.
 
-    ``max_points_per_batch`` is a host-runtime execution hint, not a point-selection
-    concept. It caps how many points the runtime will execute before it:
-
-    - writes the completed observations through the scan-site writer,
-    - runs batch-level online analyses on the accumulated data so far,
-    - gives the point policy that full batch feedback,
-    - considers yielding to the scheduler.
-
-    The point policy can still request a smaller natural batch size through
-    ``preferred_batch_size()``.
+    Runtime scheduling choices live in ``execution_policy`` rather than in the request
+    itself. That keeps the request focused on the scan shape while still letting the
+    runner batch, flush, and pause at well-defined boundaries.
     """
 
     axes: tuple[ParamHandle, ...]
     point_source: PointSource
     site: ScanSite = field(default_factory=ScanSite)
     metadata: Mapping[str, Any] = field(default_factory=dict)
-    max_points_per_batch: int | None = None
+    execution_policy: ExecutionPolicy = field(default_factory=ExecutionPolicy)
 
     def __post_init__(self) -> None:
-        if self.max_points_per_batch is not None and self.max_points_per_batch <= 0:
-            raise ValueError("max_points_per_batch must be positive when specified")
+        if not isinstance(self.execution_policy, ExecutionPolicy):
+            raise TypeError("execution_policy must be an ExecutionPolicy instance")
 
     def with_site(self, site: ScanSite) -> "ScanRequest":
         """Return this request with a different scan-site placement.
@@ -186,7 +200,7 @@ class ScanRequest:
             point_source=self.point_source,
             site=site,
             metadata=self.metadata,
-            max_points_per_batch=self.max_points_per_batch,
+            execution_policy=self.execution_policy,
         )
 
     @classmethod
@@ -195,14 +209,14 @@ class ScanRequest:
         *,
         site: ScanSite | None = None,
         metadata: Mapping[str, Any] | None = None,
-        max_points_per_batch: int | None = None,
+        execution_policy: ExecutionPolicy | None = None,
     ) -> "ScanRequest":
         return cls(
             axes=(),
             point_source=SinglePointSource(),
             site=ScanSite() if site is None else site,
             metadata={} if metadata is None else metadata,
-            max_points_per_batch=max_points_per_batch,
+            execution_policy=ExecutionPolicy() if execution_policy is None else execution_policy,
         )
 
     @classmethod
@@ -212,14 +226,14 @@ class ScanRequest:
         *,
         site: ScanSite | None = None,
         metadata: Mapping[str, Any] | None = None,
-        max_points_per_batch: int | None = None,
+        execution_policy: ExecutionPolicy | None = None,
     ) -> "ScanRequest":
         return cls(
             axes=tuple(handle for handle, _ in axes),
             point_source=CartesianPointSource([values for _, values in axes]),
             site=ScanSite() if site is None else site,
             metadata={} if metadata is None else metadata,
-            max_points_per_batch=max_points_per_batch,
+            execution_policy=ExecutionPolicy() if execution_policy is None else execution_policy,
         )
 
     @classmethod
@@ -229,14 +243,14 @@ class ScanRequest:
         *,
         site: ScanSite | None = None,
         metadata: Mapping[str, Any] | None = None,
-        max_points_per_batch: int | None = None,
+        execution_policy: ExecutionPolicy | None = None,
     ) -> "ScanRequest":
         return cls(
             axes=tuple(handle for handle, _ in axes),
             point_source=ZipPointSource([values for _, values in axes]),
             site=ScanSite() if site is None else site,
             metadata={} if metadata is None else metadata,
-            max_points_per_batch=max_points_per_batch,
+            execution_policy=ExecutionPolicy() if execution_policy is None else execution_policy,
         )
 
     @classmethod
@@ -247,14 +261,14 @@ class ScanRequest:
         *,
         site: ScanSite | None = None,
         metadata: Mapping[str, Any] | None = None,
-        max_points_per_batch: int | None = None,
+        execution_policy: ExecutionPolicy | None = None,
     ) -> "ScanRequest":
         return cls(
             axes=tuple(axes),
             point_source=ExplicitPointSource(len(axes), points),
             site=ScanSite() if site is None else site,
             metadata={} if metadata is None else metadata,
-            max_points_per_batch=max_points_per_batch,
+            execution_policy=ExecutionPolicy() if execution_policy is None else execution_policy,
         )
 
 
@@ -468,14 +482,18 @@ class _HostScanAnalysisPlan:
             analysis_results = {
                 name: sink.get_last() for name, sink in sinks.items()
             }
+        feedback = AnalysisFeedback(
+            outputs=analysis_results,
+            annotations=annotations,
+        )
 
-        for name, value in analysis_results.items():
+        for name, value in feedback.outputs.items():
             site_writer.set_analysis_result(name, value)
-        run_result.analysis_results = analysis_results
+        run_result.analysis_results = dict(feedback.outputs)
 
-        if annotations:
-            site_writer.set_annotations(annotations)
-            run_result.annotations = annotations
+        if feedback.annotations:
+            site_writer.set_annotations(feedback.annotations)
+            run_result.annotations = list(feedback.annotations)
 
     def observe_batch(
         self,
@@ -948,12 +966,13 @@ class HostScanProgramRunner:
     def _effective_batch_size(self) -> int:
         """Return the point count upper bound for the next execution batch.
 
-        The request owns the hard upper bound because batching is fundamentally a
-        runtime/persistence choice. The point policy may still ask for a smaller
-        natural batch size when, for example, it wants one ask/tell step per batch.
+        The execution policy owns the hard upper bound because batching is
+        fundamentally a runtime/persistence choice. The point policy may still ask for
+        a smaller natural batch size when, for example, it wants one ask/tell step per
+        batch.
         """
 
-        request_limit = self._program.request.max_points_per_batch
+        request_limit = self._program.request.execution_policy.max_points_per_batch
         if request_limit is None:
             request_limit = 1
 

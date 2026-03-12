@@ -1,19 +1,17 @@
-"""Host-runtime repeat-until-probability-precision example.
+"""Host-runtime probability/frequency example using fragment-attached online analysis.
 
-This example combines several of the new host-runtime ideas in one place:
+This is the "nicer" counterpart to ``host_runtime_probability_frequency.py``.
 
-- a leaf fragment that returns stochastic yes/no outcomes,
-- a nested scan over a dummy repeat index to gather shot statistics,
-- early exit once the estimated probability error is small enough,
-- an outer scan over time ``t``,
-- a default analysis on that outer scan that fits a sine-wave frequency.
+The key difference is where the repeated-shot reduction lives:
 
-The structure mirrors a common lab workflow:
+- the leaf fragment declares a `CustomAnalysis` that turns yes/no shots into
+  probability, probability error, and shot count,
+- the same analysis function is reused for both final and online execution,
+- the nested repeat scan stops from the online analysis outputs rather than from a
+  second hand-maintained accumulator in the parent fragment.
 
-1. for one experimental setting ``t``, take repeated shots until the measured
-   probability is precise enough,
-2. treat that estimated probability as one point in a higher-level scan,
-3. fit a model to the higher-level curve.
+This keeps the runtime feedback path explicit while making the repeated-shot
+interpretation reusable and local to the fragment that actually produces the shots.
 """
 
 from __future__ import annotations
@@ -49,12 +47,7 @@ def underlying_probability(t: float) -> float:
 
 
 def estimate_probability_from_shots(shots: list[float]) -> tuple[float, float]:
-    """Return the observed probability and a simple Poisson-style shot-noise error.
-
-    The success probability is estimated from the success count divided by the number
-    of shots. The uncertainty is taken from Poisson counting noise on the success
-    count: ``sqrt(k) / n``. For ``k = 0``, use ``1 / n`` as a conservative floor.
-    """
+    """Return the observed probability and a simple Poisson-style shot-noise error."""
 
     num_shots = len(shots)
     if num_shots == 0:
@@ -67,42 +60,8 @@ def estimate_probability_from_shots(shots: list[float]) -> tuple[float, float]:
     return probability, probability_error
 
 
-def make_probability_precision_stopper(
-    hit_channel,
-    *,
-    error_threshold: float,
-    min_shots: int,
-):
-    """Return a batch predicate for ``UntilConditionPointSource``.
-
-    The returned closure looks at the full accumulated result series for the nested
-    repeat scan and stops once the estimated probability error is below the requested
-    threshold. This demonstrates the intended adaptive-runtime pattern: batch feedback
-    already carries the scan state the next-point policy needs, so user code does not
-    need to maintain a second shadow accumulator.
-    """
-
-    def stop(feedback) -> bool:
-        all_shots = list(feedback.result_data[hit_channel])
-
-        if len(all_shots) < min_shots:
-            return False
-
-        _, probability_error = estimate_probability_from_shots(all_shots)
-        return probability_error <= error_threshold
-
-    return stop
-
-
 def fit_sine_frequency(ts, probabilities) -> tuple[float, np.ndarray, np.ndarray]:
-    """Fit a sine-wave frequency by grid-searching the linearised sinusoid model.
-
-    For each candidate frequency ``f``, solve the linear least-squares problem
-
-    ``p(t) = c0 + c1 * sin(2 pi f t) + c2 * cos(2 pi f t)``.
-
-    The best frequency is the one with the smallest residual norm.
-    """
+    """Fit a sine-wave frequency by grid-searching a linearised sinusoid model."""
 
     ts = np.asarray(ts, dtype=float)
     probabilities = np.asarray(probabilities, dtype=float)
@@ -138,8 +97,20 @@ def fit_sine_frequency(ts, probabilities) -> tuple[float, np.ndarray, np.ndarray
     return best_frequency, fit_ts, fit_probabilities
 
 
-class YesNoAtTimeFragment(ExpFragment):
-    """Leaf fragment that returns one stochastic yes/no outcome."""
+def make_online_precision_stopper(*, error_threshold: float, min_shots: int):
+    """Return a stop predicate driven by the leaf fragment's online analysis."""
+
+    def stop(feedback) -> bool:
+        stats = feedback.online_analyses["repeat_stats"].outputs
+        if stats.get("num_shots", 0) < min_shots:
+            return False
+        return stats["probability_error"] <= error_threshold
+
+    return stop
+
+
+class YesNoAtTimeWithAnalysisFragment(ExpFragment):
+    """Leaf fragment that emits Bernoulli shots and analyses them over repeats."""
 
     def build_fragment(self):
         self.setattr_param("t", FloatParam, "t", default=0.0)
@@ -151,27 +122,41 @@ class YesNoAtTimeFragment(ExpFragment):
         probability = underlying_probability(self.t.get())
         self.hit.push(1.0 if self._rng.random() < probability else 0.0)
 
+    def get_default_analyses(self):
+        return [
+            CustomAnalysis(
+                [self.repeat_index],
+                self._analyse_repeat_statistics,
+                analysis_results=[
+                    FloatChannel("probability", "Observed success probability"),
+                    FloatChannel("probability_error", "Shot-noise probability error"),
+                    IntChannel("num_shots", "Number of repeated shots"),
+                ],
+                online_fn=self._analyse_repeat_statistics,
+                online_analysis_identifier="repeat_stats",
+            )
+        ]
 
-class ProbabilityAtTimeFragment(ExpFragment):
-    """Estimate the yes-probability for one fixed time point ``t``.
+    def _analyse_repeat_statistics(self, axis_values, result_values, analysis_results):
+        del axis_values
+        shots = list(result_values[self.hit])
+        probability, probability_error = estimate_probability_from_shots(shots)
+        analysis_results["probability"].push(probability)
+        analysis_results["probability_error"].push(probability_error)
+        analysis_results["num_shots"].push(len(shots))
+        return []
 
-    The fragment launches a nested scan over a dummy repeat index. That inner scan is
-    only a vehicle for repeated acquisitions; the actual independent variable for the
-    outer curve is ``t``.
-    """
+
+class ProbabilityAtTimeViaAnalysisFragment(ExpFragment):
+    """Estimate probability(t) by delegating repeat statistics to the leaf analysis."""
 
     def build_fragment(self):
-        self.setattr_fragment("detector", YesNoAtTimeFragment, detached=True)
+        self.setattr_fragment("detector", YesNoAtTimeWithAnalysisFragment, detached=True)
         self.setattr_result("probability", FloatChannel)
         self.setattr_result("probability_error", FloatChannel)
         self.setattr_result("num_shots", IntChannel)
 
     def run_once(self):
-        stop_when_precise = make_probability_precision_stopper(
-            self.detector.hit,
-            error_threshold=0.035,
-            min_shots=24,
-        )
         repeat_request = ScanRequest(
             axes=(self.detector.repeat_index,),
             point_source=UntilConditionPointSource(
@@ -179,8 +164,11 @@ class ProbabilityAtTimeFragment(ExpFragment):
                     [self.detector.repeat_index],
                     [[i] for i in range(256)],
                 ).point_source,
-                stop_when_precise,
-                predicate_description="probability error <= 0.035",
+                make_online_precision_stopper(
+                    error_threshold=0.035,
+                    min_shots=24,
+                ),
+                predicate_description="repeat_stats.probability_error <= 0.035",
                 min_observations=1,
                 per_batch=True,
             ),
@@ -192,16 +180,12 @@ class ProbabilityAtTimeFragment(ExpFragment):
             repeat_request,
             name="repeat_scan",
             extra_metadata={
-                "analysis_note": "stop once the shot-noise error is small enough"
+                "analysis_note": "leaf CustomAnalysis publishes repeat statistics online"
             },
         )
-
-        probability, probability_error = estimate_probability_from_shots(
-            repeat_result.values[self.detector.hit]
-        )
-        self.probability.push(probability)
-        self.probability_error.push(probability_error)
-        self.num_shots.push(len(repeat_result.values[self.detector.hit]))
+        self.probability.push(repeat_result.analysis_results["probability"])
+        self.probability_error.push(repeat_result.analysis_results["probability_error"])
+        self.num_shots.push(repeat_result.analysis_results["num_shots"])
 
     def get_default_analyses(self):
         return [
@@ -234,11 +218,13 @@ class ProbabilityAtTimeFragment(ExpFragment):
         ]
 
 
-class FrequencyFromProbabilityFragment(ExpFragment):
-    """Top-level fragment that scans ``t`` and extracts the fitted frequency."""
+class FrequencyFromProbabilityViaAnalysisFragment(ExpFragment):
+    """Top-level fragment that scans t and reads the fitted frequency."""
 
     def build_fragment(self):
-        self.setattr_fragment("probability_scan", ProbabilityAtTimeFragment, detached=True)
+        self.setattr_fragment(
+            "probability_scan", ProbabilityAtTimeViaAnalysisFragment, detached=True
+        )
         self.setattr_result("fit_frequency", FloatChannel)
 
     def run_once(self):
@@ -253,18 +239,18 @@ class FrequencyFromProbabilityFragment(ExpFragment):
             probability_request,
             name="probability_scan",
             extra_metadata={
-                "analysis_note": "fit a sine frequency to probability(t)"
+                "analysis_note": "outer sine fit over probability(t), with repeat statistics on the leaf fragment"
             },
         )
         self.fit_frequency.push(probability_result.analysis_results["fit_frequency"])
 
 
-HostRuntimeProbabilityFrequency = make_fragment_host_scan_exp(
-    FrequencyFromProbabilityFragment,
+HostRuntimeProbabilityFrequencyViaAnalysis = make_fragment_host_scan_exp(
+    FrequencyFromProbabilityViaAnalysisFragment,
     lambda fragment: ScanRequest.single(
-        metadata={"demo_name": "host_runtime_probability_frequency"}
+        metadata={"demo_name": "host_runtime_probability_frequency_via_analysis"}
     ),
 )
-HostRuntimeProbabilityFrequency.__doc__ = (
-    "Host-runtime probability estimation with early stopping and outer frequency fit"
+HostRuntimeProbabilityFrequencyViaAnalysis.__doc__ = (
+    "Host-runtime probability/frequency example using leaf-attached online analysis"
 )

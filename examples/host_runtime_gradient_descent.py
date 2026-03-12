@@ -11,12 +11,13 @@ known minimum, so the resulting point stream is easy to inspect:
 - the next centre point is chosen from the observed gradient.
 
 Because the policy needs all probe points from one optimisation step together, the
-request sets ``max_points_per_batch=9`` for the four-dimensional case.
+request uses ``ExecutionPolicy(max_points_per_batch=9)`` for the four-dimensional case.
 """
 
 from __future__ import annotations
 
 from ndscan.experiment import (
+    ExecutionPolicy,
     ExpFragment,
     FloatChannel,
     FloatParam,
@@ -62,7 +63,7 @@ HostRuntimeGradientDescent = make_fragment_host_scan_exp(
             gradient_tolerance=1e-9,
             objective_description="quadratic loss",
         ),
-        max_points_per_batch=9,
+        execution_policy=ExecutionPolicy(max_points_per_batch=9),
         metadata={"demo_name": "host_runtime_gradient_descent"},
     ),
 )

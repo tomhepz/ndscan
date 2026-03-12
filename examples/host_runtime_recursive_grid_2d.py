@@ -16,6 +16,7 @@ grid whose density increases in a deterministic refinement order.
 from __future__ import annotations
 
 from ndscan.experiment import (
+    ExecutionPolicy,
     ExpFragment,
     FloatChannel,
     FloatParam,
@@ -50,7 +51,7 @@ HostRuntimeRecursiveGrid2D = make_fragment_host_scan_exp(
                 RecursiveMidpointPointSource1D(-3.0, 1.0, max_depth=2),
             ]
         ),
-        max_points_per_batch=8,
+        execution_policy=ExecutionPolicy(max_points_per_batch=8),
         metadata={"demo_name": "host_runtime_recursive_grid_2d"},
     ),
 )

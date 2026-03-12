@@ -14,12 +14,13 @@ from ndscan.experiment import (
     CartesianPointSource,
     ConcatPointSource,
     CustomAnalysis,
-    DefaultAnalysis,
+    ExecutionPolicy,
     ExpFragment,
     ExplicitPointSource,
     FloatChannel,
     FloatParam,
     GradientDescentPointSource,
+    IntChannel,
     PointObservation,
     ProductPointSource,
     RecursiveMidpointPointSource1D,
@@ -340,49 +341,6 @@ class OnlineGaussianFragment(ExpFragment):
         return [OnlineFit("gaussian", data={"x": self.x, "y": self.y})]
 
 
-class RunningSummaryAnalysis(DefaultAnalysis):
-    """Small online analysis used to test structured batch feedback."""
-
-    def __init__(self, x_handle, y_channel):
-        self._x_handle = x_handle
-        self._y_channel = y_channel
-
-    def required_axes(self):
-        return {self._x_handle}
-
-    def describe_online_analyses(self, context):
-        return [], {"running_summary": {"kind": "running_summary"}}
-
-    def get_analysis_results(self):
-        return {}
-
-    def execute(self, axis_data, result_data, context):
-        return []
-
-    def execute_online(self, axis_data, result_data, context):
-        xs = list(axis_data[self._x_handle._store.identity])
-        ys = list(result_data[self._y_channel])
-        latest_x = float(xs[-1])
-        latest_y = float(ys[-1])
-        return {
-            "running_summary": AnalysisFeedback(
-                outputs={
-                    "num_points": len(xs),
-                    "latest_x": latest_x,
-                    "latest_y": latest_y,
-                },
-                annotations=[
-                    annotations.curve_1d(
-                        x_axis=self._x_handle,
-                        x_values=np.asarray(xs, dtype=float),
-                        y_axis=self._y_channel,
-                        y_values=np.asarray(ys, dtype=float),
-                    ).describe(context)
-                ],
-            )
-        }
-
-
 class OnlineAnnotatedFragment(ExpFragment):
     """Fragment with a simple online summary analysis and live annotations."""
 
@@ -394,7 +352,34 @@ class OnlineAnnotatedFragment(ExpFragment):
         self.y.push(self.x.get() + 1.0)
 
     def get_default_analyses(self):
-        return [RunningSummaryAnalysis(self.x, self.y)]
+        return [
+            CustomAnalysis(
+                [self.x],
+                self._summarise_running_curve,
+                analysis_results=[
+                    IntChannel("num_points", "Running point count"),
+                    FloatChannel("latest_x", "Latest x value"),
+                    FloatChannel("latest_y", "Latest y value"),
+                ],
+                online_fn=self._summarise_running_curve,
+                online_analysis_identifier="running_summary",
+            )
+        ]
+
+    def _summarise_running_curve(self, axis_values, result_values, analysis_results):
+        xs = np.asarray(axis_values[self.x], dtype=float)
+        ys = np.asarray(result_values[self.y], dtype=float)
+        analysis_results["num_points"].push(int(len(xs)))
+        analysis_results["latest_x"].push(float(xs[-1]))
+        analysis_results["latest_y"].push(float(ys[-1]))
+        return [
+            annotations.curve_1d(
+                x_axis=self.x,
+                x_values=xs,
+                y_axis=self.y,
+                y_values=ys,
+            )
+        ]
 
 
 class FourDimQuadraticFragment(ExpFragment):
@@ -705,7 +690,7 @@ class HostRuntimeCase(HasEnvironmentCase):
         request = ScanRequest(
             axes=(fragment.value,),
             point_source=point_source,
-            max_points_per_batch=4,
+            execution_policy=ExecutionPolicy(max_points_per_batch=4),
         )
 
         session = HostScanSession(fragment, fragment, request)
@@ -742,7 +727,7 @@ class HostRuntimeCase(HasEnvironmentCase):
         request = ScanRequest(
             axes=(fragment.value,),
             point_source=point_source,
-            max_points_per_batch=2,
+            execution_policy=ExecutionPolicy(max_points_per_batch=2),
         )
         self.scheduler.num_check_pause_calls_until_termination = 1
 
@@ -768,7 +753,7 @@ class HostRuntimeCase(HasEnvironmentCase):
         request = ScanRequest(
             axes=(fragment.value,),
             point_source=point_source,
-            max_points_per_batch=3,
+            execution_policy=ExecutionPolicy(max_points_per_batch=3),
         )
 
         session = HostScanSession(fragment, fragment, request)
@@ -792,7 +777,7 @@ class HostRuntimeCase(HasEnvironmentCase):
         request = ScanRequest(
             axes=(fragment.x,),
             point_source=point_source,
-            max_points_per_batch=4,
+            execution_policy=ExecutionPolicy(max_points_per_batch=4),
         )
 
         session = HostScanSession(fragment, fragment, request)
@@ -826,7 +811,7 @@ class HostRuntimeCase(HasEnvironmentCase):
         request = ScanRequest(
             axes=(fragment.x,),
             point_source=point_source,
-            max_points_per_batch=2,
+            execution_policy=ExecutionPolicy(max_points_per_batch=2),
         )
 
         session = HostScanSession(fragment, fragment, request)
@@ -840,6 +825,12 @@ class HostRuntimeCase(HasEnvironmentCase):
         self.assertEqual(online_result["latest_x"], 2.0)
         self.assertEqual(online_result["latest_y"], 3.0)
         self.assertEqual(result.online_analysis_results["running_summary"], online_result)
+        self.assertEqual(result.analysis_results["num_points"], 3)
+        self.assertEqual(result.analysis_results["latest_x"], 2.0)
+        self.assertEqual(result.analysis_results["latest_y"], 3.0)
+        self.assertEqual(self.d(prefix, "analysis.output.num_points"), 3)
+        self.assertEqual(self.d(prefix, "analysis.output.latest_x"), 2.0)
+        self.assertEqual(self.d(prefix, "analysis.output.latest_y"), 3.0)
         self.assertEqual(
             result.online_analysis_annotations["running_summary"],
             online_annotations,
@@ -868,7 +859,7 @@ class HostRuntimeCase(HasEnvironmentCase):
         request = ScanRequest(
             axes=(fragment.x0, fragment.x1, fragment.x2, fragment.x3),
             point_source=point_source,
-            max_points_per_batch=9,
+            execution_policy=ExecutionPolicy(max_points_per_batch=9),
         )
 
         session = HostScanSession(fragment, fragment, request)
