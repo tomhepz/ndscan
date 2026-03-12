@@ -18,13 +18,14 @@ future optimiser backends need a slightly richer contract:
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from itertools import product
 from typing import Any
 
 __all__ = [
     "BasePoint",
+    "BatchFeedback",
     "PointSource",
     "SinglePointSource",
     "CartesianPointSource",
@@ -34,6 +35,7 @@ __all__ = [
     "ProductPointSource",
     "RecursiveMidpointPointSource1D",
     "UntilConditionPointSource",
+    "GradientDescentPointSource",
 ]
 
 
@@ -48,6 +50,20 @@ class BasePoint:
 
     index: int
     axis_values: tuple[Any, ...]
+
+
+@dataclass(frozen=True)
+class BatchFeedback:
+    """Information available at one completed batch boundary.
+
+    Point policies primarily need the completed observations so they can refine later
+    choices. Batch-oriented policies and future early-exit wrappers also benefit from
+    seeing any online-analysis results that were produced from the accumulated data at
+    the same boundary.
+    """
+
+    observations: tuple[Any, ...]
+    online_analysis_results: Mapping[str, Any] = field(default_factory=dict)
 
 
 class PointSource:
@@ -106,13 +122,14 @@ class PointSource:
         update their internal state and choose later points.
         """
 
-    def observe_batch(self, observations: Sequence[Any]) -> None:
-        """Receive a sequence of completed observations.
+    def observe_batch(self, feedback: BatchFeedback) -> None:
+        """Receive one completed batch boundary.
 
         The default implementation simply forwards each observation to ``observe()``.
-        Policies that care about batch boundaries can override this directly.
+        Policies that care about batch boundaries or online-analysis outputs can
+        override this directly.
         """
-        for observation in observations:
+        for observation in feedback.observations:
             self.observe(observation)
 
     def describe(self) -> dict[str, Any]:
@@ -298,6 +315,30 @@ class ConcatPointSource(PointSource):
             raise RuntimeError("Received observation for ConcatPointSource without a point")
         self._pending_observation_sources.popleft().observe(observation)
 
+    def observe_batch(self, feedback: BatchFeedback) -> None:
+        if not feedback.observations:
+            return
+
+        pending = list(feedback.observations)
+        while pending:
+            if not self._pending_observation_sources:
+                raise RuntimeError(
+                    "Received batch feedback for ConcatPointSource without matching points"
+                )
+            source = self._pending_observation_sources.popleft()
+            source_observations = [pending.pop(0)]
+            while self._pending_observation_sources and pending:
+                if self._pending_observation_sources[0] is not source:
+                    break
+                self._pending_observation_sources.popleft()
+                source_observations.append(pending.pop(0))
+            source.observe_batch(
+                BatchFeedback(
+                    observations=tuple(source_observations),
+                    online_analysis_results=feedback.online_analysis_results,
+                )
+            )
+
     def describe(self) -> dict[str, Any]:
         return {
             "kind": "concat",
@@ -435,6 +476,7 @@ class UntilConditionPointSource(PointSource):
         *,
         predicate_description: str = "custom",
         min_observations: int = 1,
+        per_batch: bool = False,
     ):
         if min_observations < 1:
             raise ValueError("min_observations must be at least 1")
@@ -442,6 +484,7 @@ class UntilConditionPointSource(PointSource):
         self._predicate = predicate
         self._predicate_description = predicate_description
         self._min_observations = min_observations
+        self._per_batch = per_batch
         self._num_observations = 0
         self._stop_requested = False
 
@@ -466,11 +509,230 @@ class UntilConditionPointSource(PointSource):
         if self._num_observations >= self._min_observations:
             self._stop_requested = self._stop_requested or self._predicate(observation)
 
+    def observe_batch(self, feedback: BatchFeedback) -> None:
+        self._inner.observe_batch(feedback)
+        self._num_observations += len(feedback.observations)
+        if self._num_observations < self._min_observations:
+            return
+        if self._per_batch:
+            self._stop_requested = self._stop_requested or self._predicate(feedback)
+            return
+        for observation in feedback.observations:
+            self._stop_requested = self._stop_requested or self._predicate(observation)
+            if self._stop_requested:
+                break
+
     def describe(self) -> dict[str, Any]:
         return {
             "kind": "until_condition",
             "axis_count": self.axis_count,
             "predicate": self._predicate_description,
             "min_observations": self._min_observations,
+            "per_batch": self._per_batch,
             "inner": self._inner.describe(),
         }
+
+
+class GradientDescentPointSource(PointSource):
+    """Adaptive finite-difference gradient descent over a fixed parameter set.
+
+    The policy emits one optimisation batch at a time:
+
+    - the current centre point,
+    - one positive probe and one negative probe for each dimension.
+
+    After the batch completes, the finite-difference gradient is estimated from the
+    observed objective values and the centre point is updated with a plain gradient
+    descent or ascent step. The first backend is intentionally simple:
+
+    - fixed probe steps,
+    - fixed learning rate,
+    - no line search,
+    - no momentum,
+    - no Hessian approximation.
+
+    This makes the behaviour easy to inspect and is already enough to express common
+    "optimise a handful of continuous parameters" workflows.
+    """
+
+    def __init__(
+        self,
+        initial_point: Sequence[float],
+        objective: Callable[[Any], float],
+        *,
+        probe_steps: float | Sequence[float],
+        learning_rate: float,
+        max_iterations: int,
+        minimise: bool = True,
+        bounds: Sequence[tuple[float | None, float | None]] | None = None,
+        gradient_tolerance: float = 0.0,
+        objective_description: str = "custom",
+    ):
+        if max_iterations < 1:
+            raise ValueError("max_iterations must be at least 1")
+        if learning_rate <= 0:
+            raise ValueError("learning_rate must be positive")
+        self._current_point = [float(value) for value in initial_point]
+        self._axis_count = len(self._current_point)
+        if self._axis_count == 0:
+            raise ValueError("GradientDescentPointSource requires at least one axis")
+
+        if isinstance(probe_steps, (int, float)):
+            self._probe_steps = [float(probe_steps)] * self._axis_count
+        else:
+            self._probe_steps = [float(step) for step in probe_steps]
+        if len(self._probe_steps) != self._axis_count:
+            raise ValueError("probe_steps must match the dimensionality of initial_point")
+        if any(step <= 0 for step in self._probe_steps):
+            raise ValueError("probe steps must all be positive")
+
+        if bounds is None:
+            self._bounds = [(None, None)] * self._axis_count
+        else:
+            if len(bounds) != self._axis_count:
+                raise ValueError("bounds must match the dimensionality of initial_point")
+            self._bounds = list(bounds)
+
+        self._objective = objective
+        self._learning_rate = float(learning_rate)
+        self._max_iterations = max_iterations
+        self._minimise = minimise
+        self._gradient_tolerance = float(gradient_tolerance)
+        self._objective_description = objective_description
+
+        self._next_index = 0
+        self._iteration = 0
+        self._finished = False
+        self._pending_batch_points: list[tuple[float, ...]] | None = None
+        self._best_point = tuple(self._current_point)
+        self._best_value: float | None = None
+
+    @property
+    def axis_count(self) -> int:
+        return self._axis_count
+
+    @property
+    def best_point(self) -> tuple[float, ...]:
+        """Return the best centre point seen so far."""
+        return self._best_point
+
+    @property
+    def best_value(self) -> float | None:
+        """Return the objective value at ``best_point`` if one has been observed."""
+        return self._best_value
+
+    def preferred_batch_size(self, default: int) -> int:
+        return self._required_batch_size()
+
+    def next_batch(self, max_points: int) -> list[BasePoint]:
+        if self._finished:
+            return []
+        required = self._required_batch_size()
+        if max_points < required:
+            raise ValueError(
+                "GradientDescentPointSource requires batches of at least "
+                f"{required} points, got {max_points}"
+            )
+        if self._pending_batch_points is None:
+            self._pending_batch_points = self._build_batch_points()
+        points = []
+        for axis_values in self._pending_batch_points:
+            points.append(BasePoint(index=self._next_index, axis_values=axis_values))
+            self._next_index += 1
+        return points
+
+    def is_finished(self) -> bool:
+        return self._finished
+
+    def observe_batch(self, feedback: BatchFeedback) -> None:
+        if self._pending_batch_points is None:
+            raise RuntimeError(
+                "Received batch feedback for GradientDescentPointSource before requesting a batch"
+            )
+        if len(feedback.observations) != len(self._pending_batch_points):
+            raise ValueError(
+                "GradientDescentPointSource received the wrong number of observations "
+                f"for its batch: expected {len(self._pending_batch_points)}, got "
+                f"{len(feedback.observations)}"
+            )
+
+        objective_values = [float(self._objective(observation)) for observation in feedback.observations]
+        centre_value = objective_values[0]
+        if self._is_better(centre_value, self._best_value):
+            self._best_value = centre_value
+            self._best_point = tuple(self._current_point)
+
+        gradient = []
+        for i in range(self._axis_count):
+            positive_point = self._pending_batch_points[1 + 2 * i]
+            negative_point = self._pending_batch_points[1 + 2 * i + 1]
+            positive_value = objective_values[1 + 2 * i]
+            negative_value = objective_values[1 + 2 * i + 1]
+            denominator = positive_point[i] - negative_point[i]
+            if denominator == 0:
+                gradient.append(0.0)
+            else:
+                gradient.append((positive_value - negative_value) / denominator)
+
+        self._iteration += 1
+        self._pending_batch_points = None
+
+        gradient_norm = sum(component * component for component in gradient) ** 0.5
+        if gradient_norm <= self._gradient_tolerance or self._iteration >= self._max_iterations:
+            self._finished = True
+            return
+
+        direction = -1.0 if self._minimise else 1.0
+        next_point = []
+        for value, component, bound in zip(
+            self._current_point, gradient, self._bounds, strict=True
+        ):
+            candidate = value + direction * self._learning_rate * component
+            lower, upper = bound
+            if lower is not None:
+                candidate = max(candidate, lower)
+            if upper is not None:
+                candidate = min(candidate, upper)
+            next_point.append(candidate)
+        self._current_point = next_point
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            "kind": "gradient_descent",
+            "axis_count": self.axis_count,
+            "learning_rate": self._learning_rate,
+            "probe_steps": list(self._probe_steps),
+            "max_iterations": self._max_iterations,
+            "minimise": self._minimise,
+            "gradient_tolerance": self._gradient_tolerance,
+            "objective": self._objective_description,
+        }
+
+    def _required_batch_size(self) -> int:
+        return 1 + 2 * self._axis_count
+
+    def _build_batch_points(self) -> list[tuple[float, ...]]:
+        batch = [tuple(self._current_point)]
+        for i, step in enumerate(self._probe_steps):
+            positive = list(self._current_point)
+            negative = list(self._current_point)
+            positive[i] = self._clip_coordinate(i, positive[i] + step)
+            negative[i] = self._clip_coordinate(i, negative[i] - step)
+            batch.append(tuple(positive))
+            batch.append(tuple(negative))
+        return batch
+
+    def _clip_coordinate(self, index: int, value: float) -> float:
+        lower, upper = self._bounds[index]
+        if lower is not None:
+            value = max(value, lower)
+        if upper is not None:
+            value = min(value, upper)
+        return value
+
+    def _is_better(self, value: float, incumbent: float | None) -> bool:
+        if incumbent is None:
+            return True
+        if self._minimise:
+            return value < incumbent
+        return value > incumbent

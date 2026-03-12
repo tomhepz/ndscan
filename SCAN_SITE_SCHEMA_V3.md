@@ -157,6 +157,7 @@ For a given site prefix `<site>`, the stable v3 datasets are:
 
 ```text
 <site>analysis.online
+<site>analysis.online_result.<name>
 <site>analysis.outputs
 <site>analysis.output.<name>
 <site>analysis.annotations
@@ -285,6 +286,8 @@ Readers should therefore treat them as optional convenience state, not as core s
 Everything related to fragment-defined or runtime-defined analyses.
 
 - `analysis.online`: JSON object describing online/in-loop analyses.
+- `analysis.online_result.<name>`: latest batch-updated result object for online
+  analysis `<name>`.
 - `analysis.outputs`: JSON object describing final analysis output channels.
 - `analysis.output.<name>`: final value for analysis output `<name>`.
 - `analysis.annotations`: JSON list of produced annotations.
@@ -292,6 +295,7 @@ Everything related to fragment-defined or runtime-defined analyses.
 This naming is intentionally regular:
 
 - analysis schema lives under `analysis.*`,
+- live online-analysis values live under `analysis.online_result.*`,
 - analysis values live under `analysis.output.*`,
 - there is no longer a mismatch between `online_analyses` and `analysis_results`.
 

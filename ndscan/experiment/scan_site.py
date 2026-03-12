@@ -285,6 +285,16 @@ class ScanSiteDatasetWriter:
             self._analysis_result_sinks[key] = sink
         sink.push(value)
 
+    def set_online_analysis_result(self, key: str, value: Any) -> None:
+        """Publish the latest value for one online analysis.
+
+        Online analyses are batch-updated, not append-only histories. Each dataset
+        stores the latest result object for one named online analysis and is rewritten
+        whenever that analysis is re-evaluated on accumulated scan data.
+        """
+
+        self._push_scalar("analysis.online_result." + key, value)
+
     def flush(self) -> None:
         """Flush any buffered writes to the dataset manager.
 

@@ -6,8 +6,8 @@ Key differences from the legacy ``SubscanExpFragment`` approach:
 
 - no ``SubscanExpFragment`` subclasses,
 - no ``setattr_subscan(...)``,
-- nested scans are launched explicitly with ``run_host_scan(...)``,
-- child scan sites are derived explicitly with ``make_child_scan_site(...)``.
+- nested scans use the thin ``run_subscan(...)`` helper,
+- the helper still delegates into the same host-runtime scan path as a root scan.
 
 The runtime model is intentionally simple:
 
@@ -33,9 +33,8 @@ from ndscan.experiment import (
     OpaqueChannel,
     ScanRequest,
     annotations,
-    make_child_scan_site,
     make_fragment_host_scan_exp,
-    run_host_scan,
+    run_subscan,
 )
 
 
@@ -121,14 +120,14 @@ class ScanXFragment(ExpFragment):
 
     def run_once(self):
         x_points = np.linspace(0.0, 5.0, 6).tolist()
-        x_request = ScanRequest.cartesian(
-            [(self.line.x, x_points)],
-            site=make_child_scan_site(
-                "scan_x",
-                extra_metadata={"analysis_note": "default-analysis slope fit"},
-            ),
+        x_request = ScanRequest.cartesian([(self.line.x, x_points)])
+        x_result = run_subscan(
+            self,
+            self.line,
+            x_request,
+            name="scan_x",
+            extra_metadata={"analysis_note": "default-analysis slope fit"},
         )
-        x_result = run_host_scan(self, self.line, x_request)
         self.m.push(x_result.analysis_results["m"])
 
     def get_default_analyses(self):
@@ -175,14 +174,14 @@ class HowDoesPVaryFragment(ExpFragment):
     def run_once(self):
         # Start at p = 1 to keep the log-space fit well-defined.
         p_points = np.linspace(1.0, 5.0, 10).tolist()
-        p_request = ScanRequest.cartesian(
-            [(self.scan_x.line.p, p_points)],
-            site=make_child_scan_site(
-                "scan_p",
-                extra_metadata={"analysis_note": "default-analysis exponent fit"},
-            ),
+        p_request = ScanRequest.cartesian([(self.scan_x.line.p, p_points)])
+        p_result = run_subscan(
+            self,
+            self.scan_x,
+            p_request,
+            name="scan_p",
+            extra_metadata={"analysis_note": "default-analysis exponent fit"},
         )
-        p_result = run_host_scan(self, self.scan_x, p_request)
         self.fit_e.push(p_result.analysis_results["fit_e"])
 
 

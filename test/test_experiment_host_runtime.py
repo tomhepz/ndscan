@@ -9,6 +9,7 @@ from artiq.language.core import TerminationRequested
 from mock_environment import HasEnvironmentCase
 
 from ndscan.experiment import (
+    BatchFeedback,
     CartesianPointSource,
     ConcatPointSource,
     CustomAnalysis,
@@ -16,10 +17,12 @@ from ndscan.experiment import (
     ExplicitPointSource,
     FloatChannel,
     FloatParam,
+    GradientDescentPointSource,
     PointObservation,
     ProductPointSource,
     RecursiveMidpointPointSource1D,
     HostScanSession,
+    OnlineFit,
     ScanRequest,
     ScanSite,
     RestartKernelTransitoryError,
@@ -29,8 +32,9 @@ from ndscan.experiment import (
     kernel,
     make_child_scan_site,
     make_fragment_host_scan_exp,
-    run_host_scan,
+    run_subscan,
 )
+from ndscan.utils import FIT_OBJECTS
 
 
 class PointSourceTest(unittest.TestCase):
@@ -139,6 +143,37 @@ class PointSourceTest(unittest.TestCase):
         self.assertTrue(source.is_finished())
         self.assertEqual(source.next_batch(1), [])
 
+    def test_until_condition_point_source_can_stop_from_batch_feedback(self):
+        source = UntilConditionPointSource(
+            ExplicitPointSource(1, [(0,), (1,), (2,), (3,)]),
+            lambda feedback: feedback.online_analysis_results["fit"]["error"] < 0.1,
+            predicate_description="fit error < 0.1",
+            min_observations=2,
+            per_batch=True,
+        )
+
+        batch = source.next_batch(2)
+        self.assertEqual([point.axis_values for point in batch], [(0,), (1,)])
+
+        source.observe_batch(
+            BatchFeedback(
+                observations=(
+                    PointObservation(
+                        point_index=0,
+                        axis_values={"axis_0": 0},
+                        channel_values={"channel_0": 10},
+                    ),
+                    PointObservation(
+                        point_index=1,
+                        axis_values={"axis_0": 1},
+                        channel_values={"channel_0": 20},
+                    ),
+                ),
+                online_analysis_results={"fit": {"error": 0.05}},
+            )
+        )
+        self.assertTrue(source.is_finished())
+
 
 class TwoParamAddFragment(ExpFragment):
     def build_fragment(self):
@@ -227,6 +262,7 @@ class RecordingBatchPointSource(ExplicitPointSource):
         self._preferred_batch_size = preferred_batch_size
         self.requested_batch_limits = []
         self.observed_batches = []
+        self.observed_online_analysis_results = []
 
     def next_batch(self, max_points: int):
         self.requested_batch_limits.append(max_points)
@@ -240,9 +276,12 @@ class RecordingBatchPointSource(ExplicitPointSource):
     def observe(self, observation):
         raise AssertionError("Host runtime should call observe_batch() at batch boundaries")
 
-    def observe_batch(self, observations):
+    def observe_batch(self, feedback: BatchFeedback):
         self.observed_batches.append(
-            [observation.axis_values["axis_0"] for observation in observations]
+            [observation.axis_values["axis_0"] for observation in feedback.observations]
+        )
+        self.observed_online_analysis_results.append(
+            dict(feedback.online_analysis_results)
         )
 
 
@@ -270,6 +309,42 @@ class HostCallsKernelHelperFragment(ExpFragment):
         self.result.push(self.value.get() + 1.0)
 
 
+class OnlineGaussianFragment(ExpFragment):
+    """Leaf fragment with a built-in online fit and a known exact model."""
+
+    def build_fragment(self):
+        self.setattr_param("x", FloatParam, "x", 0.0)
+        self.setattr_result("y", FloatChannel)
+
+    def run_once(self):
+        params = {"x0": 1.0, "y0": 0.5, "a": 2.0, "sigma": 1.2}
+        self.y.push(FIT_OBJECTS["gaussian"].fitting_function(self.x.get(), params))
+
+    def get_default_analyses(self):
+        return [OnlineFit("gaussian", data={"x": self.x, "y": self.y})]
+
+
+class FourDimQuadraticFragment(ExpFragment):
+    """Convex objective surface used to test the gradient-descent point policy."""
+
+    def build_fragment(self):
+        self.setattr_param("x0", FloatParam, "x0", 0.0)
+        self.setattr_param("x1", FloatParam, "x1", 0.0)
+        self.setattr_param("x2", FloatParam, "x2", 0.0)
+        self.setattr_param("x3", FloatParam, "x3", 0.0)
+        self.setattr_result("loss", FloatChannel)
+
+    def run_once(self):
+        optimum = (1.0, -2.0, 0.5, 3.0)
+        values = (
+            self.x0.get(),
+            self.x1.get(),
+            self.x2.get(),
+            self.x3.get(),
+        )
+        self.loss.push(sum((value - target) ** 2 for value, target in zip(values, optimum)))
+
+
 class NestedChildScanParent(ExpFragment):
     """Parent fragment that launches a child scan during each outer point.
 
@@ -284,10 +359,14 @@ class NestedChildScanParent(ExpFragment):
 
     def run_once(self):
         child_request = ScanRequest.cartesian(
-            [(self.child.value, [self.outer.get(), self.outer.get() + 1.0])],
-            site=make_child_scan_site("child_scan"),
+            [(self.child.value, [self.outer.get(), self.outer.get() + 1.0])]
         )
-        child_result = run_host_scan(self, self.child, child_request)
+        child_result = run_subscan(
+            self,
+            self.child,
+            child_request,
+            name="child_scan",
+        )
         self.child_total.push(sum(child_result.values[self.child.result]))
 
 
@@ -301,9 +380,13 @@ class RecursiveLeafScanFragment(ExpFragment):
         leaf_request = ScanRequest.explicit(
             [self.leaf.value],
             [[self.base.get()], [self.base.get() + 0.5]],
-            site=make_child_scan_site("leaf_scan"),
         )
-        leaf_result = run_host_scan(self, self.leaf, leaf_request)
+        leaf_result = run_subscan(
+            self,
+            self.leaf,
+            leaf_request,
+            name="leaf_scan",
+        )
         self.leaf_total.push(sum(leaf_result.values[self.leaf.result]))
 
 
@@ -319,10 +402,41 @@ class RecursiveScanParent(ExpFragment):
         middle_request = ScanRequest.explicit(
             [self.middle.base],
             [[self.outer.get()], [self.outer.get() + 10.0]],
-            site=make_child_scan_site("middle_scan"),
         )
-        middle_result = run_host_scan(self, self.middle, middle_request)
+        middle_result = run_subscan(
+            self,
+            self.middle,
+            middle_request,
+            name="middle_scan",
+        )
         self.middle_total.push(sum(middle_result.values[self.middle.leaf_total]))
+
+
+class NestedHelperSiteOptionsParent(ExpFragment):
+    """Parent fragment used to pin down ``run_subscan()`` site-merging behavior."""
+
+    def build_fragment(self):
+        self.setattr_fragment("child", PlainAddOneFragment, detached=True)
+        self.setattr_result("child_result", FloatChannel)
+
+    def run_once(self):
+        request = ScanRequest.explicit(
+            [self.child.value],
+            [[2.0]],
+            site=ScanSite(
+                segmented=False,
+                extra_metadata={"from_request": "request"},
+            ),
+        )
+        result = run_subscan(
+            self,
+            self.child,
+            request,
+            name="custom_child",
+            segmented=False,
+            extra_metadata={"from_call": "call"},
+        )
+        self.child_result.push(result.values[self.child.result][0])
 
 
 def _fit_line_through_origin(xs, ys) -> float:
@@ -386,9 +500,13 @@ class AnalysedScanXFragment(ExpFragment):
         request = ScanRequest.explicit(
             [self.line.x],
             [[0.0], [1.0], [2.0], [3.0], [4.0], [5.0]],
-            site=make_child_scan_site("scan_x"),
         )
-        result = run_host_scan(self, self.line, request)
+        result = run_subscan(
+            self,
+            self.line,
+            request,
+            name="scan_x",
+        )
         self.m.push(result.analysis_results["m"])
 
     def get_default_analyses(self):
@@ -418,9 +536,13 @@ class AnalysedHowDoesPVaryFragment(ExpFragment):
         request = ScanRequest.explicit(
             [self.scan_x.line.p],
             [[1.0], [2.0], [3.0], [4.0], [5.0]],
-            site=make_child_scan_site("scan_p"),
         )
-        result = run_host_scan(self, self.scan_x, request)
+        result = run_subscan(
+            self,
+            self.scan_x,
+            request,
+            name="scan_p",
+        )
         self.fit_e.push(result.analysis_results["fit_e"])
 
 
@@ -519,6 +641,10 @@ class HostRuntimeCase(HasEnvironmentCase):
         prefix = "ndscan.rid_0.site.root."
         self.assertEqual(point_source.requested_batch_limits, [2, 2, 2])
         self.assertEqual(point_source.observed_batches, [[0.0, 1.0], [2.0, 3.0], [4.0]])
+        self.assertEqual(
+            point_source.observed_online_analysis_results,
+            [{}, {}, {}],
+        )
         self.assertEqual(fragment.host_setup_calls, 3)
         self.assertEqual(fragment.host_cleanup_calls, 3)
         self.assertEqual(self.scheduler.num_check_pause_calls, 2)
@@ -574,6 +700,69 @@ class HostRuntimeCase(HasEnvironmentCase):
         self.assertEqual(fragment.host_cleanup_calls, 3)
         self.assertEqual(self.d(prefix, "points.axis_0"), [0.0, 1.0, 2.0, 3.0])
         self.assertEqual(self.d(prefix, "points.channel_0"), [1.0, 2.0, 3.0, 4.0])
+
+    def test_host_scan_session_executes_online_analyses_at_batch_boundaries(self):
+        fragment = self.create(OnlineGaussianFragment, [])
+        point_source = RecordingBatchPointSource(
+            1,
+            [(-2.0,), (-1.0,), (0.0,), (1.0,), (2.0,), (3.0,), (4.0,)],
+            preferred_batch_size=4,
+        )
+        request = ScanRequest(
+            axes=(fragment.x,),
+            point_source=point_source,
+            max_points_per_batch=4,
+        )
+
+        session = HostScanSession(fragment, fragment, request)
+        result = session.run()
+
+        prefix = result.site_prefix
+        analysis_name = "fit_gaussian_channel_0"
+        self.assertIn(analysis_name, self.j(prefix, "analysis.online"))
+        self.assertIn(analysis_name, result.online_analysis_results)
+        self.assertIn(analysis_name, point_source.observed_online_analysis_results[-1])
+
+        online_result = self.j(prefix, "analysis.online_result." + analysis_name)
+        self.assertAlmostEqual(online_result["x0"], 1.0, places=3)
+        self.assertAlmostEqual(online_result["sigma"], 1.2, places=3)
+        self.assertEqual(
+            self.j(prefix, "analysis.online_result." + analysis_name),
+            point_source.observed_online_analysis_results[-1][analysis_name],
+        )
+
+    def test_host_scan_session_supports_gradient_descent_point_source(self):
+        fragment = self.create(FourDimQuadraticFragment, [])
+        point_source = GradientDescentPointSource(
+            initial_point=(0.0, 0.0, 0.0, 0.0),
+            objective=lambda observation: observation.channel_values["channel_0"],
+            probe_steps=(0.1, 0.1, 0.1, 0.1),
+            learning_rate=0.5,
+            max_iterations=3,
+            gradient_tolerance=1e-9,
+            objective_description="quadratic loss",
+        )
+        request = ScanRequest(
+            axes=(fragment.x0, fragment.x1, fragment.x2, fragment.x3),
+            point_source=point_source,
+            max_points_per_batch=9,
+        )
+
+        session = HostScanSession(fragment, fragment, request)
+        result = session.run()
+
+        prefix = result.site_prefix
+        self.assertEqual(self.d(prefix, "state.num_points"), 18)
+        self.assertAlmostEqual(point_source.best_value, 0.0, places=9)
+        self.assertEqual(
+            tuple(round(value, 6) for value in point_source.best_point),
+            (1.0, -2.0, 0.5, 3.0),
+        )
+        self.assertAlmostEqual(
+            min(self.d(prefix, "points.channel_0")),
+            0.0,
+            places=9,
+        )
 
     def test_numeric_channels_can_opt_out_of_save_by_default(self):
         fragment = self.create(VisibleAndHiddenNumericFragment, [])
@@ -806,6 +995,18 @@ class HostRuntimeCase(HasEnvironmentCase):
             self.d(leaf_prefix, "points.channel_0"),
             [2.0, 2.5, 12.0, 12.5, 3.0, 3.5, 13.0, 13.5],
         )
+
+    def test_run_subscan_merges_site_metadata_and_can_inherit_unsegmented_sites(self):
+        parent = self.create(NestedHelperSiteOptionsParent, [])
+        session = HostScanSession(parent, parent, ScanRequest.single())
+        session.run()
+
+        child_prefix = "ndscan.rid_0.site.root.custom_child."
+        self.assertEqual(self.d(child_prefix, "points.channel_0"), [3.0])
+        self.assertEqual(self.d(child_prefix, "extra.from_request"), "request")
+        self.assertEqual(self.d(child_prefix, "extra.from_call"), "call")
+        self.assertNotIn(child_prefix + "segments.start_index", self.dataset_db.data)
+        self.assertNotIn(child_prefix + "state.current_segment", self.dataset_db.data)
 
     def test_nested_default_analyses_chain_matches_example_style(self):
         parent = self.create(AnalysedHowDoesPVaryFragment, [])

@@ -98,6 +98,20 @@ class DefaultAnalysis:
         """
         raise NotImplementedError
 
+    def execute_online(
+        self,
+        axis_data: dict[AxisIdentity, list],
+        result_data: dict[ResultChannel, list],
+        context: AnnotationContext,
+    ) -> dict[str, dict[str, Any]]:
+        """Return the latest online-analysis results for the current accumulated data.
+
+        The default implementation reports no executable online analysis. Analyses that
+        already describe online metadata, such as ``OnlineFit``, can override this to
+        produce concrete batch-level results in the host runtime.
+        """
+        return {}
+
 
 class CustomAnalysis(DefaultAnalysis):
     r""":class:`DefaultAnalysis` that executes a user-defined analysis function in the
@@ -304,18 +318,7 @@ class OnlineFit(DefaultAnalysis):
     ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
         ""
         # TODO: Generalise to higher-dimensional fits.
-        channels = [
-            context.describe_coordinate(v)
-            for v in self.data.values()
-            if isinstance(v, ResultChannel)
-        ]
-
-        analysis_identifier = self.analysis_identifier
-        if analysis_identifier is None:
-            # By default, mangle fit type and channels into a pseudo-unique identifier,
-            # which should work for the vast majority of cases (i.e. unless the user
-            # creates needlessly duplicate analyses).
-            analysis_identifier = "fit_" + self.fit_type + "_" + "_".join(channels)
+        analysis_identifier, channels = self._resolve_online_identity(context)
 
         def analysis_ref(key):
             return AnnotationValueRef(
@@ -361,6 +364,16 @@ class OnlineFit(DefaultAnalysis):
         ""
         return self._result_channels
 
+    def execute_online(
+        self,
+        axis_data: dict[AxisIdentity, list],
+        result_data: dict[ResultChannel, list],
+        context: AnnotationContext,
+    ) -> dict[str, dict[str, Any]]:
+        analysis_identifier, _ = self._resolve_online_identity(context)
+        result = self._fit_current_data(axis_data, result_data)
+        return {analysis_identifier: {} if result is None else result}
+
     def execute(
         self,
         axis_data: dict[AxisIdentity, list],
@@ -371,19 +384,63 @@ class OnlineFit(DefaultAnalysis):
         if not self._save_fit_results:
             return []
 
-        def _extract_data(data: ParamHandle | ResultChannel | None):
-            if data is None:
-                return None
-            elif isinstance(data, ParamHandle):
-                return axis_data[data._store.identity]
-            elif isinstance(data, ResultChannel):
-                return result_data[data]
-            else:
-                raise ValueError(f"Invalid data source: {data}")
+        result = self._fit_current_data(axis_data, result_data)
+        if result is None:
+            return []
 
-        x = _extract_data(self.data["x"])
-        y = _extract_data(self.data["y"])
-        y_err = _extract_data(self.data.get("y_err", None))
+        for param, value in result.items():
+            if param.endswith("_error") or param == "reduced_chi_squared":
+                continue
+            param_name = self._channel_prefix + param
+            if param_name not in self._result_channels:
+                continue
+            self._result_channels[param_name].push(value)
+            error_key = param + "_error"
+            if param_name + "_err" in self._result_channels and error_key in result:
+                self._result_channels[param_name + "_err"].push(result[error_key])
+
+        self._result_channels[f"{self._channel_prefix}reduced_chi_squared"].push(
+            result["reduced_chi_squared"]
+        )
+
+        return []
+
+    def _resolve_online_identity(
+        self, context: AnnotationContext
+    ) -> tuple[str, list[str]]:
+        channels = [
+            context.describe_coordinate(v)
+            for v in self.data.values()
+            if isinstance(v, ResultChannel)
+        ]
+
+        analysis_identifier = self.analysis_identifier
+        if analysis_identifier is None:
+            analysis_identifier = "fit_" + self.fit_type + "_" + "_".join(channels)
+        return analysis_identifier, channels
+
+    def _extract_data(
+        self,
+        axis_data: dict[AxisIdentity, list],
+        result_data: dict[ResultChannel, list],
+        data: ParamHandle | ResultChannel | None,
+    ):
+        if data is None:
+            return None
+        if isinstance(data, ParamHandle):
+            return axis_data[data._store.identity]
+        if isinstance(data, ResultChannel):
+            return result_data[data]
+        raise ValueError(f"Invalid data source: {data}")
+
+    def _fit_current_data(
+        self,
+        axis_data: dict[AxisIdentity, list],
+        result_data: dict[ResultChannel, list],
+    ) -> dict[str, Any] | None:
+        x = self._extract_data(axis_data, result_data, self.data["x"])
+        y = self._extract_data(axis_data, result_data, self.data["y"])
+        y_err = self._extract_data(axis_data, result_data, self.data.get("y_err", None))
 
         fitter: FitBase = FIT_OBJECTS[self.fit_type]
 
@@ -398,28 +455,30 @@ class OnlineFit(DefaultAnalysis):
             )
         except FitError:
             logger.warning("Fit failed for fit type '%s'", self.fit_type, exc_info=True)
-            return []
+            return None
 
         weights = 1 / (np.asarray(y_err) ** 2) if y_err is not None else np.ones_like(y)
         num_free_fit_params = len(fitter.parameter_names) - len(self.constants)
 
-        reduced_chi_squared = np.sum(residuals**2 * weights) / (
-            len(y) - num_free_fit_params
-        )
+        degrees_of_freedom = len(y) - num_free_fit_params
+        if degrees_of_freedom <= 0:
+            reduced_chi_squared = float("inf")
+        else:
+            reduced_chi_squared = np.sum(residuals**2 * weights) / degrees_of_freedom
 
+        result = dict[str, Any]()
         for param, value in p_dict.items():
-            param_name = self._channel_prefix + param
-            if param_name not in self._result_channels:
-                continue
-            self._result_channels[param_name].push(value)
-            if param_name + "_err" in self._result_channels:
-                self._result_channels[param_name + "_err"].push(p_error_dict[param])
+            result[param] = _to_json_safe_scalar(value)
+            result[param + "_error"] = _to_json_safe_scalar(p_error_dict[param])
+        result["reduced_chi_squared"] = _to_json_safe_scalar(reduced_chi_squared)
+        return result
 
-        self._result_channels[f"{self._channel_prefix}reduced_chi_squared"].push(
-            reduced_chi_squared
-        )
 
-        return []
+def _to_json_safe_scalar(value: Any) -> Any:
+    """Return a plain Python scalar for values coming back from fitting code."""
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
 
 
 class ResultPrefixAnalysisWrapper(DefaultAnalysis):
@@ -458,5 +517,13 @@ class ResultPrefixAnalysisWrapper(DefaultAnalysis):
         axis_data: dict[AxisIdentity, list],
         result_data: dict[ResultChannel, list],
         context: AnnotationContext,
-    ) -> list[dict[str, Any]]:
+        ) -> list[dict[str, Any]]:
         return self._wrapped.execute(axis_data, result_data, context)
+
+    def execute_online(
+        self,
+        axis_data: dict[AxisIdentity, list],
+        result_data: dict[ResultChannel, list],
+        context: AnnotationContext,
+    ) -> dict[str, dict[str, Any]]:
+        return self._wrapped.execute_online(axis_data, result_data, context)

@@ -40,6 +40,7 @@ from .annotations import AnnotationContext
 from .fragment import ExpFragment, RestartKernelTransitoryError, TransitoryError
 from .parameters import ParamHandle, ParamStore
 from .point_source import (
+    BatchFeedback,
     CartesianPointSource,
     ExplicitPointSource,
     PointSource,
@@ -62,6 +63,7 @@ __all__ = [
     "HostScanRunResult",
     "HostScanSession",
     "run_host_scan",
+    "run_subscan",
     "HostScanExperiment",
     "make_fragment_host_scan_exp",
 ]
@@ -168,6 +170,23 @@ class ScanRequest:
     def __post_init__(self) -> None:
         if self.max_points_per_batch is not None and self.max_points_per_batch <= 0:
             raise ValueError("max_points_per_batch must be positive when specified")
+
+    def with_site(self, site: ScanSite) -> "ScanRequest":
+        """Return this request with a different scan-site placement.
+
+        ``ScanRequest`` is immutable, but nested scans often want to reuse the same
+        point strategy while changing only where the resulting data is published.
+        Keeping this as a tiny value-level transformation makes the higher-level
+        nested helper read naturally without introducing a second request type.
+        """
+
+        return ScanRequest(
+            axes=self.axes,
+            point_source=self.point_source,
+            site=site,
+            metadata=self.metadata,
+            max_points_per_batch=self.max_points_per_batch,
+        )
 
     @classmethod
     def single(
@@ -282,6 +301,7 @@ class HostScanRunResult:
 
     coordinates: OrderedDict[tuple[str, str], list[Any]]
     values: dict[ResultChannel, list[Any]]
+    online_analysis_results: dict[str, Any]
     analysis_results: dict[str, Any]
     annotations: list[dict[str, Any]]
     site_prefix: str
@@ -299,6 +319,7 @@ class HostScanRunResult:
                 ((axis.param_schema["fqn"], axis.path), []) for axis in axes
             ),
             values={binding.channel: [] for binding in channels},
+            online_analysis_results={},
             analysis_results={},
             annotations=list(initial_annotations),
             site_prefix=site_prefix,
@@ -458,15 +479,35 @@ class _HostScanAnalysisPlan:
         observations: Sequence[PointObservation],
         run_result: HostScanRunResult,
         site_writer: ScanSiteDatasetWriter,
-    ) -> None:
+    ) -> dict[str, Any]:
         """Handle one completed execution batch.
 
-        The first host-runtime analysis implementation is post-run only, so this is a
-        deliberate no-op today. The hook exists so future online analyses can attach to
-        the same batch boundary that drives point publication and scheduler yielding,
-        instead of forcing the runner to grow a second control-flow path later on.
+        Online analyses are re-evaluated on the accumulated scan data after each
+        published batch. This keeps the semantics simple:
+
+        - batch-local point writes happen first,
+        - online analyses see exactly the data that is now visible to readers,
+        - point policies can then react to the same batch-level analysis outputs.
         """
-        del observations, run_result, site_writer
+        del observations
+
+        if not self._analyses:
+            return {}
+
+        axis_data = dict(run_result.coordinates)
+        result_data = dict(run_result.values)
+        online_results = reduce(
+            lambda x, y: merge_no_duplicates(x, y, kind="online analysis result"),
+            (
+                analysis.execute_online(axis_data, result_data, self._annotation_context)
+                for analysis in self._analyses
+            ),
+            {},
+        )
+        for name, value in online_results.items():
+            site_writer.set_online_analysis_result(name, value)
+        run_result.online_analysis_results = dict(online_results)
+        return online_results
 
 
 @dataclass
@@ -853,8 +894,8 @@ class HostScanProgramRunner:
 
                 current_batch = []
                 batch_offset = 0
-                if self._has_more_work() and self._scheduler.check_pause():
-                    self._scheduler.pause()
+                if self._should_pause_after_batch():
+                    self._pause_after_batch()
         finally:
             self._executor.remove()
 
@@ -920,14 +961,40 @@ class HostScanProgramRunner:
 
         self._program.site_writer.append_observations(completed_batch)
         result.record_batch(completed_batch, self._program.axes, self._program.channels)
-        self._program.analysis_plan.observe_batch(
+        online_analysis_results = self._program.analysis_plan.observe_batch(
             completed_batch, result, self._program.site_writer
         )
-        self._program.point_source.observe_batch(completed_batch)
+        self._program.point_source.observe_batch(
+            BatchFeedback(
+                observations=tuple(completed_batch),
+                online_analysis_results=online_analysis_results,
+            )
+        )
         self._program.site_writer.flush()
 
     def _has_more_work(self) -> bool:
         return not self._program.point_source.is_finished()
+
+    def _should_pause_after_batch(self) -> bool:
+        """Return whether the scheduler wants to pause after the current batch.
+
+        Scheduler interaction is intentionally aligned with published batch boundaries.
+        A completed batch is the first point where it is safe to:
+
+        - expose written data to readers,
+        - re-enter host setup later if needed,
+        - let the scheduler interrupt long-running scans without splitting a logical
+          ask/tell step in half.
+        """
+
+        if not self._has_more_work():
+            return False
+        return self._scheduler.check_pause()
+
+    def _pause_after_batch(self) -> None:
+        """Yield control to the scheduler after a completed batch boundary."""
+
+        self._scheduler.pause()
 
 
 class HostScanSession:
@@ -987,6 +1054,62 @@ def run_host_scan(
         max_transitory_error_retries=max_transitory_error_retries,
     )
     return session.run()
+
+
+def run_subscan(
+    owner: HasEnvironment,
+    fragment: ExpFragment,
+    request: ScanRequest,
+    *,
+    name: str,
+    segmented: bool = True,
+    extra_metadata: Mapping[str, Any] | None = None,
+    overrides: dict[str, list[tuple[str, ParamStore]]] | None = None,
+    max_rtio_underflow_retries: int = 3,
+    max_transitory_error_retries: int = 10,
+) -> HostScanRunResult:
+    """Run ``request`` as a child scan nested under the current parent point.
+
+    This is deliberately only a convenience wrapper. The nested scan still runs
+    through the same ``HostScanSession`` and ``HostScanProgramRunner`` path as a root
+    scan; the helper merely derives the structural child scan site and reuses the
+    caller's request unchanged otherwise.
+
+    ``request.site`` remains meaningful for site-local options such as:
+
+    - ``dataset_prefix`` overrides,
+    - request-specific site metadata.
+
+    Any ``extra_metadata`` passed here is merged on top of the request site's own
+    extra metadata before the child site is created.
+    """
+
+    base_site = request.site
+    child_site = make_child_scan_site(
+        name,
+        segmented=segmented,
+        extra_metadata={
+            **dict(base_site.extra_metadata),
+            **({} if extra_metadata is None else dict(extra_metadata)),
+        },
+    )
+    if base_site.dataset_prefix is not None:
+        child_site = ScanSite(
+            path=child_site.path,
+            parent_path=child_site.parent_path,
+            dataset_prefix=base_site.dataset_prefix,
+            segmented=child_site.segmented,
+            extra_metadata=child_site.extra_metadata,
+        )
+
+    return run_host_scan(
+        owner,
+        fragment,
+        request.with_site(child_site),
+        overrides=overrides,
+        max_rtio_underflow_retries=max_rtio_underflow_retries,
+        max_transitory_error_retries=max_transitory_error_retries,
+    )
 
 
 def _fragment_tree_needs_param_initialisation(fragment: ExpFragment) -> bool:
