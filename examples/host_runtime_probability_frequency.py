@@ -30,9 +30,9 @@ from ndscan.experiment import (
     FloatParam,
     IntChannel,
     OpaqueChannel,
-    RepeatPointSource,
+    RepeatPointPolicy,
     ScanRequest,
-    SinglePointSource,
+    SinglePointPolicy,
     annotations,
     make_fragment_host_scan_exp,
     run_subscan,
@@ -73,7 +73,7 @@ def make_probability_precision_stopper(
     error_threshold: float,
     min_shots: int,
 ):
-    """Return a batch predicate for ``RepeatPointSource``.
+    """Return a batch predicate for ``RepeatPointPolicy``.
 
     The returned closure looks at the full accumulated result series for the nested
     repeat scan and stops once the estimated probability error is below the requested
@@ -176,8 +176,8 @@ class ProbabilityAtTimeFragment(ExpFragment):
         # the scan coordinates entirely.
         repeat_request = ScanRequest(
             axes=(),
-            point_source=RepeatPointSource(
-                SinglePointSource(),
+            point_policy=RepeatPointPolicy(
+                SinglePointPolicy(),
                 stop_predicate=stop_when_precise,
                 min_repeats=24,
                 max_repeats=256,

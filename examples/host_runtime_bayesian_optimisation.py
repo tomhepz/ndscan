@@ -25,7 +25,7 @@ from __future__ import annotations
 import math
 
 from ndscan.experiment import (
-    AskTellOptimiserPointSource,
+    AskTellOptimiserPointPolicy,
     ExecutionPolicy,
     ExpFragment,
     FloatChannel,
@@ -113,7 +113,7 @@ def _make_request(fragment: MultiWellSurfaceFragment) -> ScanRequest:
         batch_mc_samples=32,
         batch_acq_lr=0.08,
         batch_acq_steps=60,
-        max_batches=10,
+        max_batches=20,
         minimise=True,
         min_normalised_distance=0.05,
         exploration_strategy=exploration,
@@ -121,7 +121,7 @@ def _make_request(fragment: MultiWellSurfaceFragment) -> ScanRequest:
 
     return ScanRequest(
         axes=(fragment.x, fragment.y),
-        point_source=AskTellOptimiserPointSource(
+        point_policy=AskTellOptimiserPointPolicy(
             backend,
             extract_scalar_channel_objective("channel_0"),
         ),

@@ -26,7 +26,7 @@ __all__ = [
 _STRUCTURED_KEYS = {
     "site.path",
     "site.parent_path",
-    "scan.point_source",
+    "scan.point_policy",
     "scan.pseudoparams",
     "scan.parameters",
     "scan.fixed_parameters",
@@ -39,6 +39,24 @@ _STRUCTURED_KEYS = {
 
 
 def _decode_dataset_value(key: str, raw: Any) -> Any:
+    if isinstance(raw, np.ndarray):
+        if raw.dtype.kind == "S":
+            return [item.decode("utf-8") for item in raw.tolist()]
+        if raw.dtype.kind == "U":
+            return raw.tolist()
+        if raw.dtype.kind == "O":
+            decoded = []
+            changed = False
+            for item in raw.tolist():
+                if isinstance(item, bytes):
+                    decoded.append(item.decode("utf-8"))
+                    changed = True
+                elif isinstance(item, np.generic):
+                    decoded.append(item.item())
+                    changed = True
+                else:
+                    decoded.append(item)
+            return decoded if changed else raw
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8")
     if isinstance(raw, np.generic):

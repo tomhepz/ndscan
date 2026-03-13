@@ -28,9 +28,9 @@ from ndscan.experiment import (
     FloatParam,
     IntChannel,
     OpaqueChannel,
-    RepeatPointSource,
+    RepeatPointPolicy,
     ScanRequest,
-    SinglePointSource,
+    SinglePointPolicy,
     annotations,
     make_fragment_host_scan_exp,
     run_subscan,
@@ -161,8 +161,8 @@ class ProbabilityAtTimeViaAnalysisFragment(ExpFragment):
         # shots stay as execution policy rather than becoming a pseudoparam.
         repeat_request = ScanRequest(
             axes=(),
-            point_source=RepeatPointSource(
-                SinglePointSource(),
+            point_policy=RepeatPointPolicy(
+                SinglePointPolicy(),
                 stop_predicate=make_online_precision_stopper(
                     error_threshold=0.05,
                     min_shots=24,

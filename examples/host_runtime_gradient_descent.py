@@ -21,7 +21,7 @@ from ndscan.experiment import (
     ExpFragment,
     FloatChannel,
     FloatParam,
-    GradientDescentPointSource,
+    GradientDescentPointPolicy,
     ScanRequest,
     make_fragment_host_scan_exp,
 )
@@ -54,7 +54,7 @@ HostRuntimeGradientDescent = make_fragment_host_scan_exp(
     QuadraticLossFragment,
     lambda fragment: ScanRequest(
         axes=(fragment.x0, fragment.x1, fragment.x2, fragment.x3),
-        point_source=GradientDescentPointSource(
+        point_policy=GradientDescentPointPolicy(
             initial_point=(0.0, 0.0, 0.0, 0.0),
             objective=lambda observation: observation.channel_values["channel_0"],
             probe_steps=(0.1, 0.1, 0.1, 0.1),

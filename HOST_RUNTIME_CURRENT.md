@@ -17,7 +17,7 @@ It is not a design wish-list. It is intended to answer:
 This document only covers the new host runtime:
 
 - [`ndscan/experiment/host_runtime.py`](/home/lab/artiq-files/install/ndscan/ndscan/experiment/host_runtime.py)
-- [`ndscan/experiment/point_source.py`](/home/lab/artiq-files/install/ndscan/ndscan/experiment/point_source.py)
+- [`ndscan/experiment/point_policy.py`](/home/lab/artiq-files/install/ndscan/ndscan/experiment/point_policy.py)
 - [`ndscan/experiment/scan_site.py`](/home/lab/artiq-files/install/ndscan/ndscan/experiment/scan_site.py)
 - [`ndscan/experiment/scan_mapping.py`](/home/lab/artiq-files/install/ndscan/ndscan/experiment/scan_mapping.py)
 
@@ -33,7 +33,7 @@ User-facing description of one scan.
 It currently contains:
 
 - `axes`: a tuple of real `ParamHandle`s and/or logical `ScanVariable`s
-- `point_source`: the point policy
+- `point_policy`: the point policy
 - `site`: the scan-site placement
 - `metadata`: extra user metadata
 - `execution_policy`: runtime scheduling knobs
@@ -58,7 +58,7 @@ coordinator rather than configuring their own snapshot cadence.
 If `PreviewPolicy.path` is omitted, the runtime uses the same RID/class-name naming
 scheme as ARTIQ's final HDF5 file and inserts `.preview` before the `.h5` suffix.
 
-### `PointSource`
+### `PointPolicy`
 
 Point policy for choosing what to run next.
 
@@ -72,18 +72,18 @@ The key interface is:
 Current point-policy families include:
 
 - static scans:
-  - `SinglePointSource`
-  - `CartesianPointSource`
-  - `ZipPointSource`
-  - `ExplicitPointSource`
+  - `SinglePointPolicy`
+  - `CartesianPointPolicy`
+  - `ZipPointPolicy`
+  - `ExplicitPointPolicy`
 - compositional scans:
-  - `ConcatPointSource`
-  - `ProductPointSource`
+  - `ConcatPointPolicy`
+  - `ProductPointPolicy`
 - adaptive / refinement / control:
-  - `RecursiveMidpointPointSource1D`
-  - `UntilConditionPointSource`
-  - `RepeatPointSource`
-  - `GradientDescentPointSource`
+  - `RecursiveMidpointPointPolicy1D`
+  - `UntilConditionPointPolicy`
+  - `RepeatPointPolicy`
+  - `GradientDescentPointPolicy`
 
 ### `ScanVariable`
 
@@ -150,14 +150,14 @@ flowchart TD
     BUILD --> PROG[HostScanProgram]
     PROG --> RUN[HostScanProgramRunner]
 
-    RUN --> SRC[PointSource.next_batch]
+    RUN --> SRC[PointPolicy.next_batch]
     SRC --> EXEC[_HostPointExecutor.execute_point]
     EXEC --> OBS[PointObservation]
     OBS --> WRITE[ScanSiteDatasetWriter.append_observations]
     OBS --> MEM[HostScanRunResult.record_batch]
     MEM --> ANALYSIS[_HostScanAnalysisPlan.observe_batch]
     ANALYSIS --> FEEDBACK[BatchFeedback]
-    FEEDBACK --> SRC2[PointSource.observe_batch]
+    FEEDBACK --> SRC2[PointPolicy.observe_batch]
 ```
 
 ### Batch boundary contract
@@ -183,8 +183,8 @@ That ordering is intentional:
 ### Pseudocode
 
 ```python
-while not point_source.is_finished():
-    batch = point_source.next_batch(batch_limit)
+while not point_policy.is_finished():
+    batch = point_policy.next_batch(batch_limit)
     observations = [executor.execute_point(point) for point in batch]
 
     site_writer.append_observations(observations)
@@ -195,7 +195,7 @@ while not point_source.is_finished():
         run_result,
         site_writer,
     )
-    point_source.observe_batch(
+    point_policy.observe_batch(
         BatchFeedback(
             observations=tuple(observations),
             axis_data=run_result.coordinates,
@@ -298,7 +298,7 @@ This is deliberate:
 
 ## Repeat Policy
 
-Repeated acquisition of the same logical point is now handled by `RepeatPointSource`.
+Repeated acquisition of the same logical point is now handled by `RepeatPointPolicy`.
 
 Policy:
 
@@ -307,7 +307,7 @@ Policy:
 - if a repeat index is scientifically meaningful, it should be modelled explicitly as a
   `ScanVariable`
 
-`RepeatPointSource` repeats one logical point until:
+`RepeatPointPolicy` repeats one logical point until:
 
 - a fixed repeat count is reached, or
 - a stop predicate says the current point is good enough
@@ -359,19 +359,16 @@ Runtime behavior:
 
 These are not blockers, but they are the main likely cleanup targets:
 
-1. `PointSource` is now really a policy/controller.
-   - The name still works, but `PointPolicy` would describe it better.
-
-2. `HostScanProgramRunner` still owns a lot.
+1. `HostScanProgramRunner` still owns a lot.
    - In particular, batch execution, online analysis dispatch, pause handling, and
      final analysis all meet there.
    - A future extraction of an `AnalysisEngine` would likely be worthwhile.
 
-3. Stop conditions are batch-boundary conditions.
+2. Stop conditions are batch-boundary conditions.
    - This is the right execution contract, but it must stay documented because
      adaptive scans can overshoot by one batch.
 
-4. Read-side support does not exist yet.
+3. Read-side support does not exist yet.
    - The writer/schema story is much stronger than the consumer story today.
 
 ## Recommended Near-Term Next Steps
@@ -379,4 +376,4 @@ These are not blockers, but they are the main likely cleanup targets:
 1. Keep the runtime and schema docs current as implementation changes land.
 2. Add a small read-side model for the new scan sites.
 3. Consider extracting online/final analysis execution out of the runner.
-4. Only then decide whether `PointSource` should be renamed or left as-is.
+4. Keep `PointPolicy` as the canonical term in code and docs.

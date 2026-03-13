@@ -7,7 +7,7 @@ try:
     from mock_environment import HasEnvironmentCase
 
     from ndscan.experiment import (
-        AskTellOptimiserPointSource,
+        AskTellOptimiserPointPolicy,
         ExecutionPolicy,
         ExpFragment,
         ExplicitBatchExplorationStrategy,
@@ -215,7 +215,7 @@ if _OPTIMISATION_DEPS_AVAILABLE:
             )
             request = ScanRequest(
                 axes=(fragment.x,),
-                point_source=AskTellOptimiserPointSource(
+                point_policy=AskTellOptimiserPointPolicy(
                     backend,
                     extract_scalar_channel_objective("channel_0"),
                 ),

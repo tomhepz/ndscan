@@ -13,22 +13,24 @@ from mock_environment import HasEnvironmentCase
 
 from ndscan.experiment import (
     AnalysisFeedback,
+    BasePoint,
     BatchFeedback,
-    CartesianPointSource,
-    ConcatPointSource,
+    CartesianPointPolicy,
+    ConcatPointPolicy,
     CustomAnalysis,
     ExecutionPolicy,
     ExpFragment,
-    ExplicitPointSource,
+    ExplicitPointPolicy,
     FloatChannel,
     FloatParam,
-    GradientDescentPointSource,
+    GradientDescentPointPolicy,
     IntChannel,
+    PointPolicy,
     PointObservation,
     PreviewPolicy,
-    ProductPointSource,
-    RecursiveMidpointPointSource1D,
-    RepeatPointSource,
+    ProductPointPolicy,
+    RecursiveMidpointPointPolicy1D,
+    RepeatPointPolicy,
     HostScanSession,
     OnlineFit,
     ParameterMapping,
@@ -36,9 +38,9 @@ from ndscan.experiment import (
     ScanVariable,
     ScanSite,
     RestartKernelTransitoryError,
-    SinglePointSource,
-    UntilConditionPointSource,
-    ZipPointSource,
+    SinglePointPolicy,
+    UntilConditionPointPolicy,
+    ZipPointPolicy,
     annotations,
     kernel,
     make_child_scan_site,
@@ -48,30 +50,30 @@ from ndscan.experiment import (
 from ndscan.utils import FIT_OBJECTS
 
 
-class PointSourceTest(unittest.TestCase):
-    def test_cartesian_point_source(self):
-        source = CartesianPointSource([[0, 1], [10, 20]])
+class PointPolicyTest(unittest.TestCase):
+    def test_cartesian_point_policy(self):
+        source = CartesianPointPolicy([[0, 1], [10, 20]])
         self.assertEqual(
             [point.axis_values for point in source],
             [(0, 10), (0, 20), (1, 10), (1, 20)],
         )
 
-    def test_zip_point_source(self):
-        source = ZipPointSource([[0, 1, 2], [10, 11, 12]])
+    def test_zip_point_policy(self):
+        source = ZipPointPolicy([[0, 1, 2], [10, 11, 12]])
         self.assertEqual(
             [point.axis_values for point in source],
             [(0, 10), (1, 11), (2, 12)],
         )
 
-    def test_explicit_point_source(self):
-        source = ExplicitPointSource(2, [(0, 10), (3, 13)])
+    def test_explicit_point_policy(self):
+        source = ExplicitPointPolicy(2, [(0, 10), (3, 13)])
         self.assertEqual(
             [point.axis_values for point in source],
             [(0, 10), (3, 13)],
         )
 
-    def test_explicit_point_source_next_batch(self):
-        source = ExplicitPointSource(2, [(0, 10), (3, 13), (4, 14)])
+    def test_explicit_point_policy_next_batch(self):
+        source = ExplicitPointPolicy(2, [(0, 10), (3, 13), (4, 14)])
         self.assertEqual(
             [point.axis_values for point in source.next_batch(2)],
             [(0, 10), (3, 13)],
@@ -83,11 +85,11 @@ class PointSourceTest(unittest.TestCase):
         )
         self.assertTrue(source.is_finished())
 
-    def test_concat_point_source_runs_children_in_sequence(self):
-        source = ConcatPointSource(
+    def test_concat_point_policy_runs_children_in_sequence(self):
+        source = ConcatPointPolicy(
             [
-                ExplicitPointSource(1, [(0,), (1,)]),
-                ExplicitPointSource(1, [(10,), (11,)]),
+                ExplicitPointPolicy(1, [(0,), (1,)]),
+                ExplicitPointPolicy(1, [(10,), (11,)]),
             ]
         )
         self.assertEqual(
@@ -99,11 +101,11 @@ class PointSourceTest(unittest.TestCase):
             "explicit",
         )
 
-    def test_product_point_source_combines_child_axes(self):
-        source = ProductPointSource(
+    def test_product_point_policy_combines_child_axes(self):
+        source = ProductPointPolicy(
             [
-                ExplicitPointSource(1, [(0,), (1,)]),
-                ExplicitPointSource(2, [(10, 100), (20, 200)]),
+                ExplicitPointPolicy(1, [(0,), (1,)]),
+                ExplicitPointPolicy(2, [(10, 100), (20, 200)]),
             ]
         )
         self.assertEqual(
@@ -116,16 +118,16 @@ class PointSourceTest(unittest.TestCase):
             ],
         )
 
-    def test_recursive_midpoint_point_source_refines_breadth_first(self):
-        source = RecursiveMidpointPointSource1D(0.0, 8.0, max_depth=3)
+    def test_recursive_midpoint_point_policy_refines_breadth_first(self):
+        source = RecursiveMidpointPointPolicy1D(0.0, 8.0, max_depth=3)
         self.assertEqual(
             [point.axis_values for point in source],
             [(0.0,), (8.0,), (4.0,), (2.0,), (6.0,), (1.0,), (3.0,), (5.0,), (7.0,)],
         )
 
-    def test_until_condition_point_source_stops_after_predicate_matches(self):
-        source = UntilConditionPointSource(
-            ExplicitPointSource(1, [(0,), (1,), (2,), (3,)]),
+    def test_until_condition_point_policy_stops_after_predicate_matches(self):
+        source = UntilConditionPointPolicy(
+            ExplicitPointPolicy(1, [(0,), (1,), (2,), (3,)]),
             lambda observation: observation.channel_values["channel_0"] >= 30,
             predicate_description="channel_0 >= 30",
         )
@@ -154,9 +156,9 @@ class PointSourceTest(unittest.TestCase):
         self.assertTrue(source.is_finished())
         self.assertEqual(source.next_batch(1), [])
 
-    def test_until_condition_point_source_can_stop_from_batch_feedback(self):
-        source = UntilConditionPointSource(
-            ExplicitPointSource(1, [(0,), (1,), (2,), (3,)]),
+    def test_until_condition_point_policy_can_stop_from_batch_feedback(self):
+        source = UntilConditionPointPolicy(
+            ExplicitPointPolicy(1, [(0,), (1,), (2,), (3,)]),
             lambda feedback: feedback.online_analysis_results["fit"]["error"] < 0.1,
             predicate_description="fit error < 0.1",
             min_observations=2,
@@ -185,9 +187,9 @@ class PointSourceTest(unittest.TestCase):
         )
         self.assertTrue(source.is_finished())
 
-    def test_repeat_point_source_repeats_each_logical_point_fixed_times(self):
-        source = RepeatPointSource(
-            ExplicitPointSource(1, [(0,), (1,)]),
+    def test_repeat_point_policy_repeats_each_logical_point_fixed_times(self):
+        source = RepeatPointPolicy(
+            ExplicitPointPolicy(1, [(0,), (1,)]),
             repeats=3,
         )
 
@@ -217,9 +219,9 @@ class PointSourceTest(unittest.TestCase):
             [(0,), (0,), (0,), (1,), (1,), (1,)],
         )
 
-    def test_repeat_point_source_can_stop_current_point_from_batch_feedback(self):
-        source = RepeatPointSource(
-            ExplicitPointSource(1, [(5.0,)]),
+    def test_repeat_point_policy_can_stop_current_point_from_batch_feedback(self):
+        source = RepeatPointPolicy(
+            ExplicitPointPolicy(1, [(5.0,)]),
             stop_predicate=lambda feedback: len(feedback.result_data["channel_0"]) >= 3,
             min_repeats=1,
             max_repeats=5,
@@ -378,7 +380,7 @@ class RestartOnceFragment(ExpFragment):
         self.result.push(value + 1.0)
 
 
-class RecordingBatchPointSource(ExplicitPointSource):
+class RecordingBatchPointPolicy(ExplicitPointPolicy):
     """Explicit source that records how the runner consumes batched points."""
 
     def __init__(
@@ -387,9 +389,13 @@ class RecordingBatchPointSource(ExplicitPointSource):
         points,
         *,
         preferred_batch_size=None,
+        point_metadata=None,
     ):
         super().__init__(axis_count, points)
         self._preferred_batch_size = preferred_batch_size
+        self._point_metadata = (
+            None if point_metadata is None else [dict(metadata) for metadata in point_metadata]
+        )
         self.requested_batch_limits = []
         self.observed_batches = []
         self.observed_online_analysis_results = []
@@ -398,7 +404,17 @@ class RecordingBatchPointSource(ExplicitPointSource):
 
     def next_batch(self, max_points: int):
         self.requested_batch_limits.append(max_points)
-        return super().next_batch(max_points)
+        batch = super().next_batch(max_points)
+        if self._point_metadata is None:
+            return batch
+        return [
+            BasePoint(
+                index=point.index,
+                axis_values=point.axis_values,
+                metadata=self._point_metadata[point.index],
+            )
+            for point in batch
+        ]
 
     def preferred_batch_size(self, default: int) -> int:
         if self._preferred_batch_size is None:
@@ -1114,14 +1130,14 @@ class HostRuntimeCase(HasEnvironmentCase):
 
     def test_host_scan_session_executes_and_observes_points_in_batches(self):
         fragment = self.create(CountingLifecycleFragment, [])
-        point_source = RecordingBatchPointSource(
+        point_policy = RecordingBatchPointPolicy(
             1,
             [(0.0,), (1.0,), (2.0,), (3.0,), (4.0,)],
             preferred_batch_size=2,
         )
         request = ScanRequest(
             axes=(fragment.value,),
-            point_source=point_source,
+            point_policy=point_policy,
             execution_policy=ExecutionPolicy(max_points_per_batch=4),
         )
 
@@ -1129,14 +1145,14 @@ class HostRuntimeCase(HasEnvironmentCase):
         session.run()
 
         prefix = "ndscan.rid_0.site.root."
-        self.assertEqual(point_source.requested_batch_limits, [2, 2, 2])
-        self.assertEqual(point_source.observed_batches, [[0.0, 1.0], [2.0, 3.0], [4.0]])
+        self.assertEqual(point_policy.requested_batch_limits, [2, 2, 2])
+        self.assertEqual(point_policy.observed_batches, [[0.0, 1.0], [2.0, 3.0], [4.0]])
         self.assertEqual(
-            point_source.observed_online_analysis_results,
+            point_policy.observed_online_analysis_results,
             [{}, {}, {}],
         )
         self.assertEqual(
-            point_source.observed_result_lengths,
+            point_policy.observed_result_lengths,
             [
                 {"result": 2},
                 {"result": 4},
@@ -1149,16 +1165,41 @@ class HostRuntimeCase(HasEnvironmentCase):
         self.assertEqual(self.d(prefix, "points.param_0"), [0.0, 1.0, 2.0, 3.0, 4.0])
         self.assertEqual(self.d(prefix, "points.channel_0"), [1.0, 2.0, 3.0, 4.0, 5.0])
 
+    def test_host_scan_session_persists_point_metadata_streams(self):
+        fragment = self.create(CountingLifecycleFragment, [])
+        point_policy = RecordingBatchPointPolicy(
+            1,
+            [(0.0,), (1.0,), (2.0,)],
+            point_metadata=[
+                {"decision_source": "seed"},
+                {"decision_source": "bo"},
+                {"decision_source": "explore"},
+            ],
+        )
+        request = ScanRequest(
+            axes=(fragment.value,),
+            point_policy=point_policy,
+        )
+
+        session = HostScanSession(fragment, fragment, request)
+        session.run()
+
+        prefix = "ndscan.rid_0.site.root."
+        self.assertEqual(
+            self.d(prefix, "points.metadata.decision_source"),
+            ["seed", "bo", "explore"],
+        )
+
     def test_host_scan_session_flushes_completed_batch_before_pause(self):
         fragment = self.create(CountingLifecycleFragment, [])
-        point_source = RecordingBatchPointSource(
+        point_policy = RecordingBatchPointPolicy(
             1,
             [(0.0,), (1.0,), (2.0,), (3.0,)],
             preferred_batch_size=2,
         )
         request = ScanRequest(
             axes=(fragment.value,),
-            point_source=point_source,
+            point_policy=point_policy,
             execution_policy=ExecutionPolicy(max_points_per_batch=2),
         )
         self.scheduler.num_check_pause_calls_until_termination = 1
@@ -1168,7 +1209,7 @@ class HostRuntimeCase(HasEnvironmentCase):
             session.run()
 
         prefix = "ndscan.rid_0.site.root."
-        self.assertEqual(point_source.observed_batches, [[0.0, 1.0]])
+        self.assertEqual(point_policy.observed_batches, [[0.0, 1.0]])
         self.assertEqual(fragment.host_setup_calls, 1)
         self.assertEqual(fragment.host_cleanup_calls, 1)
         self.assertEqual(self.scheduler.num_check_pause_calls, 1)
@@ -1178,13 +1219,13 @@ class HostRuntimeCase(HasEnvironmentCase):
 
     def test_host_scan_session_flushes_partial_batch_before_restarting(self):
         fragment = self.create(RestartOnceFragment, [])
-        point_source = RecordingBatchPointSource(
+        point_policy = RecordingBatchPointPolicy(
             1,
             [(0.0,), (1.0,), (2.0,), (3.0,)],
         )
         request = ScanRequest(
             axes=(fragment.value,),
-            point_source=point_source,
+            point_policy=point_policy,
             execution_policy=ExecutionPolicy(max_points_per_batch=3),
         )
 
@@ -1192,8 +1233,8 @@ class HostRuntimeCase(HasEnvironmentCase):
         session.run()
 
         prefix = "ndscan.rid_0.site.root."
-        self.assertEqual(point_source.requested_batch_limits, [3, 3])
-        self.assertEqual(point_source.observed_batches, [[0.0, 1.0], [2.0], [3.0]])
+        self.assertEqual(point_policy.requested_batch_limits, [3, 3])
+        self.assertEqual(point_policy.observed_batches, [[0.0, 1.0], [2.0], [3.0]])
         self.assertEqual(fragment.host_setup_calls, 3)
         self.assertEqual(fragment.host_cleanup_calls, 3)
         self.assertEqual(self.d(prefix, "points.param_0"), [0.0, 1.0, 2.0, 3.0])
@@ -1205,7 +1246,7 @@ class HostRuntimeCase(HasEnvironmentCase):
             preview_path = os.path.join(tmpdir, "preview.h5")
             request = ScanRequest(
                 axes=(fragment.value,),
-                point_source=ExplicitPointSource(1, [(0.0,), (1.0,), (2.0,)]),
+                point_policy=ExplicitPointPolicy(1, [(0.0,), (1.0,), (2.0,)]),
                 execution_policy=ExecutionPolicy(
                     max_points_per_batch=1,
                     preview_policy=PreviewPolicy(
@@ -1364,14 +1405,14 @@ class HostRuntimeCase(HasEnvironmentCase):
 
     def test_host_scan_session_executes_online_analyses_at_batch_boundaries(self):
         fragment = self.create(OnlineGaussianFragment, [])
-        point_source = RecordingBatchPointSource(
+        point_policy = RecordingBatchPointPolicy(
             1,
             [(-2.0,), (-1.0,), (0.0,), (1.0,), (2.0,), (3.0,), (4.0,)],
             preferred_batch_size=4,
         )
         request = ScanRequest(
             axes=(fragment.x,),
-            point_source=point_source,
+            point_policy=point_policy,
             execution_policy=ExecutionPolicy(max_points_per_batch=4),
         )
 
@@ -1382,30 +1423,30 @@ class HostRuntimeCase(HasEnvironmentCase):
         analysis_name = "fit_gaussian_channel_0"
         self.assertIn(analysis_name, self.j(prefix, "analysis.online"))
         self.assertIn(analysis_name, result.online_analysis_results)
-        self.assertIn(analysis_name, point_source.observed_online_analysis_results[-1])
+        self.assertIn(analysis_name, point_policy.observed_online_analysis_results[-1])
 
         online_result = self.j(prefix, "analysis.online_result." + analysis_name)
         self.assertAlmostEqual(online_result["x0"], 1.0, places=3)
         self.assertAlmostEqual(online_result["sigma"], 1.2, places=3)
         self.assertEqual(
             self.j(prefix, "analysis.online_result." + analysis_name),
-            point_source.observed_online_analysis_results[-1][analysis_name],
+            point_policy.observed_online_analysis_results[-1][analysis_name],
         )
         self.assertEqual(
-            point_source.observed_online_analysis_annotations[-1][analysis_name],
+            point_policy.observed_online_analysis_annotations[-1][analysis_name],
             [],
         )
 
     def test_host_scan_session_publishes_online_analysis_annotations_and_feedback(self):
         fragment = self.create(OnlineAnnotatedFragment, [])
-        point_source = RecordingBatchPointSource(
+        point_policy = RecordingBatchPointPolicy(
             1,
             [(0.0,), (1.0,), (2.0,)],
             preferred_batch_size=2,
         )
         request = ScanRequest(
             axes=(fragment.x,),
-            point_source=point_source,
+            point_policy=point_policy,
             execution_policy=ExecutionPolicy(max_points_per_batch=2),
         )
 
@@ -1431,18 +1472,18 @@ class HostRuntimeCase(HasEnvironmentCase):
             online_annotations,
         )
         self.assertEqual(
-            point_source.observed_online_analysis_results[-1]["running_summary"],
+            point_policy.observed_online_analysis_results[-1]["running_summary"],
             online_result,
         )
         self.assertEqual(
-            point_source.observed_online_analysis_annotations[-1]["running_summary"],
+            point_policy.observed_online_analysis_annotations[-1]["running_summary"],
             online_annotations,
         )
         self.assertEqual(online_annotations[0]["kind"], "curve")
 
-    def test_host_scan_session_supports_gradient_descent_point_source(self):
+    def test_host_scan_session_supports_gradient_descent_point_policy(self):
         fragment = self.create(FourDimQuadraticFragment, [])
-        point_source = GradientDescentPointSource(
+        point_policy = GradientDescentPointPolicy(
             initial_point=(0.0, 0.0, 0.0, 0.0),
             objective=lambda observation: observation.channel_values["channel_0"],
             probe_steps=(0.1, 0.1, 0.1, 0.1),
@@ -1453,7 +1494,7 @@ class HostRuntimeCase(HasEnvironmentCase):
         )
         request = ScanRequest(
             axes=(fragment.x0, fragment.x1, fragment.x2, fragment.x3),
-            point_source=point_source,
+            point_policy=point_policy,
             execution_policy=ExecutionPolicy(max_points_per_batch=9),
         )
 
@@ -1462,9 +1503,9 @@ class HostRuntimeCase(HasEnvironmentCase):
 
         prefix = result.site_prefix
         self.assertEqual(self.d(prefix, "state.num_points"), 18)
-        self.assertAlmostEqual(point_source.best_value, 0.0, places=9)
+        self.assertAlmostEqual(point_policy.best_value, 0.0, places=9)
         self.assertEqual(
-            tuple(round(value, 6) for value in point_source.best_point),
+            tuple(round(value, 6) for value in point_policy.best_point),
             (1.0, -2.0, 0.5, 3.0),
         )
         self.assertAlmostEqual(
@@ -1517,12 +1558,12 @@ class HostRuntimeCase(HasEnvironmentCase):
             [11.0, 22.0, 33.0],
         )
 
-    def test_host_scan_session_respects_until_condition_point_source(self):
+    def test_host_scan_session_respects_until_condition_point_policy(self):
         fragment = self.create(PlainAddOneFragment, [])
         request = ScanRequest(
             axes=(fragment.value,),
-            point_source=UntilConditionPointSource(
-                ExplicitPointSource(1, [(0.0,), (1.0,), (2.0,), (3.0,)]),
+            point_policy=UntilConditionPointPolicy(
+                ExplicitPointPolicy(1, [(0.0,), (1.0,), (2.0,), (3.0,)]),
                 lambda observation: observation.channel_values["channel_0"] >= 3.0,
                 predicate_description="channel_0 >= 3.0",
             ),
@@ -1539,8 +1580,8 @@ class HostRuntimeCase(HasEnvironmentCase):
         fragment = self.create(SequentialHitFragment, [])
         request = ScanRequest(
             axes=(),
-            point_source=RepeatPointSource(
-                SinglePointSource(),
+            point_policy=RepeatPointPolicy(
+                SinglePointPolicy(),
                 stop_predicate=lambda feedback: len(feedback.result_data[fragment.hit]) >= 3,
                 min_repeats=1,
                 max_repeats=5,

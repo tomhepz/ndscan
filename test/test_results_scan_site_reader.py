@@ -7,6 +7,7 @@ from mock_environment import ExpFragmentCase
 
 from ndscan.experiment import (
     ExpFragment,
+    ExplicitPointPolicy,
     FloatChannel,
     FloatParam,
     ParameterMapping,
@@ -25,6 +26,15 @@ class PlainAddOneFragment(ExpFragment):
 
     def run_once(self):
         self.result.push(self.value.get() + 1.0)
+
+
+class MetadataPolicyFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("value", FloatParam, "value", 0.0)
+        self.setattr_result("result", FloatChannel)
+
+    def run_once(self):
+        self.result.push(self.value.get())
 
 
 class PhysicalDriveFragment(ExpFragment):
@@ -129,6 +139,40 @@ class ScanSiteReaderCase(ExpFragmentCase):
         self.assertTrue(child_site.segmented)
         self.assertEqual(list(child_site.point_data["param_0"]), [10.0, 11.0])
         self.assertEqual(list(child_site.point_data["channel_0"]), [11.0, 12.0])
+
+    def test_reads_string_point_metadata_streams(self):
+        fragment = self.create(MetadataPolicyFragment)
+        request = ScanRequest(
+            axes=(fragment.value,),
+            point_policy=ExplicitPointPolicy(1, [(0.0,), (1.0,), (2.0,)]),
+        )
+        session = HostScanSession(fragment, fragment, request)
+        original_next_batch = request.point_policy.next_batch
+
+        def next_batch(max_points):
+            batch = original_next_batch(max_points)
+            labels = ["seed", "bo", "explore"]
+            return [
+                type(point)(
+                    index=point.index,
+                    axis_values=point.axis_values,
+                    metadata={"decision_source": labels[point.index]},
+                )
+                for point in batch
+            ]
+
+        request.point_policy.next_batch = next_batch
+        session.run()
+
+        with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
+            self._write_snapshot(fragment, tmp.name)
+            snapshot = read_host_runtime_snapshot(tmp.name)
+
+        site = snapshot.get_site(())
+        self.assertEqual(
+            site.point_data["metadata.decision_source"],
+            ["seed", "bo", "explore"],
+        )
 
     def test_exposes_child_site_segments_for_parent_points(self):
         parent = self.create(NestedChildScanParent)

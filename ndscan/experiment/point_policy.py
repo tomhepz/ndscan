@@ -1,4 +1,4 @@
-"""Point selection primitives for the new host-only runtime.
+"""Point selection primitives for the host runtime.
 
 The host runtime deliberately separates three concerns:
 
@@ -29,18 +29,19 @@ __all__ = [
     "BasePoint",
     "BatchFeedback",
     "OptimiserObservation",
-    "PointSource",
-    "AskTellOptimiserPointSource",
-    "SinglePointSource",
-    "CartesianPointSource",
-    "ZipPointSource",
-    "ExplicitPointSource",
-    "ConcatPointSource",
-    "ProductPointSource",
-    "RecursiveMidpointPointSource1D",
-    "RepeatPointSource",
-    "UntilConditionPointSource",
-    "GradientDescentPointSource",
+    "OptimiserSuggestion",
+    "PointPolicy",
+    "AskTellOptimiserPointPolicy",
+    "SinglePointPolicy",
+    "CartesianPointPolicy",
+    "ZipPointPolicy",
+    "ExplicitPointPolicy",
+    "ConcatPointPolicy",
+    "ProductPointPolicy",
+    "RecursiveMidpointPointPolicy1D",
+    "RepeatPointPolicy",
+    "UntilConditionPointPolicy",
+    "GradientDescentPointPolicy",
 ]
 
 
@@ -55,6 +56,7 @@ class BasePoint:
 
     index: int
     axis_values: tuple[Any, ...]
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -117,7 +119,21 @@ class OptimiserObservation:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
-class PointSource:
+@dataclass(frozen=True)
+class OptimiserSuggestion:
+    """One proposed optimiser point with optional point-level metadata.
+
+    Ask/tell backends can use this to annotate suggested points with provenance such
+    as ``decision_source="seed"`` or ``decision_source="explore"``. The runtime then
+    persists those labels alongside the raw point data so offline readers can
+    reconstruct how the optimiser explored the space.
+    """
+
+    point: tuple[float, ...]
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+class PointPolicy:
     """Base class for host-runtime point policies.
 
     The interface is intentionally small:
@@ -188,10 +204,10 @@ class PointSource:
         raise NotImplementedError
 
 
-class AskTellOptimiserPointSource(PointSource):
+class AskTellOptimiserPointPolicy(PointPolicy):
     """Wrap an ask/tell optimiser backend as a host-runtime point policy.
 
-    The point source itself stays thin:
+    The point policy itself stays thin:
 
     - the backend owns optimiser state and point suggestion,
     - the wrapper translates completed runtime observations into scalar optimiser
@@ -225,22 +241,31 @@ class AskTellOptimiserPointSource(PointSource):
             raise ValueError("max_points must be positive")
         if self._pending_points is not None:
             raise RuntimeError(
-                "AskTellOptimiserPointSource cannot request a new batch before the "
+                "AskTellOptimiserPointPolicy cannot request a new batch before the "
                 "previous batch has been observed"
             )
 
-        pending_points = [tuple(point) for point in self._backend.suggest(max_points)]
-        if not pending_points:
+        pending_suggestions = tuple(
+            self._normalise_suggestion(suggestion)
+            for suggestion in self._backend.suggest(max_points)
+        )
+        if not pending_suggestions:
             if self._backend.is_finished():
                 return []
             raise RuntimeError(
                 f"{type(self._backend).__name__} returned no points before finishing"
             )
 
-        self._pending_points = pending_points
+        self._pending_points = [suggestion.point for suggestion in pending_suggestions]
         batch = []
-        for point in pending_points:
-            batch.append(BasePoint(index=self._next_index, axis_values=point))
+        for suggestion in pending_suggestions:
+            batch.append(
+                BasePoint(
+                    index=self._next_index,
+                    axis_values=suggestion.point,
+                    metadata=dict(suggestion.metadata),
+                )
+            )
             self._next_index += 1
         return batch
 
@@ -256,11 +281,11 @@ class AskTellOptimiserPointSource(PointSource):
     def observe_batch(self, feedback: BatchFeedback) -> None:
         if self._pending_points is None:
             raise RuntimeError(
-                "Received batch feedback for AskTellOptimiserPointSource before requesting a batch"
+                "Received batch feedback for AskTellOptimiserPointPolicy before requesting a batch"
             )
         if len(feedback.observations) != len(self._pending_points):
             raise ValueError(
-                "AskTellOptimiserPointSource received the wrong number of observations "
+                "AskTellOptimiserPointPolicy received the wrong number of observations "
                 f"for its batch: expected {len(self._pending_points)}, got "
                 f"{len(feedback.observations)}"
             )
@@ -278,15 +303,25 @@ class AskTellOptimiserPointSource(PointSource):
         self._pending_points = None
 
     def describe(self) -> dict[str, Any]:
-        return {
+        description = {
             "kind": "ask_tell_optimiser",
             "axis_count": self.axis_count,
             "backend": self._backend.describe(),
         }
+        extractor_describe = getattr(self._extract_observation, "describe", None)
+        if extractor_describe is not None:
+            description["observation_extractor"] = extractor_describe()
+        return description
+
+    @staticmethod
+    def _normalise_suggestion(suggestion: Any) -> OptimiserSuggestion:
+        if isinstance(suggestion, OptimiserSuggestion):
+            return suggestion
+        return OptimiserSuggestion(point=tuple(float(value) for value in suggestion))
 
 
-class _FinitePointSource(PointSource):
-    """Base class for finite point sources backed by a fixed list of points."""
+class _FinitePointPolicy(PointPolicy):
+    """Base class for finite point policies backed by a fixed list of points."""
 
     def __init__(self, axis_count: int, points: Sequence[Sequence[Any]]):
         self._axis_count = axis_count
@@ -317,8 +352,8 @@ class _FinitePointSource(PointSource):
         return self._next_index >= len(self._points)
 
 
-class SinglePointSource(_FinitePointSource):
-    """Point source for a single empty point.
+class SinglePointPolicy(_FinitePointPolicy):
+    """Point policy for a single empty point.
 
     This is the host runtime's equivalent of "run once with no scanned axes". Keeping
     the no-axes case as a point policy keeps the runtime model uniform.
@@ -331,7 +366,7 @@ class SinglePointSource(_FinitePointSource):
         return {"kind": "single"}
 
 
-class CartesianPointSource(_FinitePointSource):
+class CartesianPointPolicy(_FinitePointPolicy):
     """Yield the Cartesian product of per-axis value lists."""
 
     def __init__(self, axis_values: Sequence[Sequence[Any]]):
@@ -346,7 +381,7 @@ class CartesianPointSource(_FinitePointSource):
         }
 
 
-class ZipPointSource(_FinitePointSource):
+class ZipPointPolicy(_FinitePointPolicy):
     """Yield points by zipping per-axis value lists together.
 
     This is the simplest non-Cartesian strategy and directly covers the common case of
@@ -370,7 +405,7 @@ class ZipPointSource(_FinitePointSource):
         }
 
 
-class ExplicitPointSource(_FinitePointSource):
+class ExplicitPointPolicy(_FinitePointPolicy):
     """Yield a user-specified list of full points."""
 
     def __init__(self, axis_count: int, points: Iterable[Sequence[Any]]):
@@ -385,8 +420,8 @@ class ExplicitPointSource(_FinitePointSource):
         }
 
 
-class ConcatPointSource(PointSource):
-    """Run a sequence of point sources one after another.
+class ConcatPointPolicy(PointPolicy):
+    """Run a sequence of point policies one after another.
 
     This is the simplest composition primitive for staged scans such as:
 
@@ -399,16 +434,16 @@ class ConcatPointSource(PointSource):
     therefore treat point indices as informational rather than as strict local ids.
     """
 
-    def __init__(self, sources: Sequence[PointSource]):
+    def __init__(self, sources: Sequence[PointPolicy]):
         if not sources:
-            raise ValueError("ConcatPointSource requires at least one child source")
+            raise ValueError("ConcatPointPolicy requires at least one child policy")
         self._sources = list(sources)
         axis_counts = {source.axis_count for source in self._sources}
         if len(axis_counts) != 1:
-            raise ValueError("All concatenated point sources must have the same axis count")
+            raise ValueError("All concatenated point policies must have the same axis count")
         self._source_index = 0
         self._next_index = 0
-        self._pending_observation_sources = deque[PointSource]()
+        self._pending_observation_sources = deque[PointPolicy]()
 
     @property
     def axis_count(self) -> int:
@@ -460,7 +495,7 @@ class ConcatPointSource(PointSource):
 
     def observe(self, observation: Any) -> None:
         if not self._pending_observation_sources:
-            raise RuntimeError("Received observation for ConcatPointSource without a point")
+            raise RuntimeError("Received observation for ConcatPointPolicy without a point")
         self._pending_observation_sources.popleft().observe(observation)
 
     def observe_batch(self, feedback: BatchFeedback) -> None:
@@ -471,7 +506,7 @@ class ConcatPointSource(PointSource):
         while pending:
             if not self._pending_observation_sources:
                 raise RuntimeError(
-                    "Received batch feedback for ConcatPointSource without matching points"
+                    "Received batch feedback for ConcatPointPolicy without matching points"
                 )
             source = self._pending_observation_sources.popleft()
             source_observations = [pending.pop(0)]
@@ -498,8 +533,8 @@ class ConcatPointSource(PointSource):
         }
 
 
-class ProductPointSource(_FinitePointSource):
-    """Cartesian product of already-composed child point sources.
+class ProductPointPolicy(_FinitePointPolicy):
+    """Cartesian product of already-composed child point policies.
 
     This combinator is intended for finite, non-adaptive child policies. It eagerly
     materialises each child source once during construction and then forms the Cartesian
@@ -510,9 +545,9 @@ class ProductPointSource(_FinitePointSource):
     smaller adaptive children.
     """
 
-    def __init__(self, sources: Sequence[PointSource]):
+    def __init__(self, sources: Sequence[PointPolicy]):
         if not sources:
-            raise ValueError("ProductPointSource requires at least one child source")
+            raise ValueError("ProductPointPolicy requires at least one child policy")
         self._sources = list(sources)
         materialised = [list(source) for source in self._sources]
         axis_count = sum(source.axis_count for source in self._sources)
@@ -530,7 +565,7 @@ class ProductPointSource(_FinitePointSource):
         }
 
 
-class RepeatPointSource(PointSource):
+class RepeatPointPolicy(PointPolicy):
     """Repeat each logical point from an inner source before advancing.
 
     This wrapper is the intended replacement for "dummy repeat axes" when repetition is
@@ -549,7 +584,7 @@ class RepeatPointSource(PointSource):
 
     def __init__(
         self,
-        inner: PointSource,
+        inner: PointPolicy,
         *,
         repeats: int | None = None,
         stop_predicate: Callable[[BatchFeedback], bool] | None = None,
@@ -568,7 +603,7 @@ class RepeatPointSource(PointSource):
             raise ValueError("min_repeats must be at least 1")
         if max_repeats is None and stop_predicate is None:
             raise ValueError(
-                "RepeatPointSource requires either a fixed repeat count or a stop predicate"
+                "RepeatPointPolicy requires either a fixed repeat count or a stop predicate"
             )
         if max_repeats is not None and max_repeats < min_repeats:
             raise ValueError("max_repeats must be at least min_repeats")
@@ -614,7 +649,7 @@ class RepeatPointSource(PointSource):
             remaining = min(remaining, self._max_repeats - self._current_repeats)
         if remaining <= 0:
             raise RuntimeError(
-                "RepeatPointSource reached a non-positive remaining repeat count"
+                "RepeatPointPolicy reached a non-positive remaining repeat count"
             )
 
         self._pending_batch_size = remaining
@@ -637,11 +672,11 @@ class RepeatPointSource(PointSource):
     def observe_batch(self, feedback: BatchFeedback) -> None:
         if self._current_point is None or self._pending_batch_size == 0:
             raise RuntimeError(
-                "Received batch feedback for RepeatPointSource before requesting a batch"
+                "Received batch feedback for RepeatPointPolicy before requesting a batch"
             )
         if len(feedback.observations) != self._pending_batch_size:
             raise ValueError(
-                "RepeatPointSource received the wrong number of observations for its "
+                "RepeatPointPolicy received the wrong number of observations for its "
                 f"batch: expected {self._pending_batch_size}, got {len(feedback.observations)}"
             )
 
@@ -709,7 +744,7 @@ class RepeatPointSource(PointSource):
         return False
 
 
-class RecursiveMidpointPointSource1D(_FinitePointSource):
+class RecursiveMidpointPointPolicy1D(_FinitePointPolicy):
     """Recursively refine a closed 1D interval by inserting midpoints.
 
     The policy is deliberately simple and deterministic:
@@ -783,8 +818,8 @@ class RecursiveMidpointPointSource1D(_FinitePointSource):
         }
 
 
-class UntilConditionPointSource(PointSource):
-    """Stop an inner point source once an observation predicate becomes true.
+class UntilConditionPointPolicy(PointPolicy):
+    """Stop an inner point policy once an observation predicate becomes true.
 
     This is the minimal early-exit wrapper. It is intentionally generic: callers supply
     a predicate over completed observations, which makes it possible to use the same
@@ -801,7 +836,7 @@ class UntilConditionPointSource(PointSource):
 
     def __init__(
         self,
-        inner: PointSource,
+        inner: PointPolicy,
         predicate: Callable[[Any], bool],
         *,
         predicate_description: str = "custom",
@@ -863,7 +898,7 @@ class UntilConditionPointSource(PointSource):
         }
 
 
-class GradientDescentPointSource(PointSource):
+class GradientDescentPointPolicy(PointPolicy):
     """Adaptive finite-difference gradient descent over a fixed parameter set.
 
     The policy emits one optimisation batch at a time:
@@ -905,7 +940,7 @@ class GradientDescentPointSource(PointSource):
         self._current_point = [float(value) for value in initial_point]
         self._axis_count = len(self._current_point)
         if self._axis_count == 0:
-            raise ValueError("GradientDescentPointSource requires at least one axis")
+            raise ValueError("GradientDescentPointPolicy requires at least one axis")
 
         if isinstance(probe_steps, (int, float)):
             self._probe_steps = [float(probe_steps)] * self._axis_count
@@ -960,7 +995,7 @@ class GradientDescentPointSource(PointSource):
         required = self._required_batch_size()
         if max_points < required:
             raise ValueError(
-                "GradientDescentPointSource requires batches of at least "
+                "GradientDescentPointPolicy requires batches of at least "
                 f"{required} points, got {max_points}"
             )
         if self._pending_batch_points is None:
@@ -977,11 +1012,11 @@ class GradientDescentPointSource(PointSource):
     def observe_batch(self, feedback: BatchFeedback) -> None:
         if self._pending_batch_points is None:
             raise RuntimeError(
-                "Received batch feedback for GradientDescentPointSource before requesting a batch"
+                "Received batch feedback for GradientDescentPointPolicy before requesting a batch"
             )
         if len(feedback.observations) != len(self._pending_batch_points):
             raise ValueError(
-                "GradientDescentPointSource received the wrong number of observations "
+                "GradientDescentPointPolicy received the wrong number of observations "
                 f"for its batch: expected {len(self._pending_batch_points)}, got "
                 f"{len(feedback.observations)}"
             )

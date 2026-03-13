@@ -24,7 +24,7 @@ from . import (
     fragment,
     host_runtime,
     parameters,
-    point_source,
+    point_policy,
     result_channels,
     scan_mapping,
     scan_generator,
@@ -37,7 +37,7 @@ from .entry_point import *
 from .fragment import *
 from .host_runtime import *
 from .parameters import *
-from .point_source import *
+from .point_policy import *
 from .result_channels import *
 from .scan_mapping import *
 from .scan_generator import *
@@ -52,7 +52,7 @@ __all__.extend(entry_point.__all__)
 __all__.extend(fragment.__all__)
 __all__.extend(host_runtime.__all__)
 __all__.extend(parameters.__all__)
-__all__.extend(point_source.__all__)
+__all__.extend(point_policy.__all__)
 __all__.extend(result_channels.__all__)
 __all__.extend(scan_mapping.__all__)
 __all__.extend(scan_generator.__all__)

@@ -16,7 +16,7 @@ points.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -26,7 +26,7 @@ from nubo.acquisition import MCExpectedImprovement, MCUpperConfidenceBound
 from nubo.models import GaussianProcess, fit_gp
 from nubo.optimisation import multi_sequential, single
 
-from .point_source import BatchFeedback, OptimiserObservation
+from .point_policy import BatchFeedback, OptimiserObservation, OptimiserSuggestion
 
 __all__ = [
     "CompositeExplorationStrategy",
@@ -35,9 +35,54 @@ __all__ = [
     "MhcsExplorationStrategy",
     "NuboBayesianOptimisationState",
     "NuboBatchBayesianOptimisationBackend",
+    "ScalarChannelObjectiveExtractor",
     "ScheduledExplorationStrategy",
     "extract_scalar_channel_objective",
 ]
+
+
+@dataclass(frozen=True)
+class ScalarChannelObjectiveExtractor:
+    """Extract optimiser observations from one scalar result channel.
+
+    This is the common BO case:
+
+    - one saved result channel is the objective,
+    - an optional second saved result channel carries an uncertainty estimate,
+    - the optimiser sees one scalar objective per completed point.
+
+    The extractor is a real object rather than an anonymous closure so the runtime can
+    persist enough metadata in ``scan.point_policy`` for offline GP refits.
+    """
+
+    channel_key: str
+    noise_channel_key: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __call__(
+        self, observation: Any, _feedback: BatchFeedback
+    ) -> OptimiserObservation:
+        axis_values = tuple(float(value) for value in observation.axis_values.values())
+        objective = float(observation.channel_values[self.channel_key])
+        noise_std = (
+            None
+            if self.noise_channel_key is None
+            else float(observation.channel_values[self.noise_channel_key])
+        )
+        return OptimiserObservation(
+            point=axis_values,
+            objective=objective,
+            noise_std=noise_std,
+            metadata=dict(self.metadata),
+        )
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            "kind": "scalar_channel",
+            "channel_key": self.channel_key,
+            "noise_channel_key": self.noise_channel_key,
+            "metadata": dict(self.metadata),
+        }
 
 
 def extract_scalar_channel_objective(
@@ -45,34 +90,14 @@ def extract_scalar_channel_objective(
     *,
     noise_channel_key: str | None = None,
     metadata: dict[str, Any] | None = None,
-) -> Callable[[Any, BatchFeedback], OptimiserObservation]:
-    """Return a simple objective extractor for host-runtime point observations.
+) -> ScalarChannelObjectiveExtractor:
+    """Return a scalar-channel objective extractor for ask/tell optimisation."""
 
-    This is the most common case for optimiser backends:
-
-    - the fragment publishes one scalar objective channel,
-    - optionally publishes a matching scalar uncertainty/noise estimate channel,
-    - the optimiser consumes those directly at each completed batch boundary.
-    """
-
-    fixed_metadata = {} if metadata is None else dict(metadata)
-
-    def _extract(observation: Any, _feedback: BatchFeedback) -> OptimiserObservation:
-        axis_values = tuple(float(value) for value in observation.axis_values.values())
-        objective = float(observation.channel_values[channel_key])
-        noise_std = (
-            None
-            if noise_channel_key is None
-            else float(observation.channel_values[noise_channel_key])
-        )
-        return OptimiserObservation(
-            point=axis_values,
-            objective=objective,
-            noise_std=noise_std,
-            metadata=fixed_metadata,
-        )
-
-    return _extract
+    return ScalarChannelObjectiveExtractor(
+        channel_key=channel_key,
+        noise_channel_key=noise_channel_key,
+        metadata={} if metadata is None else dict(metadata),
+    )
 
 
 def _to_point_tensor(
@@ -877,7 +902,7 @@ class NuboBatchBayesianOptimisationBackend:
             return False
         return self._num_bo_batches >= self._max_batches
 
-    def suggest(self, max_points: int) -> list[tuple[float, ...]]:
+    def suggest(self, max_points: int) -> list[OptimiserSuggestion]:
         if max_points <= 0:
             raise ValueError("max_points must be positive")
         if self.is_finished():
@@ -888,7 +913,13 @@ class NuboBatchBayesianOptimisationBackend:
             start = self._seed_index
             stop = min(start + limit, len(self._seed_points))
             self._seed_index = stop
-            return [tuple(map(float, row.tolist())) for row in self._seed_points[start:stop]]
+            return [
+                OptimiserSuggestion(
+                    point=tuple(map(float, row.tolist())),
+                    metadata={"decision_source": "seed"},
+                )
+                for row in self._seed_points[start:stop]
+            ]
 
         gp, _ = _fit_exact_gp_model(
             self._x_obs,
@@ -945,13 +976,22 @@ class NuboBatchBayesianOptimisationBackend:
             min_normalised_distance=self._min_normalised_distance,
         )
 
-        combined = (
-            torch.vstack((explore_points, bo_points))
-            if explore_points.numel() or bo_points.numel()
-            else torch.zeros((0, self._dims), dtype=self._bounds.dtype, device=self._bounds.device)
-        )
         self._num_bo_batches += 1
-        return [tuple(map(float, row.tolist())) for row in combined]
+        suggestions = [
+            OptimiserSuggestion(
+                point=tuple(map(float, row.tolist())),
+                metadata={"decision_source": "explore"},
+            )
+            for row in explore_points
+        ]
+        suggestions.extend(
+            OptimiserSuggestion(
+                point=tuple(map(float, row.tolist())),
+                metadata={"decision_source": "bo"},
+            )
+            for row in bo_points
+        )
+        return suggestions
 
     def observe(self, observations: Sequence[OptimiserObservation]) -> None:
         if not observations:
@@ -998,12 +1038,21 @@ class NuboBatchBayesianOptimisationBackend:
         return {
             "kind": "nubo_bayesian_optimisation",
             "dims": self._dims,
+            "bounds": self._bounds.tolist(),
             "batch_size": self._batch_size,
             "acquisition": self._acquisition_name,
             "fit_steps": self._fit_steps,
+            "acquisition_num_starts": self._acquisition_num_starts,
+            "surrogate_num_starts": self._surrogate_num_starts,
+            "batch_mc_samples": self._batch_mc_samples,
+            "batch_acq_lr": self._batch_acq_lr,
+            "batch_acq_steps": self._batch_acq_steps,
+            "batch_ucb_beta": self._batch_ucb_beta,
             "max_batches": self._max_batches,
             "minimise": self._minimise,
             "dtype": str(self._dtype).replace("torch.", ""),
             "seed_points": int(self._seed_points.shape[0]),
+            "min_normalised_distance": self._min_normalised_distance,
+            "observation_noise_floor": self._observation_noise_floor,
             "exploration_strategy": exploration_description,
         }

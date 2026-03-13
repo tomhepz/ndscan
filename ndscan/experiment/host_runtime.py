@@ -5,7 +5,7 @@ This module is intentionally narrower than the legacy runtime:
 - the scan infrastructure runs on the host,
 - code-first requests rather than dashboard parsing,
 - one flat scan-site dataset layout,
-- point sources as the only point-selection abstraction.
+- point policies as the only point-selection abstraction.
 
 The goal is not to replace the old runtime in one shot. The goal is to establish a
 small execution core that is easy to read, extend, and eventually reuse from both
@@ -46,13 +46,13 @@ from artiq.language import EnvExperiment, HasEnvironment, kernel, portable
 from ._host_analysis import HostScanAnalysisEngine
 from .fragment import ExpFragment, RestartKernelTransitoryError, TransitoryError
 from .parameters import ParamHandle, ParamStore
-from .point_source import (
+from .point_policy import (
     BatchFeedback,
-    CartesianPointSource,
-    ExplicitPointSource,
-    PointSource,
-    SinglePointSource,
-    ZipPointSource,
+    CartesianPointPolicy,
+    ExplicitPointPolicy,
+    PointPolicy,
+    SinglePointPolicy,
+    ZipPointPolicy,
 )
 from .result_channels import ResultChannel, SingleUseSink
 from .scan_mapping import ParameterMapping, ScanVariable
@@ -349,7 +349,7 @@ class ScanRequest:
 
     The first implementation is deliberately code-first: callers provide either real
     ``ParamHandle`` scan axes or logical ``ScanVariable`` axes, together with a
-    ``PointSource`` describing the point strategy. A future dashboard adapter can
+    ``PointPolicy`` describing the point strategy. A future dashboard adapter can
     resolve selector syntax or text formulas into the same objects without changing
     the runtime core again.
 
@@ -359,7 +359,7 @@ class ScanRequest:
     """
 
     axes: tuple[ParamHandle | ScanVariable, ...]
-    point_source: PointSource
+    point_policy: PointPolicy
     site: ScanSite = field(default_factory=ScanSite)
     metadata: Mapping[str, Any] = field(default_factory=dict)
     execution_policy: ExecutionPolicy = field(default_factory=ExecutionPolicy)
@@ -385,7 +385,7 @@ class ScanRequest:
 
         return ScanRequest(
             axes=self.axes,
-            point_source=self.point_source,
+            point_policy=self.point_policy,
             site=site,
             metadata=self.metadata,
             execution_policy=self.execution_policy,
@@ -404,7 +404,7 @@ class ScanRequest:
 
         return ScanRequest(
             axes=self.axes,
-            point_source=self.point_source,
+            point_policy=self.point_policy,
             site=self.site,
             metadata=self.metadata,
             execution_policy=self.execution_policy,
@@ -421,7 +421,7 @@ class ScanRequest:
     ) -> "ScanRequest":
         return cls(
             axes=(),
-            point_source=SinglePointSource(),
+            point_policy=SinglePointPolicy(),
             site=ScanSite() if site is None else site,
             metadata={} if metadata is None else metadata,
             execution_policy=ExecutionPolicy() if execution_policy is None else execution_policy,
@@ -438,7 +438,7 @@ class ScanRequest:
     ) -> "ScanRequest":
         return cls(
             axes=tuple(handle for handle, _ in axes),
-            point_source=CartesianPointSource([values for _, values in axes]),
+            point_policy=CartesianPointPolicy([values for _, values in axes]),
             site=ScanSite() if site is None else site,
             metadata={} if metadata is None else metadata,
             execution_policy=ExecutionPolicy() if execution_policy is None else execution_policy,
@@ -455,7 +455,7 @@ class ScanRequest:
     ) -> "ScanRequest":
         return cls(
             axes=tuple(handle for handle, _ in axes),
-            point_source=ZipPointSource([values for _, values in axes]),
+            point_policy=ZipPointPolicy([values for _, values in axes]),
             site=ScanSite() if site is None else site,
             metadata={} if metadata is None else metadata,
             execution_policy=ExecutionPolicy() if execution_policy is None else execution_policy,
@@ -473,7 +473,7 @@ class ScanRequest:
     ) -> "ScanRequest":
         return cls(
             axes=tuple(axes),
-            point_source=ExplicitPointSource(len(axes), points),
+            point_policy=ExplicitPointPolicy(len(axes), points),
             site=ScanSite() if site is None else site,
             metadata={} if metadata is None else metadata,
             execution_policy=ExecutionPolicy() if execution_policy is None else execution_policy,
@@ -572,6 +572,7 @@ class PointObservation:
     channel_values: OrderedDict[str, Any]
     pseudoparam_values: OrderedDict[str, Any] = field(default_factory=OrderedDict)
     parameter_values: OrderedDict[str, Any] = field(default_factory=OrderedDict)
+    point_metadata: OrderedDict[str, Any] = field(default_factory=OrderedDict)
     acquired_at_unix: float | None = None
 
 
@@ -796,6 +797,7 @@ class _HostPointExecutor:
             pseudoparam_values=pseudoparam_map,
             parameter_values=parameter_map,
             channel_values=channel_values,
+            point_metadata=OrderedDict(point.metadata.items()),
             acquired_at_unix=time.time(),
         )
 
@@ -900,14 +902,14 @@ class HostScanProgram:
         self.parameters = tuple(parameters)
         self.channels = tuple(channels)
         self.parameter_mappings = tuple(parameter_mappings)
-        self.point_source = request.point_source
+        self.point_policy = request.point_policy
         self.site_writer = site_writer
         self.analysis_engine = analysis_engine
 
     def metadata(self) -> dict[str, Any]:
         metadata = {
             "site.fragment_fqn": self.fragment.fqn,
-            "scan.point_source": self.point_source.describe(),
+            "scan.point_policy": self.point_policy.describe(),
             "scan.parameters": {
                 parameter.key: parameter.metadata()
                 for parameter in self.parameters
@@ -1213,9 +1215,9 @@ class HostScanProgramBuilder:
                 "methods. Host methods may still call @kernel helpers internally."
             )
 
-        if request.point_source.axis_count != len(request.axes):
+        if request.point_policy.axis_count != len(request.axes):
             raise ValueError(
-                "Point source dimensionality does not match the number of requested axes"
+                "Point policy dimensionality does not match the number of requested axes"
             )
 
         axes = _build_bound_axes(request.axes)
@@ -1320,7 +1322,7 @@ class HostScanProgramRunner:
                 try:
                     while True:
                         if batch_offset >= len(current_batch):
-                            if self._program.point_source.is_finished():
+                            if self._program.point_policy.is_finished():
                                 break
                             current_batch = self._next_batch()
                             batch_offset = 0
@@ -1410,13 +1412,13 @@ class HostScanProgramRunner:
 
     def _next_batch(self):
         requested_size = self._effective_batch_size()
-        batch = self._program.point_source.next_batch(requested_size)
+        batch = self._program.point_policy.next_batch(requested_size)
         if batch:
             return batch
-        if self._program.point_source.is_finished():
+        if self._program.point_policy.is_finished():
             return []
         raise RuntimeError(
-            f"{type(self._program.point_source).__name__} returned no points before finishing"
+            f"{type(self._program.point_policy).__name__} returned no points before finishing"
         )
 
     def _effective_batch_size(self) -> int:
@@ -1432,7 +1434,7 @@ class HostScanProgramRunner:
         if request_limit is None:
             request_limit = 1
 
-        preferred = self._program.point_source.preferred_batch_size(request_limit)
+        preferred = self._program.point_policy.preferred_batch_size(request_limit)
         if preferred <= 0:
             raise ValueError("preferred_batch_size() must return a positive integer")
         return min(request_limit, preferred)
@@ -1471,7 +1473,7 @@ class HostScanProgramRunner:
         online_analyses = self._program.analysis_engine.observe_batch(
             completed_batch, result, self._program.site_writer
         )
-        self._program.point_source.observe_batch(
+        self._program.point_policy.observe_batch(
             BatchFeedback(
                 observations=tuple(completed_batch),
                 axis_data={
@@ -1494,7 +1496,7 @@ class HostScanProgramRunner:
             self._run_context.preview.maybe_write_preview()
 
     def _has_more_work(self) -> bool:
-        return not self._program.point_source.is_finished()
+        return not self._program.point_policy.is_finished()
 
     def _should_pause_after_batch(self) -> bool:
         """Return whether the scheduler wants to pause after the current batch.

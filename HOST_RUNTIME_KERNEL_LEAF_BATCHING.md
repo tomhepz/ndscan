@@ -156,7 +156,7 @@ Two implementations:
 
 The rest of the host runtime should stay the same:
 
-- `PointSource` / point policy chooses the next batch
+- `PointPolicy` chooses the next batch
 - host applies parameter mappings and builds actual point values
 - executor runs the batch
 - host writes datasets, runs online analysis, updates point policy, checks pause, and

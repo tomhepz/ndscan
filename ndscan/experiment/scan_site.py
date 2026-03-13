@@ -273,6 +273,8 @@ class ScanSiteDatasetWriter:
                 self._get_point_sink(key).push(value)
             for key, value in observation.channel_values.items():
                 self._get_point_sink(key).push(value)
+            for key, value in observation.point_metadata.items():
+                self._get_point_sink("metadata." + key).push(value)
             if observation.acquired_at_unix is not None:
                 self._get_point_sink("acquired_at_unix").push(
                     observation.acquired_at_unix

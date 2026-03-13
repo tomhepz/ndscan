@@ -9,7 +9,7 @@ Each axis uses a 1D recursive midpoint policy:
 - then add midpoints breadth-first,
 - stop after a fixed depth.
 
-The two axes are then combined with ``ProductPointSource`` to form a rectangular 2D
+The two axes are then combined with ``ProductPointPolicy`` to form a rectangular 2D
 grid whose density increases in a deterministic refinement order.
 """
 
@@ -20,8 +20,8 @@ from ndscan.experiment import (
     ExpFragment,
     FloatChannel,
     FloatParam,
-    ProductPointSource,
-    RecursiveMidpointPointSource1D,
+    ProductPointPolicy,
+    RecursiveMidpointPointPolicy1D,
     ScanRequest,
     make_fragment_host_scan_exp,
 )
@@ -45,10 +45,10 @@ HostRuntimeRecursiveGrid2D = make_fragment_host_scan_exp(
     BowlSurfaceFragment,
     lambda fragment: ScanRequest(
         axes=(fragment.x, fragment.y),
-        point_source=ProductPointSource(
+        point_policy=ProductPointPolicy(
             [
-                RecursiveMidpointPointSource1D(-2.0, 2.0, max_depth=2),
-                RecursiveMidpointPointSource1D(-3.0, 1.0, max_depth=2),
+                RecursiveMidpointPointPolicy1D(-2.0, 2.0, max_depth=2),
+                RecursiveMidpointPointPolicy1D(-3.0, 1.0, max_depth=2),
             ]
         ),
         execution_policy=ExecutionPolicy(max_points_per_batch=8),

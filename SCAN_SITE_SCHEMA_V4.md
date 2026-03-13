@@ -104,7 +104,7 @@ For one site prefix `<site>`, the runtime may write:
 ### Scan description
 
 ```text
-<site>scan.point_source
+<site>scan.point_policy
 <site>scan.pseudoparams
 <site>scan.parameters
 <site>scan.fixed_parameters
