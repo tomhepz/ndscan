@@ -28,7 +28,9 @@ from .default_analysis import AnalysisFeedback
 __all__ = [
     "BasePoint",
     "BatchFeedback",
+    "OptimiserObservation",
     "PointSource",
+    "AskTellOptimiserPointSource",
     "SinglePointSource",
     "CartesianPointSource",
     "ZipPointSource",
@@ -105,6 +107,16 @@ class BatchFeedback:
         return self.parameter_data[handle][-1]
 
 
+@dataclass(frozen=True)
+class OptimiserObservation:
+    """One scalar objective observation for an ask/tell optimiser backend."""
+
+    point: tuple[float, ...]
+    objective: float
+    noise_std: float | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
 class PointSource:
     """Base class for host-runtime point policies.
 
@@ -174,6 +186,103 @@ class PointSource:
     def describe(self) -> dict[str, Any]:
         """Return a small serialisable description of the point strategy."""
         raise NotImplementedError
+
+
+class AskTellOptimiserPointSource(PointSource):
+    """Wrap an ask/tell optimiser backend as a host-runtime point policy.
+
+    The point source itself stays thin:
+
+    - the backend owns optimiser state and point suggestion,
+    - the wrapper translates completed runtime observations into scalar optimiser
+      observations,
+    - the runtime still owns batching, persistence, online analysis, and pause policy.
+
+    ``extract_observation`` receives both the completed point observation and the
+    surrounding batch feedback. This keeps the wrapper generic enough for:
+
+    - direct optimisation of a result channel value,
+    - use of a matching uncertainty/error result channel,
+    - use of online-analysis outputs when the objective is itself a derived quantity.
+    """
+
+    def __init__(
+        self,
+        backend,
+        extract_observation: Callable[[Any, BatchFeedback], OptimiserObservation],
+    ):
+        self._backend = backend
+        self._extract_observation = extract_observation
+        self._pending_points: list[tuple[float, ...]] | None = None
+        self._next_index = 0
+
+    @property
+    def axis_count(self) -> int:
+        return int(self._backend.axis_count)
+
+    def next_batch(self, max_points: int) -> list[BasePoint]:
+        if max_points <= 0:
+            raise ValueError("max_points must be positive")
+        if self._pending_points is not None:
+            raise RuntimeError(
+                "AskTellOptimiserPointSource cannot request a new batch before the "
+                "previous batch has been observed"
+            )
+
+        pending_points = [tuple(point) for point in self._backend.suggest(max_points)]
+        if not pending_points:
+            if self._backend.is_finished():
+                return []
+            raise RuntimeError(
+                f"{type(self._backend).__name__} returned no points before finishing"
+            )
+
+        self._pending_points = pending_points
+        batch = []
+        for point in pending_points:
+            batch.append(BasePoint(index=self._next_index, axis_values=point))
+            self._next_index += 1
+        return batch
+
+    def is_finished(self) -> bool:
+        return self._pending_points is None and self._backend.is_finished()
+
+    def preferred_batch_size(self, default: int) -> int:
+        preferred = getattr(self._backend, "preferred_batch_size", None)
+        if preferred is None:
+            return default
+        return preferred(default)
+
+    def observe_batch(self, feedback: BatchFeedback) -> None:
+        if self._pending_points is None:
+            raise RuntimeError(
+                "Received batch feedback for AskTellOptimiserPointSource before requesting a batch"
+            )
+        if len(feedback.observations) != len(self._pending_points):
+            raise ValueError(
+                "AskTellOptimiserPointSource received the wrong number of observations "
+                f"for its batch: expected {len(self._pending_points)}, got "
+                f"{len(feedback.observations)}"
+            )
+
+        optimiser_observations = tuple(
+            self._extract_observation(observation, feedback)
+            for observation in feedback.observations
+        )
+
+        observe_batch = getattr(self._backend, "observe_batch", None)
+        if observe_batch is not None:
+            observe_batch(optimiser_observations, feedback)
+        else:
+            self._backend.observe(optimiser_observations)
+        self._pending_points = None
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            "kind": "ask_tell_optimiser",
+            "axis_count": self.axis_count,
+            "backend": self._backend.describe(),
+        }
 
 
 class _FinitePointSource(PointSource):

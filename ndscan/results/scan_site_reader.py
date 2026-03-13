@@ -17,6 +17,7 @@ import numpy as np
 
 __all__ = [
     "HostRuntimeSnapshot",
+    "HostRuntimeSiteSegment",
     "HostRuntimeSiteData",
     "read_host_runtime_snapshot",
 ]
@@ -110,6 +111,21 @@ def _online_annotations_for_prefix(
 
 
 @dataclass(frozen=True)
+class HostRuntimeSiteSegment:
+    """One logical segment within a segmented scan site."""
+
+    index: int
+    start_index: int
+    stop_index: int
+    parent_point_index: int | None = None
+    start_unix_time: float | None = None
+
+    @property
+    def length(self) -> int:
+        return self.stop_index - self.start_index
+
+
+@dataclass(frozen=True)
 class HostRuntimeSiteData:
     """Offline view of one host-runtime scan site."""
 
@@ -130,6 +146,10 @@ class HostRuntimeSiteData:
     annotations: list[dict[str, Any]]
     segmented: bool
     metadata: dict[str, Any]
+
+    @property
+    def num_points(self) -> int:
+        return int(self.metadata.get("state.num_points", 0))
 
     def choose_default_x_key(self) -> tuple[str | None, str | None]:
         """Return a simple default x-data choice for plotting.
@@ -153,6 +173,63 @@ class HostRuntimeSiteData:
 
         return None, None
 
+    def segments(self) -> list[HostRuntimeSiteSegment]:
+        """Return the site's logical segments in flat point-index space."""
+
+        if not self.segmented:
+            return []
+
+        starts = list(self.metadata.get("segments.start_index", []))
+        parent_point_indices = self.metadata.get("segments.parent_point_index", [])
+        start_unix_times = self.metadata.get("segments.start_unix_time", [])
+
+        result = []
+        for index, start_index in enumerate(starts):
+            stop_index = (
+                starts[index + 1] if index + 1 < len(starts) else self.num_points
+            )
+            parent_point_index = (
+                int(parent_point_indices[index])
+                if index < len(parent_point_indices)
+                else None
+            )
+            start_unix_time = (
+                float(start_unix_times[index])
+                if index < len(start_unix_times)
+                else None
+            )
+            result.append(
+                HostRuntimeSiteSegment(
+                    index=index,
+                    start_index=int(start_index),
+                    stop_index=int(stop_index),
+                    parent_point_index=parent_point_index,
+                    start_unix_time=start_unix_time,
+                )
+            )
+        return result
+
+    def segments_for_parent_point(
+        self, parent_point_index: int
+    ) -> list[HostRuntimeSiteSegment]:
+        """Return all child segments launched from one parent point index."""
+
+        return [
+            segment
+            for segment in self.segments()
+            if segment.parent_point_index == parent_point_index
+        ]
+
+    def slice_point_data(
+        self, start_index: int, stop_index: int
+    ) -> dict[str, list[Any]]:
+        """Return point data sliced to a sub-range of this site's flat arrays."""
+
+        return {
+            key: list(values[start_index:stop_index])
+            for key, values in self.point_data.items()
+        }
+
 
 @dataclass(frozen=True)
 class HostRuntimeSnapshot:
@@ -164,6 +241,18 @@ class HostRuntimeSnapshot:
 
     def get_site(self, path: tuple[str, ...] = ()) -> HostRuntimeSiteData:
         return self.sites[path]
+
+    def child_sites(self, parent_path: tuple[str, ...] = ()) -> list[HostRuntimeSiteData]:
+        """Return the immediate child sites of the given parent site path."""
+
+        return sorted(
+            (
+                site
+                for site in self.sites.values()
+                if site.parent_path == parent_path
+            ),
+            key=lambda site: site.path,
+        )
 
 
 def read_host_runtime_snapshot(path: str | Path) -> HostRuntimeSnapshot:

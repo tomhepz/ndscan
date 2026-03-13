@@ -164,11 +164,11 @@ class ProbabilityAtTimeViaAnalysisFragment(ExpFragment):
             point_source=RepeatPointSource(
                 SinglePointSource(),
                 stop_predicate=make_online_precision_stopper(
-                    error_threshold=0.035,
+                    error_threshold=0.05,
                     min_shots=24,
                 ),
                 min_repeats=24,
-                max_repeats=256,
+                max_repeats=600,
                 predicate_description="repeat_stats.probability_error <= 0.035",
             ),
             execution_policy=ExecutionPolicy(max_points_per_batch=16),

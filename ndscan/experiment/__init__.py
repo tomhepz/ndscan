@@ -59,3 +59,13 @@ __all__.extend(scan_generator.__all__)
 __all__.extend(scan_runner.__all__)
 __all__.extend(scan_site.__all__)
 __all__.extend(subscan.__all__)
+
+# The optimiser backends depend on optional third-party libraries. Import them when
+# available, but do not make the whole experiment package unavailable otherwise.
+try:
+    from . import optimisation
+    from .optimisation import *
+
+    __all__.extend(optimisation.__all__)
+except ModuleNotFoundError:
+    optimisation = None

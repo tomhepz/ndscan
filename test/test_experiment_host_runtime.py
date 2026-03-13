@@ -1649,6 +1649,23 @@ class HostRuntimeCase(HasEnvironmentCase):
             [11.0, 12.0, 21.0, 22.0],
         )
 
+    def test_nested_child_scan_uses_true_parent_point_indices_with_batched_parent(self):
+        parent = self.create(NestedChildScanParent, [])
+        request = ScanRequest.explicit(
+            [parent.outer],
+            [[10.0], [20.0], [30.0]],
+            execution_policy=ExecutionPolicy(max_points_per_batch=3),
+        )
+
+        session = HostScanSession(parent, parent, request)
+        session.run()
+
+        child_prefix = "ndscan.rid_0.site.root.child_scan."
+        self.assertEqual(
+            self.d(child_prefix, "segments.parent_point_index"),
+            [0, 1, 2],
+        )
+
     def test_nested_scan_records_fixed_parameters_per_site(self):
         parent = self.create(FixedParameterSubscanParent, [])
         request = ScanRequest.explicit([parent.outer], [[10.0]])

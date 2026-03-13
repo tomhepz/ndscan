@@ -1333,9 +1333,13 @@ class HostScanProgramRunner:
                         self._fragment.host_setup()
                         try:
                             while batch_offset < len(current_batch):
+                                point_index = (
+                                    self._program.site_writer.next_point_index
+                                    + len(completed_batch)
+                                )
                                 observation = self._executor.execute_point(
                                     current_batch[batch_offset],
-                                    self._program.site_writer.next_point_index,
+                                    point_index,
                                 )
                                 if observation is None:
                                     restart_host_context = True

@@ -130,6 +130,37 @@ class ScanSiteReaderCase(ExpFragmentCase):
         self.assertEqual(list(child_site.point_data["param_0"]), [10.0, 11.0])
         self.assertEqual(list(child_site.point_data["channel_0"]), [11.0, 12.0])
 
+    def test_exposes_child_site_segments_for_parent_points(self):
+        parent = self.create(NestedChildScanParent)
+        session = HostScanSession(
+            parent,
+            parent,
+            ScanRequest.explicit([parent.outer], [[10.0], [20.0]]),
+        )
+        session.run()
+
+        with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
+            self._write_snapshot(parent, tmp.name)
+            snapshot = read_host_runtime_snapshot(tmp.name)
+
+        self.assertEqual([site.path for site in snapshot.child_sites(())], [("child_scan",)])
+
+        child_site = snapshot.get_site(("child_scan",))
+        segments = child_site.segments()
+        self.assertEqual(
+            [(segment.start_index, segment.stop_index, segment.parent_point_index) for segment in segments],
+            [(0, 2, 0), (2, 4, 1)],
+        )
+
+        second_parent_segments = child_site.segments_for_parent_point(1)
+        self.assertEqual(len(second_parent_segments), 1)
+        second_parent_data = child_site.slice_point_data(
+            second_parent_segments[0].start_index,
+            second_parent_segments[0].stop_index,
+        )
+        self.assertEqual(second_parent_data["param_0"], [20.0, 21.0])
+        self.assertEqual(second_parent_data["channel_0"], [21.0, 22.0])
+
 
 if __name__ == "__main__":
     unittest.main()
