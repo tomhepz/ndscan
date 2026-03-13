@@ -43,9 +43,7 @@ from artiq import __version__ as artiq_version
 from artiq.coredevice.exceptions import RTIOUnderflow
 from artiq.language import EnvExperiment, HasEnvironment, kernel, portable
 
-from ..utils import merge_no_duplicates
-from .annotations import AnnotationContext
-from .default_analysis import AnalysisFeedback
+from ._host_analysis import HostScanAnalysisEngine
 from .fragment import ExpFragment, RestartKernelTransitoryError, TransitoryError
 from .parameters import ParamHandle, ParamStore
 from .point_source import (
@@ -56,9 +54,8 @@ from .point_source import (
     SinglePointSource,
     ZipPointSource,
 )
-from .result_channels import LastValueSink, ResultChannel, SingleUseSink
+from .result_channels import ResultChannel, SingleUseSink
 from .scan_mapping import ParameterMapping, ScanVariable
-from .scan_runner import describe_analyses, filter_default_analyses
 from .scan_site import ScanSite, ScanSiteDatasetWriter
 from .utils import is_kernel
 
@@ -644,201 +641,6 @@ class HostScanRunResult:
             self.record(observation, axes, parameters, channels)
 
 
-class _TemporaryAnalysisResultSinks:
-    """Temporarily bind analysis result channels to in-memory last-value sinks.
-
-    Default analyses are declared in terms of ordinary ``ResultChannel`` instances.
-    Running them through temporary ``LastValueSink`` objects keeps the execution step
-    separate from dataset publication: the analysis writes to channels exactly as it
-    would in the legacy runtime, and the host runtime decides afterwards which values
-    should be persisted to the scan site.
-    """
-
-    def __init__(self, channels: Mapping[str, ResultChannel]):
-        self._channels = dict(channels)
-        self._original_sinks = dict[ResultChannel, Any]()
-        self._temporary_sinks = dict[str, LastValueSink]()
-
-    def __enter__(self) -> dict[str, LastValueSink]:
-        for name, channel in self._channels.items():
-            self._original_sinks[channel] = channel.sink
-            sink = LastValueSink()
-            channel.set_sink(sink)
-            self._temporary_sinks[name] = sink
-        return self._temporary_sinks
-
-    def __exit__(self, exc_type, exc_value, traceback) -> None:
-        for channel, original_sink in self._original_sinks.items():
-            channel.set_sink(original_sink)
-        self._original_sinks.clear()
-        self._temporary_sinks.clear()
-
-
-class _HostScanAnalysisPlan:
-    """Selected default analyses for one concrete host-runtime scan program.
-
-    The fragment-side analysis API already splits naturally into two phases:
-
-    - declaration/description, which determines metadata before the scan starts,
-    - execution, which consumes the completed run result after the last point.
-
-    This helper keeps those phases together without mixing them into the point
-    execution loop itself.
-    """
-
-    def __init__(
-        self,
-        analyses,
-        analysis_results: Mapping[str, ResultChannel],
-        annotation_context: AnnotationContext,
-    ):
-        self._analyses = tuple(analyses)
-        self._analysis_results = dict(analysis_results)
-        self._annotation_context = annotation_context
-        self._metadata = describe_analyses(self._analyses, self._annotation_context)
-        self._metadata["analysis_results"] = {
-            name: channel.describe() for name, channel in self._analysis_results.items()
-        }
-
-    @classmethod
-    def build(
-        cls,
-        fragment: ExpFragment,
-        axes: Sequence[BoundScanAxis],
-        channels: Sequence[BoundResultChannel],
-    ) -> "_HostScanAnalysisPlan":
-        analysable_axes = [axis for axis in axes if axis.param_store is not None]
-        analyses = filter_default_analyses(fragment, analysable_axes)
-
-        axis_keys = {
-            axis.param_store.identity: axis.point_key
-            for axis in axes
-            if axis.param_store is not None
-        }
-        # AnnotationContext expects bare channel names and adds the "channel_" prefix
-        # itself when serialising coordinate references.
-        channel_names = {
-            binding.channel: binding.key.removeprefix("channel_") for binding in channels
-        }
-        analysis_results = reduce(
-            lambda x, y: merge_no_duplicates(x, y, kind="analysis result"),
-            (analysis.get_analysis_results() for analysis in analyses),
-            {},
-        )
-        exported_analysis_channels = set(analysis_results.values())
-
-        context = AnnotationContext(
-            lambda handle: axis_keys[handle._store.identity],
-            lambda channel: channel_names[channel],
-            lambda channel: channel in exported_analysis_channels,
-        )
-        return cls(analyses, analysis_results, context)
-
-    def metadata(self) -> dict[str, Any]:
-        metadata = {}
-        if self._metadata["annotations"]:
-            metadata["analysis.annotations"] = list(self._metadata["annotations"])
-        if self._metadata["online_analyses"]:
-            metadata["analysis.online"] = dict(self._metadata["online_analyses"])
-        if self._metadata["analysis_results"]:
-            metadata["analysis.outputs"] = dict(self._metadata["analysis_results"])
-        return metadata
-
-    def initial_annotations(self) -> list[dict[str, Any]]:
-        return list(self._metadata["annotations"])
-
-    def execute(
-        self,
-        run_result: HostScanRunResult,
-        site_writer: ScanSiteDatasetWriter,
-    ) -> None:
-        if not self._analyses:
-            return
-
-        axis_data = dict(run_result.coordinates)
-        result_data = dict(run_result.values)
-
-        with _TemporaryAnalysisResultSinks(self._analysis_results) as sinks:
-            annotations = []
-            for analysis in self._analyses:
-                annotations.extend(
-                    analysis.execute(axis_data, result_data, self._annotation_context)
-                )
-
-            analysis_results = {
-                name: sink.get_last() for name, sink in sinks.items()
-            }
-        feedback = AnalysisFeedback(
-            outputs=analysis_results,
-            annotations=annotations,
-        )
-
-        for name, value in feedback.outputs.items():
-            site_writer.set_analysis_result(name, value)
-        run_result.analysis_results = dict(feedback.outputs)
-
-        if feedback.annotations:
-            site_writer.set_annotations(feedback.annotations)
-            run_result.annotations = list(feedback.annotations)
-
-    def observe_batch(
-        self,
-        observations: Sequence[PointObservation],
-        run_result: HostScanRunResult,
-        site_writer: ScanSiteDatasetWriter,
-    ) -> dict[str, AnalysisFeedback]:
-        """Handle one completed execution batch.
-
-        Online analyses are re-evaluated on the accumulated scan data after each
-        published batch. This keeps the semantics simple:
-
-        - batch-local point writes happen first,
-        - online analyses see exactly the data that is now visible to readers,
-        - point policies can then react to the same batch-level analysis outputs.
-        """
-        del observations
-
-        if not self._analyses:
-            return {}
-
-        axis_data = dict(run_result.coordinates)
-        result_data = dict(run_result.values)
-        raw_online_results = reduce(
-            lambda x, y: merge_no_duplicates(x, y, kind="online analysis result"),
-            (
-                analysis.execute_online(axis_data, result_data, self._annotation_context)
-                for analysis in self._analyses
-            ),
-            {},
-        )
-        online_results = {
-            name: self._normalise_online_feedback(value)
-            for name, value in raw_online_results.items()
-        }
-        for name, feedback in online_results.items():
-            site_writer.set_online_analysis_result(name, feedback.outputs)
-            site_writer.set_online_analysis_annotations(name, feedback.annotations)
-        run_result.online_analysis_results = {
-            name: feedback.outputs for name, feedback in online_results.items()
-        }
-        run_result.online_analysis_annotations = {
-            name: list(feedback.annotations) for name, feedback in online_results.items()
-        }
-        return online_results
-
-    def _normalise_online_feedback(self, value: AnalysisFeedback | dict[str, Any]) -> AnalysisFeedback:
-        """Return the structured online-analysis payload for one analysis.
-
-        Older online analyses returned only a dict of outputs. Newer code can return an
-        ``AnalysisFeedback`` directly so outputs and annotations travel through the
-        runtime together.
-        """
-
-        if isinstance(value, AnalysisFeedback):
-            return value
-        return AnalysisFeedback(outputs=dict(value))
-
-
 @dataclass
 class _ScanAxisBinding:
     """Temporary rebinding of one logical scan axis onto a dedicated store.
@@ -1090,7 +892,7 @@ class HostScanProgram:
         channels: Sequence[BoundResultChannel],
         parameter_mappings: Sequence[_BoundParameterMapping],
         site_writer: ScanSiteDatasetWriter,
-        analysis_plan: _HostScanAnalysisPlan,
+        analysis_engine: HostScanAnalysisEngine,
     ):
         self.fragment = fragment
         self.request = request
@@ -1100,7 +902,7 @@ class HostScanProgram:
         self.parameter_mappings = tuple(parameter_mappings)
         self.point_source = request.point_source
         self.site_writer = site_writer
-        self.analysis_plan = analysis_plan
+        self.analysis_engine = analysis_engine
 
     def metadata(self) -> dict[str, Any]:
         metadata = {
@@ -1131,7 +933,7 @@ class HostScanProgram:
                 )
                 for index, mapping in enumerate(self.parameter_mappings)
             }
-        metadata.update(self.analysis_plan.metadata())
+        metadata.update(self.analysis_engine.metadata())
         return metadata
 
 
@@ -1430,7 +1232,7 @@ class HostScanProgramBuilder:
         parameter_mappings = _collect_parameter_mappings(fragment, request, axes)
         parameters = _build_bound_parameters(axes, parameter_mappings)
         site_writer = ScanSiteDatasetWriter(self._owner, request.site)
-        analysis_plan = _HostScanAnalysisPlan.build(fragment, axes, channels)
+        analysis_engine = HostScanAnalysisEngine.build(fragment, axes, channels)
         return HostScanProgram(
             fragment,
             request,
@@ -1439,7 +1241,7 @@ class HostScanProgramBuilder:
             channels,
             parameter_mappings,
             site_writer,
-            analysis_plan,
+            analysis_engine,
         )
 
 
@@ -1508,7 +1310,7 @@ class HostScanProgramRunner:
                     self._program.parameters,
                     self._program.channels,
                     self._program.site_writer.prefix,
-                    initial_annotations=self._program.analysis_plan.initial_annotations(),
+                    initial_annotations=self._program.analysis_engine.initial_annotations(),
                 )
 
                 self._executor.install()
@@ -1561,7 +1363,9 @@ class HostScanProgramRunner:
                 # Finish the point stream before analyses run; later buffered
                 # implementations should make this flush any still-pending point data.
                 self._program.site_writer.flush()
-                self._program.analysis_plan.execute(result, self._program.site_writer)
+                self._program.analysis_engine.execute_final(
+                    result, self._program.site_writer
+                )
                 self._program.site_writer.set_completed(True)
                 self._program.site_writer.close()
                 if preview is not None:
@@ -1660,7 +1464,7 @@ class HostScanProgramRunner:
             self._program.parameters,
             self._program.channels,
         )
-        online_analyses = self._program.analysis_plan.observe_batch(
+        online_analyses = self._program.analysis_engine.observe_batch(
             completed_batch, result, self._program.site_writer
         )
         self._program.point_source.observe_batch(
