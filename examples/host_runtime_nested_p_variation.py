@@ -193,4 +193,3 @@ HostRuntimeHowDoesPVary = make_fragment_host_scan_exp(
         metadata={"demo_name": "host_runtime_nested_p_variation"}
     ),
 )
-HostRuntimeHowDoesPVary.__doc__ = "Host-runtime nested p-variation scan"

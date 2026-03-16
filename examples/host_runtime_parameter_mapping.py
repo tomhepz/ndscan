@@ -53,8 +53,6 @@ HostRuntimeMappedLogicalAxis = make_fragment_host_scan_exp(
         ]
     ),
 )
-HostRuntimeMappedLogicalAxis.__doc__ = "Host-runtime ad hoc logical-axis mapping"
-
 
 class WrapperMappedDriveFragment(ExpFragment):
     """Wrapper fragment exposing a logical parameter while driving a child fragment.
@@ -89,4 +87,3 @@ HostRuntimeWrapperRebind = make_fragment_host_scan_exp(
         [(fragment.logical_drive, [0.0, 1.0, 2.0, 3.0])]
     ),
 )
-HostRuntimeWrapperRebind.__doc__ = "Host-runtime wrapper-fragment parameter mapping"

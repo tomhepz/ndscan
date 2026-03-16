@@ -48,4 +48,3 @@ HostRuntimeExplicitPointScan = make_fragment_host_scan_exp(
         metadata={"demo_name": "host_runtime_explicit_points"},
     ),
 )
-HostRuntimeExplicitPointScan.__doc__ = "Host-runtime explicit-point scan"

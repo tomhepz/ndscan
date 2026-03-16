@@ -42,4 +42,3 @@ HostRuntimeLinearScan = make_fragment_host_scan_exp(
         metadata={"demo_name": "host_runtime_linear_scan"},
     ),
 )
-HostRuntimeLinearScan.__doc__ = "Host-runtime linear scan"

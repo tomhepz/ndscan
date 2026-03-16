@@ -134,6 +134,3 @@ HostRuntimeBayesianOptimisation = make_fragment_host_scan_exp(
     MultiWellSurfaceFragment,
     _make_request,
 )
-HostRuntimeBayesianOptimisation.__doc__ = (
-    "Host-runtime Bayesian optimisation with scheduled exploration"
-)

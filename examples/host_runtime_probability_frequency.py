@@ -264,6 +264,3 @@ HostRuntimeProbabilityFrequency = make_fragment_host_scan_exp(
         metadata={"demo_name": "host_runtime_probability_frequency"}
     ),
 )
-HostRuntimeProbabilityFrequency.__doc__ = (
-    "Host-runtime probability estimation with early stopping and outer frequency fit"
-)

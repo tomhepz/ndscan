@@ -250,6 +250,3 @@ HostRuntimeProbabilityFrequencyViaAnalysis = make_fragment_host_scan_exp(
         metadata={"demo_name": "host_runtime_probability_frequency_via_analysis"}
     ),
 )
-HostRuntimeProbabilityFrequencyViaAnalysis.__doc__ = (
-    "Host-runtime probability/frequency example using leaf-attached online analysis"
-)

@@ -74,4 +74,3 @@ HostRuntimePreviewSnapshot = make_fragment_host_scan_exp(
         metadata={"demo_name": "host_runtime_preview_snapshot"},
     ),
 )
-HostRuntimePreviewSnapshot.__doc__ = "Host-runtime preview snapshot demo"

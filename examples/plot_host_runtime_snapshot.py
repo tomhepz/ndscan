@@ -7,7 +7,8 @@ Usage:
 The script is intentionally small, but it supports one very useful interactive action:
 
 - click a plotted point in the chosen site,
-- and any immediate child scan sites are replotted below for the matching parent point.
+- and the matching child scan sites are replotted below for that point.
+- click one of those child plots, and the next level is expanded beneath it.
 
 This is especially useful for nested repeated-shot scans such as
 ``host_runtime_probability_frequency.py``:
@@ -16,16 +17,31 @@ This is especially useful for nested repeated-shot scans such as
 - click a point on the outer probability-vs-time curve,
 - and the lower panel will show the underlying repeated-shot yes/no outcomes for that
   specific outer point.
+
+It also works for deeper trees such as ``host_runtime_nested_p_variation.py``:
+
+- start at the root site,
+- click the single root point to reveal ``scan_p``,
+- then click a ``scan_p`` point to reveal the matching ``scan_x`` data beneath it.
 """
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 from ndscan.results.scan_site_reader import HostRuntimeSiteData, read_host_runtime_snapshot
+
+
+@dataclass(frozen=True)
+class _VisibleSitePanel:
+    site: HostRuntimeSiteData
+    point_data: dict[str, list]
+    global_point_indices: np.ndarray
+    selected_point_index: int | None = None
 
 
 def _site_path_from_argument(value: str) -> tuple[str, ...]:
@@ -80,30 +96,120 @@ def _x_data_for_site(site: HostRuntimeSiteData, point_data: dict[str, list]):
     return np.asarray(point_data[x_key]), _label_for_x(site, x_kind, x_key)
 
 
-def _plot_child_point_data(plot_axis, site: HostRuntimeSiteData, point_data: dict[str, list]):
+def _merge_segment_point_data(
+    site: HostRuntimeSiteData, parent_point_index: int
+) -> tuple[dict[str, list], np.ndarray]:
+    """Return merged child point data and global point indices for one parent point."""
+
+    segments = site.segments_for_parent_point(parent_point_index)
+    merged_point_data = {key: [] for key in site.point_data}
+    global_point_indices = []
+
+    for segment in segments:
+        segment_data = site.slice_point_data(segment.start_index, segment.stop_index)
+        for key, values in segment_data.items():
+            merged_point_data[key].extend(values)
+        global_point_indices.extend(range(segment.start_index, segment.stop_index))
+
+    return merged_point_data, np.asarray(global_point_indices, dtype=int)
+
+
+def _build_visible_site_panels(snapshot, selection_chain):
+    """Return all detail panels implied by the current selection chain."""
+
+    selected_points = dict(selection_chain)
+    panels = []
+    for parent_path, parent_point_index in selection_chain:
+        for child_site in snapshot.child_sites(parent_path):
+            point_data, global_point_indices = _merge_segment_point_data(
+                child_site, parent_point_index
+            )
+            panels.append(
+                _VisibleSitePanel(
+                    site=child_site,
+                    point_data=point_data,
+                    global_point_indices=global_point_indices,
+                    selected_point_index=selected_points.get(child_site.path),
+                )
+            )
+    return panels
+
+
+def _update_selection_chain(snapshot, root_path, selection_chain, clicked_site_path, point_index):
+    """Update the active drill-down branch after a point pick."""
+
+    if clicked_site_path == root_path:
+        return [(root_path, point_index)]
+
+    clicked_site = snapshot.get_site(clicked_site_path)
+    parent_path = clicked_site.parent_path
+    if parent_path is None:
+        return [(clicked_site_path, point_index)]
+
+    chain_paths = [path for path, _ in selection_chain]
+    if parent_path not in chain_paths:
+        root_selection = next(
+            (entry for entry in selection_chain if entry[0] == root_path),
+            None,
+        )
+        if root_selection is None:
+            return selection_chain
+        return [root_selection, (clicked_site_path, point_index)]
+
+    parent_index = chain_paths.index(parent_path)
+    return selection_chain[: parent_index + 1] + [(clicked_site_path, point_index)]
+
+
+def _plot_child_point_data(
+    plot_axis,
+    site: HostRuntimeSiteData,
+    point_data: dict[str, list],
+    global_point_indices: np.ndarray,
+    *,
+    selected_point_index: int | None = None,
+):
     """Plot one child site's point data for a selected parent point."""
 
     plot_axis.clear()
+    plot_axis.set_axis_on()
 
-    x_values, x_label = _x_data_for_site(site, point_data)
     channel_keys = list(site.channels.keys())
-    if not channel_keys:
-        plot_axis.text(0.5, 0.5, "No saved child channels", ha="center", va="center")
+    if global_point_indices.size == 0:
+        plot_axis.text(0.5, 0.5, "No child data for the selected parent point", ha="center", va="center")
+        plot_axis.set_title("/".join(site.path))
         plot_axis.set_axis_off()
         return
 
+    if not channel_keys:
+        plot_axis.text(0.5, 0.5, "No saved child channels", ha="center", va="center")
+        plot_axis.set_title("/".join(site.path))
+        plot_axis.set_axis_off()
+        return
+
+    x_values, x_label = _x_data_for_site(site, point_data)
     order = np.argsort(x_values)
+    point_order = global_point_indices[order]
     plotted_binary_summary = None
     for channel_key in channel_keys:
         y_values = np.asarray(point_data[channel_key])
         label = _label_for_channel(site, channel_key)
         if np.all(np.isin(y_values, [0, 1])):
             plot_axis.step(x_values[order], y_values[order], where="mid", label=label)
-            plot_axis.scatter(x_values[order], y_values[order], s=20)
+            scatter = plot_axis.scatter(x_values[order], y_values[order], s=20, picker=True)
             if plotted_binary_summary is None:
                 plotted_binary_summary = _binary_channel_summary(y_values)
         else:
             plot_axis.plot(x_values[order], y_values[order], marker="o", label=label)
+            scatter = plot_axis.scatter(
+                x_values[order],
+                y_values[order],
+                s=30,
+                alpha=0.0,
+                picker=True,
+            )
+
+        scatter._ndscan_point_order = point_order
+        scatter._ndscan_site_path = site.path
 
     title = "/".join(site.path) if site.path else "root"
     if plotted_binary_summary is not None:
@@ -113,41 +219,10 @@ def _plot_child_point_data(plot_axis, site: HostRuntimeSiteData, point_data: dic
     if len(channel_keys) > 1:
         plot_axis.legend()
 
-
-def _show_selected_subpoints(detail_axes, snapshot, site: HostRuntimeSiteData, point_index: int):
-    """Redraw detail axes for the child-site data beneath one selected parent point."""
-
-    child_sites = snapshot.child_sites(site.path)
-    if not child_sites:
-        return
-
-    for plot_axis, child_site in zip(detail_axes, child_sites, strict=False):
-        segments = child_site.segments_for_parent_point(point_index)
-        if not segments:
-            plot_axis.clear()
-            plot_axis.text(
-                0.5,
-                0.5,
-                f"No child segment for parent point {point_index}",
-                ha="center",
-                va="center",
-            )
-            plot_axis.set_title("/".join(child_site.path))
-            plot_axis.set_axis_off()
-            continue
-
-        merged_point_data = {
-            key: []
-            for key in child_site.point_data
-        }
-        for segment in segments:
-            segment_data = child_site.slice_point_data(
-                segment.start_index, segment.stop_index
-            )
-            for key, values in segment_data.items():
-                merged_point_data[key].extend(values)
-
-        _plot_child_point_data(plot_axis, child_site, merged_point_data)
+    if selected_point_index is not None:
+        matches = np.nonzero(global_point_indices == selected_point_index)[0]
+        if len(matches):
+            plot_axis.axvline(x_values[matches[0]], color="tab:red", alpha=0.6)
 
 
 def main() -> None:
@@ -162,82 +237,106 @@ def main() -> None:
 
     snapshot = read_host_runtime_snapshot(args.snapshot)
     site = snapshot.get_site(_site_path_from_argument(args.site))
-    child_sites = snapshot.child_sites(site.path)
-
-    x_kind, x_key = site.choose_default_x_key()
-    if x_kind is None or x_key is None:
-        x_values = np.arange(site.metadata["state.num_points"])
-        x_label = "point index"
-    else:
-        x_values = np.asarray(site.point_data[x_key])
-        x_label = _label_for_x(site, x_kind, x_key)
 
     channel_keys = list(site.channels.keys())
     if not channel_keys:
         raise SystemExit("Selected site has no saved channels to plot")
 
-    num_detail_axes = max(1, len(child_sites)) if child_sites else 0
-    figure, all_axes = plt.subplots(
-        nrows=len(channel_keys) + num_detail_axes,
-        sharex=False,
-        figsize=(10, 3 * (len(channel_keys) + num_detail_axes)),
-        constrained_layout=True,
-    )
-    all_axes = np.atleast_1d(all_axes)
-    axes = all_axes[: len(channel_keys)]
-    detail_axes = all_axes[len(channel_keys) :] if child_sites else np.array([])
+    figure = plt.figure(figsize=(10, 3 * len(channel_keys)), constrained_layout=True)
+    selection_chain = []
 
-    order = np.argsort(x_values)
-    selected_marker_lines = []
+    def rebuild_figure():
+        x_kind, x_key = site.choose_default_x_key()
+        if x_kind is None or x_key is None:
+            x_values = np.arange(site.metadata["state.num_points"])
+            x_label = "point index"
+        else:
+            x_values = np.asarray(site.point_data[x_key])
+            x_label = _label_for_x(site, x_kind, x_key)
 
-    for plot_axis, channel_key in zip(axes, channel_keys):
-        y_values = np.asarray(site.point_data[channel_key])
-        plot_axis.plot(x_values[order], y_values[order], color="tab:blue", alpha=0.7)
-        scatter = plot_axis.scatter(
-            x_values[order],
-            y_values[order],
-            s=40,
-            color="tab:blue",
-            picker=True,
-        )
-        scatter._ndscan_point_order = order
-        plot_axis.set_ylabel(_label_for_channel(site, channel_key))
-        selected_marker_lines.append(
-            plot_axis.axvline(x_values[order][0] if len(order) else 0.0, color="tab:red", alpha=0.0)
-        )
+        direct_child_sites = snapshot.child_sites(site.path)
+        visible_panels = _build_visible_site_panels(snapshot, selection_chain)
+        show_instruction_axis = bool(direct_child_sites) and not selection_chain
+        num_detail_axes = len(visible_panels) if visible_panels else (1 if show_instruction_axis else 0)
 
-    axes[-1].set_xlabel(x_label)
-    axes[0].set_title("/".join(site.path) if site.path else "root")
+        figure.clear()
+        all_axes = np.atleast_1d(
+            figure.subplots(
+                nrows=len(channel_keys) + num_detail_axes,
+                sharex=False,
+                squeeze=False,
+            )
+        ).reshape(-1)
+        figure.set_size_inches(10, 3 * (len(channel_keys) + num_detail_axes))
 
-    if child_sites:
-        for plot_axis in detail_axes:
-            plot_axis.text(
+        axes = all_axes[: len(channel_keys)]
+        detail_axes = all_axes[len(channel_keys) :]
+        order = np.argsort(x_values)
+        selected_root_point = dict(selection_chain).get(site.path)
+
+        for plot_axis, channel_key in zip(axes, channel_keys):
+            y_values = np.asarray(site.point_data[channel_key])
+            plot_axis.plot(x_values[order], y_values[order], color="tab:blue", alpha=0.7)
+            scatter = plot_axis.scatter(
+                x_values[order],
+                y_values[order],
+                s=40,
+                color="tab:blue",
+                picker=True,
+            )
+            scatter._ndscan_point_order = order
+            scatter._ndscan_site_path = site.path
+            plot_axis.set_ylabel(_label_for_channel(site, channel_key))
+
+            selected_line = plot_axis.axvline(
+                x_values[order][0] if len(order) else 0.0,
+                color="tab:red",
+                alpha=0.0,
+            )
+            if selected_root_point is not None:
+                selected_line.set_xdata([x_values[selected_root_point], x_values[selected_root_point]])
+                selected_line.set_alpha(0.6)
+
+        axes[-1].set_xlabel(x_label)
+        axes[0].set_title("/".join(site.path) if site.path else "root")
+
+        if show_instruction_axis:
+            detail_axes[0].text(
                 0.5,
                 0.5,
                 "Click a point above to inspect child-site data",
                 ha="center",
                 va="center",
             )
-            plot_axis.set_axis_off()
+            detail_axes[0].set_axis_off()
+        else:
+            for plot_axis, panel in zip(detail_axes, visible_panels, strict=False):
+                _plot_child_point_data(
+                    plot_axis,
+                    panel.site,
+                    panel.point_data,
+                    panel.global_point_indices,
+                    selected_point_index=panel.selected_point_index,
+                )
 
-        def on_pick(event):
-            artist = event.artist
-            point_order = getattr(artist, "_ndscan_point_order", None)
-            if point_order is None or len(event.ind) == 0:
-                return
+    def on_pick(event):
+        artist = event.artist
+        point_order = getattr(artist, "_ndscan_point_order", None)
+        site_path = getattr(artist, "_ndscan_site_path", None)
+        if point_order is None or site_path is None or len(event.ind) == 0:
+            return
 
-            picked_sorted_index = int(event.ind[0])
-            parent_point_index = int(point_order[picked_sorted_index])
-            selected_x = x_values[parent_point_index]
+        picked_sorted_index = int(event.ind[0])
+        point_index = int(point_order[picked_sorted_index])
 
-            for line in selected_marker_lines:
-                line.set_xdata([selected_x, selected_x])
-                line.set_alpha(0.6)
+        selection_chain[:] = _update_selection_chain(
+            snapshot, site.path, selection_chain, site_path, point_index
+        )
+        rebuild_figure()
+        figure.canvas.draw_idle()
 
-            _show_selected_subpoints(detail_axes, snapshot, site, parent_point_index)
-            figure.canvas.draw_idle()
-
-        figure.canvas.mpl_connect("pick_event", on_pick)
+    figure.canvas.mpl_connect("pick_event", on_pick)
+    rebuild_figure()
 
     plt.show()
 

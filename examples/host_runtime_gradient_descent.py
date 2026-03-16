@@ -67,4 +67,3 @@ HostRuntimeGradientDescent = make_fragment_host_scan_exp(
         metadata={"demo_name": "host_runtime_gradient_descent"},
     ),
 )
-HostRuntimeGradientDescent.__doc__ = "Host-runtime gradient-descent optimisation"

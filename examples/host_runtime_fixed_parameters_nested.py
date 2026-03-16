@@ -76,4 +76,3 @@ HostRuntimeFixedParametersNested = make_fragment_host_scan_exp(
         metadata={"demo_name": "host_runtime_fixed_parameters_nested"},
     ),
 )
-HostRuntimeFixedParametersNested.__doc__ = "Host-runtime nested fixed-parameter demo"

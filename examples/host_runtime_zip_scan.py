@@ -41,4 +41,3 @@ HostRuntimeZipScan = make_fragment_host_scan_exp(
         metadata={"demo_name": "host_runtime_zip_scan"},
     ),
 )
-HostRuntimeZipScan.__doc__ = "Host-runtime zipped scan"

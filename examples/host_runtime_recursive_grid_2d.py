@@ -55,4 +55,3 @@ HostRuntimeRecursiveGrid2D = make_fragment_host_scan_exp(
         metadata={"demo_name": "host_runtime_recursive_grid_2d"},
     ),
 )
-HostRuntimeRecursiveGrid2D.__doc__ = "Host-runtime recursive 2D refinement grid"
