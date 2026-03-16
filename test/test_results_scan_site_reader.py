@@ -1,5 +1,8 @@
+import importlib.util
+import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 import h5py
 
@@ -63,6 +66,61 @@ class NestedChildScanParent(ExpFragment):
             name="child_scan",
         )
         self.child_total.push(sum(child_result.values[self.child.result]))
+
+
+class DeepNestedGrandchild(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("value", FloatParam, "value", 0.0)
+        self.setattr_result("result", FloatChannel)
+
+    def run_once(self):
+        self.result.push(self.value.get())
+
+
+class DeepNestedChild(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("outer", FloatParam, "outer", 0.0)
+        self.setattr_fragment("grandchild", DeepNestedGrandchild, detached=True)
+        self.setattr_result("child_total", FloatChannel)
+
+    def run_once(self):
+        grandchild_result = run_subscan(
+            self,
+            self.grandchild,
+            ScanRequest.explicit(
+                [self.grandchild.value],
+                [[self.outer.get()], [self.outer.get() + 1.0]],
+            ),
+            name="grandchild_scan",
+        )
+        self.child_total.push(sum(grandchild_result.values[self.grandchild.result]))
+
+
+class DeepNestedParent(ExpFragment):
+    def build_fragment(self):
+        self.setattr_fragment("child", DeepNestedChild, detached=True)
+        self.setattr_result("root_total", FloatChannel)
+
+    def run_once(self):
+        child_result = run_subscan(
+            self,
+            self.child,
+            ScanRequest.explicit(
+                [self.child.outer],
+                [[10.0], [20.0]],
+            ),
+            name="child_scan",
+        )
+        self.root_total.push(sum(child_result.values[self.child.child_total]))
+
+
+def _load_plot_host_runtime_snapshot_helpers():
+    module_path = Path(__file__).resolve().parents[1] / "examples" / "plot_host_runtime_snapshot.py"
+    spec = importlib.util.spec_from_file_location("_plot_host_runtime_snapshot", module_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 class ScanSiteReaderCase(ExpFragmentCase):
@@ -204,6 +262,37 @@ class ScanSiteReaderCase(ExpFragmentCase):
         )
         self.assertEqual(second_parent_data["param_0"], [20.0, 21.0])
         self.assertEqual(second_parent_data["channel_0"], [21.0, 22.0])
+
+    def test_plot_helper_builds_recursive_detail_panels(self):
+        root = self.create(DeepNestedParent)
+        session = HostScanSession(root, root, ScanRequest.single())
+        session.run()
+
+        with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
+            self._write_snapshot(root, tmp.name)
+            snapshot = read_host_runtime_snapshot(tmp.name)
+
+        plot_helpers = _load_plot_host_runtime_snapshot_helpers()
+        selection_chain = [((), 0)]
+        child_panels = plot_helpers._build_visible_site_panels(snapshot, selection_chain)
+        self.assertEqual([panel.site.path for panel in child_panels], [("child_scan",)])
+        self.assertEqual(child_panels[0].point_data["param_0"], [10.0, 20.0])
+
+        selection_chain = plot_helpers._update_selection_chain(
+            snapshot,
+            (),
+            selection_chain,
+            ("child_scan",),
+            1,
+        )
+        self.assertEqual(selection_chain, [((), 0), (("child_scan",), 1)])
+
+        recursive_panels = plot_helpers._build_visible_site_panels(snapshot, selection_chain)
+        self.assertEqual(
+            [panel.site.path for panel in recursive_panels],
+            [("child_scan",), ("child_scan", "grandchild_scan")],
+        )
+        self.assertEqual(recursive_panels[1].point_data["param_0"], [20.0, 21.0])
 
 
 if __name__ == "__main__":
