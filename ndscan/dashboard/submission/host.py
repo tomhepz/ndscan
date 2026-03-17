@@ -62,6 +62,7 @@ class HostSubmissionState:
         path: str,
         axis_type: str,
         axis_range: Mapping[str, Any],
+        scan_group: str | None = None,
     ) -> None:
         if axis_type not in _EDITABLE_GENERATOR_TYPES:
             raise ValueError(
@@ -76,7 +77,8 @@ class HostSubmissionState:
                     generator=HostScanGeneratorSpec(
                         type=axis_type,
                         range=dict(axis_range),
-                    )
+                    ),
+                    group=scan_group,
                 ),
             )
         )
@@ -183,8 +185,6 @@ def _is_editable_host_spec(spec: HostScanSpec) -> bool:
         if isinstance(entry.mode, HostScanFixedModeSpec):
             continue
         if isinstance(entry.mode, HostScanScanModeSpec):
-            if entry.mode.group is not None:
-                return False
             if entry.mode.generator.type not in _EDITABLE_GENERATOR_TYPES:
                 return False
             continue
@@ -206,7 +206,7 @@ def _editable_host_spec(params: Mapping[str, Any]) -> HostScanSpec | None:
     The first case should not brick the editor; we can safely fall back to a fresh
     empty grid spec and let the next save replace the stale transport data.  The
     second case *must* stay non-editable so we do not silently drop advanced semantics
-    such as GPO, pseudoparameters, rebind expressions, or zip groups.
+    such as GPO, pseudoparameters, or rebind expressions.
     """
 
     spec = _load_host_spec(params)

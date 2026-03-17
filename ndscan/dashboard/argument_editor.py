@@ -934,6 +934,22 @@ class HostOverrideEntry(OverrideEntry):
     def __init__(self, option_classes, schema, path, backend, *args):
         self._host_backend = backend
         super().__init__(option_classes, schema, path, *args)
+        self._group_container = LayoutWidget()
+        self._group_container.layout.setContentsMargins(6, 0, 0, 0)
+        group_label = QtWidgets.QLabel("Group")
+        group_label.setToolTip(
+            "Scan rows in the same non-empty group are zipped together. "
+            "Different groups remain Cartesian."
+        )
+        self._group_box = QtWidgets.QLineEdit()
+        self._group_box.setPlaceholderText("optional")
+        self._group_box.setMaximumWidth(110)
+        self._group_box.setToolTip(group_label.toolTip())
+        self._group_box.textChanged.connect(self.value_changed)
+        self._group_container.addWidget(group_label, col=0)
+        self._group_container.addWidget(self._group_box, col=1)
+        self.addWidget(self._group_container, col=2)
+        self._update_scan_group_visibility()
 
     def read_from_params(self, params: dict, manager_datasets) -> None:
         id_for_log = format_override_identity(self.schema["fqn"], self.path)
@@ -944,6 +960,7 @@ class HostOverrideEntry(OverrideEntry):
         )
         if entry is not None:
             if entry.mode.type == "fixed":
+                self._group_box.setText("")
                 self._set_fixed_value(entry.mode.value)
                 self.disable_scan()
                 return
@@ -957,12 +974,14 @@ class HostOverrideEntry(OverrideEntry):
                     if option.attempt_read_from_axis(axis):
                         self.current_option_idx = idx
                         self._current_index_changed(idx)
+                        self._group_box.setText(entry.mode.group or "")
                         self.scan_type.setCurrentIndex(idx)
                         return
                 logger.warning(f"Failed to read host scan params for {id_for_log}")
 
         for override in params.get("overrides", {}).get(self.schema["fqn"], []):
             if override["path"] == self.path:
+                self._group_box.setText("")
                 self._set_fixed_value(override["value"])
                 self.disable_scan()
                 return
@@ -979,5 +998,54 @@ class HostOverrideEntry(OverrideEntry):
                 e,
             )
             value = None
+        self._group_box.setText("")
         self._set_fixed_value(value)
         self.disable_scan()
+
+    def write_to_submission(self, submission_state) -> None:
+        if self.scan_type.currentIndex() == 0:
+            super().write_to_submission(submission_state)
+            return
+        grouped_submission = _HostGroupedSubmissionProxy(
+            submission_state,
+            self._normalised_scan_group(),
+        )
+        self.options[self.scan_type.currentIndex()].write_to_submission(grouped_submission)
+
+    def _current_index_changed(self, new_idx) -> None:
+        super()._current_index_changed(new_idx)
+        self._update_scan_group_visibility()
+
+    def _update_scan_group_visibility(self) -> None:
+        self._group_container.setVisible(self.scan_type.currentIndex() != 0)
+
+    def _normalised_scan_group(self) -> str | None:
+        text = self._group_box.text().strip()
+        return text or None
+
+
+class _HostGroupedSubmissionProxy:
+    """Inject a host scan-group into the existing row widget serialisation calls."""
+
+    def __init__(self, submission_state, scan_group: str | None):
+        self._submission_state = submission_state
+        self._scan_group = scan_group
+
+    def add_override(self, *, fqn: str, path: str, value):
+        self._submission_state.add_override(fqn=fqn, path=path, value=value)
+
+    def add_scan_axis(
+        self,
+        *,
+        fqn: str,
+        path: str,
+        axis_type: str,
+        axis_range,
+    ):
+        self._submission_state.add_scan_axis(
+            fqn=fqn,
+            path=path,
+            axis_type=axis_type,
+            axis_range=axis_range,
+            scan_group=self._scan_group,
+        )

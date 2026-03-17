@@ -211,6 +211,34 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
         )
         self.assertTrue(backend.supports_editing)
 
+    def test_host_backend_accepts_grouped_scan_entries(self):
+        backend = HostSubmissionBackend(
+            {
+                "host_scan": {
+                    "version": 1,
+                    "mode": {"type": "grid"},
+                    "entries": [
+                        {
+                            "id": "x",
+                            "kind": "param",
+                            "target": {"fqn": "frag.x", "path": "*"},
+                            "mode": {
+                                "type": "scan",
+                                "group": "pair",
+                                "generator": {
+                                    "type": "list",
+                                    "range": {"values": [1.0, 2.0]},
+                                },
+                            },
+                        }
+                    ],
+                    "execution": {},
+                    "metadata": {},
+                }
+            }
+        )
+        self.assertTrue(backend.supports_editing)
+
     def test_host_backend_iterates_existing_param_entries(self):
         backend = HostSubmissionBackend(
             {
@@ -265,6 +293,43 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
             )
         )
         self.assertEqual(entries, [("frag.x", "*"), ("frag.y", "*")])
+
+    def test_host_backend_serialises_scan_group(self):
+        backend = HostSubmissionBackend(
+            {
+                "host_scan": {
+                    "version": 1,
+                    "mode": {"type": "grid"},
+                    "entries": [],
+                    "execution": {},
+                    "metadata": {},
+                }
+            }
+        )
+        state = backend.new_submission_state()
+        state.add_scan_axis(
+            fqn="frag.left",
+            path="*",
+            axis_type="list",
+            axis_range={"values": [1.0, 2.0]},
+            scan_group="pair",
+        )
+        state.add_scan_axis(
+            fqn="frag.right",
+            path="*",
+            axis_type="list",
+            axis_range={"values": [10.0, 20.0]},
+            scan_group="pair",
+        )
+
+        params = {"host_scan": {"old": True}, "overrides": {}}
+        backend.apply_submission_state(params, state)
+
+        groups = [
+            entry["mode"].get("group", None)
+            for entry in params["host_scan"]["entries"]
+        ]
+        self.assertEqual(groups, ["pair", "pair"])
 
 
 if __name__ == "__main__":
