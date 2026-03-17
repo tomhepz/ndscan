@@ -64,6 +64,8 @@ __all__ = [
     "ExecutionPolicy",
     "PreviewPolicy",
     "HostScanSchemaError",
+    "HostScanSpec",
+    "compile_host_scan_spec",
     "compile_host_scan_schema",
     "ScanVariable",
     "ParameterMapping",
@@ -492,7 +494,12 @@ class ScanRequest:
 
 # Imported here rather than at module top because the schema compiler constructs
 # ``ScanRequest`` and ``ExecutionPolicy`` instances from this module.
-from .host_scan_schema import HostScanSchemaError, compile_host_scan_schema
+from .host_scan_schema import (
+    HostScanSchemaError,
+    HostScanSpec,
+    compile_host_scan_schema,
+    compile_host_scan_spec,
+)
 
 
 @dataclass(frozen=True)
@@ -1777,8 +1784,9 @@ def make_fragment_host_scan_exp(
             ),
         )
 
-    The second argument may also be a dict-based host scan schema. In that case the
-    runtime compiles it to ``ScanRequest`` plus fixed overrides during ``prepare()``.
+    The second argument may also be a dict-based host scan schema or a typed
+    ``HostScanSpec``. In both cases the runtime compiles it to ``ScanRequest`` plus
+    fixed overrides during ``prepare()``.
 
     The request factory is intentionally passed the fragment instance so callers can
     build requests directly from fragment handles.
@@ -1812,6 +1820,9 @@ def _resolve_host_scan_request_spec(
     if isinstance(request_spec, ScanRequest):
         return request_spec, {}
 
+    if isinstance(request_spec, HostScanSpec):
+        return compile_host_scan_spec(fragment, request_spec)
+
     if isinstance(request_spec, Mapping):
         return compile_host_scan_schema(fragment, request_spec)
 
@@ -1824,6 +1835,6 @@ def _resolve_host_scan_request_spec(
         return request_spec[0], dict(request_spec[1])
 
     raise TypeError(
-        "Host scan request must be a ScanRequest, a dict schema, or a callable "
-        "returning one of those"
+        "Host scan request must be a ScanRequest, a HostScanSpec, a dict schema, "
+        "or a callable returning one of those"
     )

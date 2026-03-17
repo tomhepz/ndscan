@@ -32,8 +32,10 @@ from ndscan.experiment import (
     RecursiveMidpointPointPolicy1D,
     RepeatPointPolicy,
     HostScanSession,
+    HostScanSpec,
     OnlineFit,
     ParameterMapping,
+    compile_host_scan_spec,
     compile_host_scan_schema,
     ScanRequest,
     ScanVariable,
@@ -272,6 +274,42 @@ class PointPolicyTest(unittest.TestCase):
 
 
 class HostScanSchemaCompilationTest(HasEnvironmentCase):
+    def test_host_scan_spec_round_trips_through_dict_transport(self):
+        spec = HostScanSpec.from_dict(
+            {
+                "version": 1,
+                "mode": {"type": "grid"},
+                "entries": [
+                    {
+                        "id": "x",
+                        "kind": "pseudoparam",
+                        "mode": {
+                            "type": "scan",
+                            "generator": {
+                                "type": "list",
+                                "range": {
+                                    "values": [1.0, 2.0],
+                                    "randomise_order": False,
+                                },
+                            },
+                        },
+                    },
+                    {
+                        "id": "offset",
+                        "kind": "pseudoparam",
+                        "mode": {
+                            "type": "fixed",
+                            "value": 0.5,
+                        },
+                    },
+                ],
+                "execution": {"max_points_per_batch": 8},
+                "metadata": {"demo_name": "round_trip"},
+            }
+        )
+
+        self.assertEqual(HostScanSpec.from_dict(spec.to_dict()), spec)
+
     def test_compile_grid_schema_without_scan_entries_returns_single_request(self):
         fragment = self.create(DictShimFragment, [])
         request, overrides = compile_host_scan_schema(
@@ -289,6 +327,78 @@ class HostScanSchemaCompilationTest(HasEnvironmentCase):
         self.assertEqual(request.point_policy.describe()["kind"], "single")
         self.assertEqual(request.metadata["demo_name"], "dict_single")
         self.assertEqual(overrides, {})
+
+    def test_compile_host_scan_spec_builds_same_grid_request_as_dict_path(self):
+        fragment = self.create(GridSchemaFragment, [])
+        spec = HostScanSpec.from_dict(
+            {
+                "version": 1,
+                "mode": {"type": "grid"},
+                "entries": [
+                    {
+                        "id": "x",
+                        "kind": "param",
+                        "target": {"fqn": fragment.x.parameter.fqn, "path": "*"},
+                        "mode": {
+                            "type": "scan",
+                            "generator": {
+                                "type": "list",
+                                "range": {
+                                    "values": [1.0, 2.0],
+                                    "randomise_order": False,
+                                },
+                            },
+                            "group": "pair",
+                        },
+                    },
+                    {
+                        "id": "y",
+                        "kind": "param",
+                        "target": {"fqn": fragment.y.parameter.fqn, "path": "*"},
+                        "mode": {
+                            "type": "scan",
+                            "generator": {
+                                "type": "list",
+                                "range": {
+                                    "values": [10.0, 11.0, 12.0],
+                                    "randomise_order": False,
+                                },
+                            },
+                            "group": "pair",
+                        },
+                    },
+                    {
+                        "id": "z",
+                        "kind": "param",
+                        "target": {"fqn": fragment.z.parameter.fqn, "path": "*"},
+                        "mode": {
+                            "type": "scan",
+                            "generator": {
+                                "type": "list",
+                                "range": {
+                                    "values": [100.0, 200.0],
+                                    "randomise_order": False,
+                                },
+                            },
+                        },
+                    },
+                ],
+                "execution": {},
+            }
+        )
+
+        request, overrides = compile_host_scan_spec(fragment, spec)
+
+        self.assertEqual(overrides, {})
+        self.assertEqual(
+            [point.axis_values for point in request.point_policy],
+            [
+                (1.0, 10.0, 100.0),
+                (1.0, 10.0, 200.0),
+                (2.0, 11.0, 100.0),
+                (2.0, 11.0, 200.0),
+            ],
+        )
 
     def test_compile_grid_schema_uses_zip_groups_with_shortest_length(self):
         fragment = self.create(GridSchemaFragment, [])
@@ -426,6 +536,28 @@ class HostScanSchemaCompilationTest(HasEnvironmentCase):
                 "execution": {},
                 "metadata": {"demo_name": "dict_shim"},
             },
+        )
+
+        exp = self.create(DictShimExperiment)
+        exp.prepare()
+        exp.run()
+
+        prefix = "ndscan.rid_0.site.root."
+        self.assertEqual(self.dataset_db.get(prefix + "state.num_points"), 1)
+        self.assertEqual(self.dataset_db.get(prefix + "points.channel_0"), [1.23])
+
+    def test_make_fragment_host_scan_exp_accepts_host_scan_spec(self):
+        DictShimExperiment = make_fragment_host_scan_exp(
+            DictShimFragment,
+            HostScanSpec.from_dict(
+                {
+                    "version": 1,
+                    "mode": {"type": "grid"},
+                    "entries": [],
+                    "execution": {},
+                    "metadata": {"demo_name": "typed_shim"},
+                }
+            ),
         )
 
         exp = self.create(DictShimExperiment)
