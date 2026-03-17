@@ -177,8 +177,9 @@ class HostScanParamTargetSpec:
     def validate(self, *, name: str) -> None:
         if not self.fqn:
             raise HostScanSchemaError(f"{name}.fqn must not be empty")
-        if not self.path:
-            raise HostScanSchemaError(f"{name}.path must not be empty")
+        # ``""`` is the canonical root-fragment path throughout ndscan.  The host
+        # runtime metadata, legacy submission path, and path-matching helper all use
+        # it already, so the typed host schema must accept it too.
 
 
 @dataclass(slots=True)

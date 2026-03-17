@@ -7,9 +7,11 @@ import unittest
 from unittest.mock import patch
 
 import h5py
+import ndscan.experiment
 import numpy as np
 from artiq.language.core import TerminationRequested
 from mock_environment import HasEnvironmentCase
+from sipyco import pyon
 
 from ndscan.experiment import (
     AnalysisFeedback,
@@ -48,8 +50,11 @@ from ndscan.experiment import (
     kernel,
     make_child_scan_site,
     make_fragment_host_scan_exp,
+    make_fragment_host_dashboard_scan_exp,
     run_subscan,
 )
+from ndscan.dashboard.submission import HostSubmissionBackend, select_submission_backend
+from ndscan.utils import PARAMS_ARG_KEY
 from ndscan.utils import FIT_OBJECTS
 
 
@@ -274,6 +279,9 @@ class PointPolicyTest(unittest.TestCase):
 
 
 class HostScanSchemaCompilationTest(HasEnvironmentCase):
+    def test_host_scan_base_class_is_not_exported_via_star_imports(self):
+        self.assertNotIn("HostScanExperiment", ndscan.experiment.__all__)
+
     def test_host_scan_spec_round_trips_through_dict_transport(self):
         spec = HostScanSpec.from_dict(
             {
@@ -2063,6 +2071,126 @@ class HostRuntimeCase(HasEnvironmentCase):
         prefix = "ndscan.rid_0.site.root."
         self.assertEqual(self.d(prefix, "points.param_0"), [5.0, 7.0])
         self.assertEqual(self.d(prefix, "points.channel_0"), [6.0, 8.0])
+
+    def test_code_defined_host_scan_experiment_does_not_publish_ndscan_arguments(self):
+        HostAddOneScan = make_fragment_host_scan_exp(
+            PlainAddOneFragment,
+            lambda fragment: ScanRequest.explicit([fragment.value], [[5.0], [7.0]]),
+        )
+
+        exp = self.create(HostAddOneScan)
+
+        self.assertFalse(hasattr(exp, "args"))
+        self.assertNotEqual(getattr(exp, "argument_ui", None), "ndscan")
+
+    def test_dashboard_host_scan_experiment_publishes_ndscan_arguments(self):
+        HostAddOneScan = make_fragment_host_dashboard_scan_exp(PlainAddOneFragment)
+
+        exp = self.create(HostAddOneScan)
+
+        self.assertEqual(exp.argument_ui, "ndscan")
+        self.assertIn("schemata", exp.args._params)
+        self.assertIn("instances", exp.args._params)
+        self.assertIn("overrides", exp.args._params)
+        self.assertIn("host_scan", exp.args._params)
+
+        backend = select_submission_backend(exp.args._params)
+        self.assertIsInstance(backend, HostSubmissionBackend)
+        self.assertTrue(backend.supports_editing)
+
+    def test_dashboard_host_scan_experiment_applies_dashboard_overrides(self):
+        sample_fragment = self.create(PlainAddOneFragment, [])
+        HostAddOneScan = make_fragment_host_dashboard_scan_exp(PlainAddOneFragment)
+
+        exp = self.create(
+            HostAddOneScan,
+            env_args={
+                PARAMS_ARG_KEY: pyon.encode(
+                    {
+                        "overrides": {
+                            sample_fragment.value.parameter.fqn: [
+                                {"path": "*", "value": 10.0}
+                            ]
+                        }
+                    }
+                )
+            },
+        )
+        exp.prepare()
+        exp.run()
+
+        prefix = "ndscan.rid_0.site.root."
+        self.assertEqual(self.d(prefix, "points.channel_0"), [11.0])
+
+    def test_dashboard_host_scan_experiment_uses_transport_host_scan_when_present(self):
+        sample_fragment = self.create(PlainAddOneFragment, [])
+        default_schema = {
+            "version": 1,
+            "mode": {"type": "grid"},
+            "entries": [
+                {
+                    "id": "value",
+                    "kind": "param",
+                    "target": {
+                        "fqn": sample_fragment.value.parameter.fqn,
+                        "path": "*",
+                    },
+                    "mode": {
+                        "type": "scan",
+                        "generator": {
+                            "type": "list",
+                            "range": {"values": [1.0], "randomise_order": False},
+                        },
+                    },
+                }
+            ],
+            "execution": {},
+        }
+        HostSchemaScan = make_fragment_host_dashboard_scan_exp(
+            PlainAddOneFragment,
+            default_schema,
+        )
+
+        exp = self.create(
+            HostSchemaScan,
+            env_args={
+                PARAMS_ARG_KEY: pyon.encode(
+                    {
+                        "host_scan": {
+                            "version": 1,
+                            "mode": {"type": "grid"},
+                            "entries": [
+                                {
+                                    "id": "value",
+                                    "kind": "param",
+                                    "target": {
+                                        "fqn": sample_fragment.value.parameter.fqn,
+                                        "path": "*",
+                                    },
+                                    "mode": {
+                                        "type": "scan",
+                                        "generator": {
+                                            "type": "list",
+                                            "range": {
+                                                "values": [2.0, 4.0],
+                                                "randomise_order": False,
+                                            },
+                                        },
+                                    },
+                                }
+                            ],
+                            "execution": {},
+                        }
+                    }
+                )
+            },
+        )
+        exp.prepare()
+        exp.run()
+
+        prefix = "ndscan.rid_0.site.root."
+        self.assertEqual(self.d(prefix, "points.param_0"), [2.0, 4.0])
+        self.assertEqual(self.d(prefix, "points.channel_0"), [3.0, 5.0])
 
     def test_host_scan_session_allows_kernel_helpers_inside_host_methods(self):
         fragment = self.create(HostCallsKernelHelperFragment, [])

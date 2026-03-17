@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
@@ -41,7 +42,7 @@ from sipyco import pyon
 
 from artiq import __version__ as artiq_version
 from artiq.coredevice.exceptions import RTIOUnderflow
-from artiq.language import EnvExperiment, HasEnvironment, kernel, portable
+from artiq.language import EnvExperiment, HasEnvironment, PYONValue, kernel, portable
 
 from ._host_analysis import HostScanAnalysisEngine
 from .fragment import ExpFragment, RestartKernelTransitoryError, TransitoryError
@@ -59,6 +60,7 @@ from .result_channels import ResultChannel, SingleUseSink
 from .scan_mapping import FixedPseudoparam, ParameterMapping, ScanVariable
 from .scan_site import ScanSite, ScanSiteDatasetWriter
 from .utils import is_kernel
+from ..utils import PARAMS_ARG_KEY
 
 __all__ = [
     "ExecutionPolicy",
@@ -80,9 +82,17 @@ __all__ = [
     "HostScanSession",
     "run_host_scan",
     "run_subscan",
-    "HostScanExperiment",
     "make_fragment_host_scan_exp",
+    "make_fragment_host_dashboard_scan_exp",
 ]
+
+# Hack: Only export the internal base experiment classes for Sphinx/autodoc.
+# Otherwise ARTIQ's explorer may try to instantiate them for modules using
+# ``from ndscan.experiment import *``, which fails because the base classes expect
+# adapter-provided build arguments.
+if "sphinx" in sys.modules:
+    __all__.append("HostScanExperiment")
+    __all__.append("HostDashboardScanExperiment")
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +262,102 @@ class RunContext:
 _active_run_context: ContextVar[RunContext | None] = ContextVar(
     "_active_run_context", default=None
 )
+
+
+class HostArgumentInterface(HasEnvironment):
+    """Expose host-runtime submissions through the existing ndscan dashboard channel.
+
+    This intentionally does less than the legacy argument interface:
+
+    - it always publishes parameter metadata and fixed overrides,
+    - it only publishes ``host_scan`` transport when the request was defined
+      declaratively (``HostScanSpec`` or dict form),
+    - it never attempts to reverse-engineer an arbitrary ``ScanRequest`` back into
+      submission schema.
+
+    That keeps the bridge one-way and predictable. Code-defined ``ScanRequest``
+    objects can still benefit from dashboard-set fixed overrides, while declarative
+    host-scan requests gain a transport payload that future dashboard editing can
+    target.
+    """
+
+    def build(self, fragment: ExpFragment, default_request_spec: Any = None) -> None:
+        instances = dict[str, list[str]]()
+        self._schemata = dict[str, dict]()
+        self._sample_instances = dict[str, Any]()
+        always_shown_params = []
+
+        fragment._collect_params(instances, self._schemata, self._sample_instances)
+        for handle in fragment.get_always_shown_params():
+            path = handle.owner._stringize_path()
+            try:
+                param = handle.owner._free_params[handle.name]
+                always_shown_params += [(param.fqn, path)]
+            except KeyError:
+                logger.debug(
+                    "Parameter '%s' specified in get_always_shown_params() is not a "
+                    "free parameter of fragment '%s'",
+                    handle.name,
+                    path,
+                )
+
+        desc: dict[str, Any] = {
+            "instances": instances,
+            "schemata": self._schemata,
+            "always_shown": always_shown_params,
+            "overrides": {},
+        }
+        default_transport = _host_request_transport_dict(default_request_spec)
+        if default_transport is not None:
+            desc["host_scan"] = default_transport
+
+        self._params = self.get_argument(PARAMS_ARG_KEY, PYONValue(default=desc))
+
+    def make_override_stores(self) -> dict[str, list[tuple[str, ParamStore]]]:
+        stores = {}
+        for fqn, specs in self._params.get("overrides", {}).items():
+            try:
+                store_type = self._sample_instances[fqn].StoreType
+            except KeyError:
+                raise KeyError(
+                    "Experiment does not have parameters matching override for FQN "
+                    f"{fqn!r}"
+                )
+            stores[fqn] = [
+                (
+                    spec["path"],
+                    store_type(
+                        (fqn, spec["path"]),
+                        store_type.value_from_pyon(spec["value"]),
+                    ),
+                )
+                for spec in specs
+            ]
+        return stores
+
+    def resolve_request(
+        self,
+        fragment: ExpFragment,
+        default_request_spec: Any | None,
+    ) -> tuple["ScanRequest", dict[str, list[tuple[str, ParamStore]]]]:
+        if "host_scan" in self._params:
+            request, compiled_overrides = compile_host_scan_schema(
+                fragment, self._params["host_scan"]
+            )
+        elif default_request_spec is None:
+            raise ValueError(
+                "No host_scan submission was provided for this dashboard-driven "
+                "host scan experiment"
+            )
+        else:
+            request, compiled_overrides = _resolve_host_scan_request_spec(
+                fragment,
+                default_request_spec,
+            )
+        return request, _merge_override_store_maps(
+            compiled_overrides,
+            self.make_override_stores(),
+        )
 
 
 def current_scan_context() -> ActiveScanContext | None:
@@ -496,6 +602,7 @@ class ScanRequest:
 # ``ScanRequest`` and ``ExecutionPolicy`` instances from this module.
 from .host_scan_schema import (
     HostScanSchemaError,
+    HostScanGridModeSpec,
     HostScanSpec,
     compile_host_scan_schema,
     compile_host_scan_spec,
@@ -1727,9 +1834,9 @@ def _install_scan_axis_stores(
 class HostScanExperiment(EnvExperiment):
     """Thin ``EnvExperiment`` adapter for the new host-only runtime.
 
-    This keeps the new runtime runnable from ARTIQ without dragging the dashboard
-    argument format into the first implementation. A code-defined request factory builds
-    the ``ScanRequest`` from the fragment instance.
+    This is the code-first path. The experiment code supplies the request directly and
+    the result behaves like a normal ARTIQ experiment rather than a dashboard-driven
+    ndscan submission target.
     """
 
     def build(
@@ -1741,14 +1848,62 @@ class HostScanExperiment(EnvExperiment):
         max_transitory_error_retries: int = 10,
     ) -> None:
         self.fragment = fragment_init()
-        self._request_factory = request_factory
+        self._request_spec = (
+            request_factory(self.fragment) if callable(request_factory) else request_factory
+        )
         self._max_rtio_underflow_retries = max_rtio_underflow_retries
         self._max_transitory_error_retries = max_transitory_error_retries
         self._session = None
 
     def prepare(self) -> None:
         request, overrides = _resolve_host_scan_request_spec(
-            self.fragment, self._request_factory
+            self.fragment,
+            self._request_spec,
+        )
+        self._session = HostScanSession(
+            self,
+            self.fragment,
+            request,
+            overrides=overrides,
+            max_rtio_underflow_retries=self._max_rtio_underflow_retries,
+            max_transitory_error_retries=self._max_transitory_error_retries,
+        )
+
+    def run(self) -> None:
+        self._session.run()
+
+
+class HostDashboardScanExperiment(EnvExperiment):
+    """Dashboard-driven host-runtime adapter.
+
+    This path publishes ndscan-style submission metadata via ``PARAMS_ARG_KEY`` and
+    expects the submitted ``host_scan`` payload to be compiled into a ``ScanRequest``
+    during ``prepare()``.
+    """
+
+    argument_ui = "ndscan"
+
+    def build(
+        self,
+        fragment_init,
+        *,
+        default_request_spec: Any | None = None,
+        max_rtio_underflow_retries: int = 3,
+        max_transitory_error_retries: int = 10,
+    ) -> None:
+        self.fragment = fragment_init()
+        if default_request_spec is None:
+            default_request_spec = HostScanSpec(mode=HostScanGridModeSpec())
+        self._default_request_spec = default_request_spec
+        self._max_rtio_underflow_retries = max_rtio_underflow_retries
+        self._max_transitory_error_retries = max_transitory_error_retries
+        self._session = None
+        self.args = HostArgumentInterface(self, self.fragment, self._default_request_spec)
+
+    def prepare(self) -> None:
+        request, overrides = self.args.resolve_request(
+            self.fragment,
+            self._default_request_spec,
         )
         self._session = HostScanSession(
             self,
@@ -1784,10 +1939,6 @@ def make_fragment_host_scan_exp(
             ),
         )
 
-    The second argument may also be a dict-based host scan schema or a typed
-    ``HostScanSpec``. In both cases the runtime compiles it to ``ScanRequest`` plus
-    fixed overrides during ``prepare()``.
-
     The request factory is intentionally passed the fragment instance so callers can
     build requests directly from fragment handles.
     """
@@ -1810,13 +1961,45 @@ def make_fragment_host_scan_exp(
     return FragmentHostScanShim
 
 
+def make_fragment_host_dashboard_scan_exp(
+    fragment_class: type[ExpFragment],
+    default_request_spec: HostScanSpec | Mapping[str, Any] | None = None,
+    *args,
+    max_rtio_underflow_retries: int = 3,
+    max_transitory_error_retries: int = 10,
+) -> type[HostDashboardScanExperiment]:
+    """Create a dashboard-driven host-runtime experiment.
+
+    Unlike ``make_fragment_host_scan_exp()``, this entrypoint does not take a request
+    factory.  It publishes ndscan submission metadata to the dashboard and expects a
+    submitted ``host_scan`` payload to be compiled into a ``ScanRequest`` before the
+    run starts.
+
+    ``default_request_spec`` is optional.  When provided as a ``HostScanSpec`` or dict
+    transport payload, it becomes the initial ``host_scan`` value shown to the
+    dashboard and also serves as a fallback when running headlessly.
+    """
+
+    class FragmentHostDashboardScanShim(HostDashboardScanExperiment):
+        def build(self):
+            super().build(
+                lambda: fragment_class(self, [], *args),
+                default_request_spec=default_request_spec,
+                max_rtio_underflow_retries=max_rtio_underflow_retries,
+                max_transitory_error_retries=max_transitory_error_retries,
+            )
+
+    FragmentHostDashboardScanShim.__name__ = fragment_class.__name__
+    FragmentHostDashboardScanShim.__qualname__ = fragment_class.__name__
+    FragmentHostDashboardScanShim.__module__ = fragment_class.__module__
+    FragmentHostDashboardScanShim.__doc__ = fragment_class.__doc__
+    return FragmentHostDashboardScanShim
+
+
 def _resolve_host_scan_request_spec(
     fragment: ExpFragment,
     request_spec: Any,
 ) -> tuple[ScanRequest, dict[str, list[tuple[str, ParamStore]]]]:
-    if callable(request_spec):
-        request_spec = request_spec(fragment)
-
     if isinstance(request_spec, ScanRequest):
         return request_spec, {}
 
@@ -1836,5 +2019,30 @@ def _resolve_host_scan_request_spec(
 
     raise TypeError(
         "Host scan request must be a ScanRequest, a HostScanSpec, a dict schema, "
-        "or a callable returning one of those"
+        "or a pair of (ScanRequest, overrides)"
     )
+
+
+def _host_request_transport_dict(request_spec: Any) -> dict[str, Any] | None:
+    if isinstance(request_spec, HostScanSpec):
+        return request_spec.to_dict()
+    if isinstance(request_spec, Mapping):
+        return dict(request_spec)
+    return None
+
+
+def _merge_override_store_maps(
+    *sources: Mapping[str, Sequence[tuple[str, ParamStore]]],
+) -> dict[str, list[tuple[str, ParamStore]]]:
+    """Merge override maps, letting later sources replace the same ``(fqn, path)``."""
+
+    merged: dict[str, OrderedDict[str, ParamStore]] = {}
+    for source in sources:
+        for fqn, pairs in source.items():
+            target = merged.setdefault(fqn, OrderedDict())
+            for path, store in pairs:
+                target[path] = store
+    return {
+        fqn: list(path_map.items())
+        for fqn, path_map in merged.items()
+    }

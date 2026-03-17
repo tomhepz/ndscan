@@ -1,7 +1,13 @@
-"""Handling of the different override type widgets (fixed and various scans).
+"""Handling of dashboard override type widgets.
 
-Notably, this is _not_ related to the list of global "Scan options" at the bottom of the
-argument editor (as mirrored by ndscan.experiment.scan_generator).
+Notably, this is _not_ related to the list of global "Scan options" at the bottom of
+the argument editor (as mirrored by ndscan.experiment.scan_generator).
+
+The legacy and host-runtime dashboard submission paths share most of the fixed-value
+widgets, but the host runtime currently only supports *finite* grid generators from
+the dashboard.  The host-specific option list therefore reuses the same visual idioms
+without exposing the legacy "infinitely refining" generator types that the typed host
+schema does not yet compile.
 """
 
 import logging
@@ -63,7 +69,7 @@ class ScanOption(QtCore.QObject):
     def build_ui(self, layout: QtWidgets.QLayout) -> None:
         raise NotImplementedError
 
-    def write_to_params(self, params: dict) -> None:
+    def write_to_submission(self, submission) -> None:
         raise NotImplementedError
 
     def read_sync_values(self, sync_values: dict) -> None:
@@ -89,9 +95,12 @@ class StringFixedScanOption(ScanOption):
         self.box = QtWidgets.QLineEdit()
         layout.addWidget(self.box)
 
-    def write_to_params(self, params: dict) -> None:
-        o = {"path": self.path, "value": self.box.text()}
-        params["overrides"].setdefault(self.schema["fqn"], []).append(o)
+    def write_to_submission(self, submission) -> None:
+        submission.add_override(
+            fqn=self.schema["fqn"],
+            path=self.path,
+            value=self.box.text(),
+        )
 
     def set_value(self, value) -> None:
         self.box.setText(value)
@@ -102,9 +111,12 @@ class BoolFixedScanOption(ScanOption):
         self.box = QtWidgets.QCheckBox()
         layout.addWidget(self.box)
 
-    def write_to_params(self, params: dict) -> None:
-        o = {"path": self.path, "value": self.box.isChecked()}
-        params["overrides"].setdefault(self.schema["fqn"], []).append(o)
+    def write_to_submission(self, submission) -> None:
+        submission.add_override(
+            fqn=self.schema["fqn"],
+            path=self.path,
+            value=self.box.isChecked(),
+        )
 
     def set_value(self, value) -> None:
         self.box.setChecked(value)
@@ -118,12 +130,12 @@ class EnumFixedScanOption(ScanOption):
         self.box.addItems(self._members.values())
         layout.addWidget(self.box)
 
-    def write_to_params(self, params: dict) -> None:
-        o = {
-            "path": self.path,
-            "value": self._member_values_to_keys[self.box.currentText()],
-        }
-        params["overrides"].setdefault(self.schema["fqn"], []).append(o)
+    def write_to_submission(self, submission) -> None:
+        submission.add_override(
+            fqn=self.schema["fqn"],
+            path=self.path,
+            value=self._member_values_to_keys[self.box.currentText()],
+        )
 
     def set_value(self, value) -> None:
         try:
@@ -178,9 +190,12 @@ class FixedScanOption(NumericScanOption):
         self.box = self._make_spin_box()
         layout.addWidget(self.box)
 
-    def write_to_params(self, params: dict) -> None:
-        o = {"path": self.path, "value": self.box.value() * self.scale}
-        params["overrides"].setdefault(self.schema["fqn"], []).append(o)
+    def write_to_submission(self, submission) -> None:
+        submission.add_override(
+            fqn=self.schema["fqn"],
+            path=self.path,
+            value=self.box.value() * self.scale,
+        )
 
     def set_value(self, value) -> None:
         if value is None:
@@ -236,16 +251,17 @@ class RangeScanOption(NumericScanOption):
         layout.addWidget(self.check_randomise)
         layout.setStretchFactor(self.check_randomise, 0)
 
-    def write_to_params(self, params: dict) -> None:
-        spec = {
-            "fqn": self.schema["fqn"],
-            "path": self.path,
-            "range": {
-                "randomise_order": self.check_randomise.isChecked(),
-            },
+    def write_to_submission(self, submission) -> None:
+        axis_range = {
+            "randomise_order": self.check_randomise.isChecked(),
         }
-        self.write_type_and_range(spec)
-        params["scan"].setdefault("axes", []).append(spec)
+        axis_type = self.write_type_and_range(axis_range)
+        submission.add_scan_axis(
+            fqn=self.schema["fqn"],
+            path=self.path,
+            axis_type=axis_type,
+            axis_range=axis_range,
+        )
 
 
 class MinMaxScanOption(RangeScanOption):
@@ -293,22 +309,87 @@ class MinMaxScanOption(RangeScanOption):
             return True
         return False
 
-    def write_type_and_range(self, spec: dict) -> None:
+    def write_type_and_range(self, axis_range: dict) -> str:
         start = self.box_start.value()
         stop = self.box_stop.value()
         if self.check_infinite.isChecked():
-            spec["type"] = "refining"
-            spec["range"] |= {
+            axis_range |= {
                 "lower": start * self.scale,
                 "upper": stop * self.scale,
             }
-        else:
-            spec["type"] = "linear"
-            spec["range"] |= {
-                "start": start * self.scale,
-                "stop": stop * self.scale,
+            return "refining"
+
+        axis_range |= {
+            "start": start * self.scale,
+            "stop": stop * self.scale,
+            "num_points": self.box_points.value(),
+        }
+        return "linear"
+
+
+class FiniteMinMaxScanOption(NumericScanOption):
+    """Finite-only min/max entry used by the host-runtime dashboard path."""
+
+    def build_ui(self, layout: QtWidgets.QLayout) -> None:
+        self.box_start = self._make_spin_box()
+        layout.addWidget(self.box_start)
+        layout.setStretchFactor(self.box_start, 1)
+
+        layout.addWidget(make_divider())
+
+        self.box_points = QtWidgets.QSpinBox()
+        self.box_points.setMinimum(2)
+        self.box_points.setMaximum(0xFFFF)
+        self.box_points.setValue(21)
+        self.box_points.setSuffix(" pts")
+        self.box_points.valueChanged.connect(self.value_changed)
+        layout.addWidget(self.box_points)
+        layout.setStretchFactor(self.box_points, 0)
+
+        self.check_randomise = self.make_randomise_box()
+        layout.addWidget(self.check_randomise)
+        layout.setStretchFactor(self.check_randomise, 0)
+
+        layout.addWidget(make_divider())
+
+        self.box_stop = self._make_spin_box()
+        layout.addWidget(self.box_stop)
+        layout.setStretchFactor(self.box_stop, 1)
+
+    def read_sync_values(self, sync_values: dict) -> None:
+        if SyncValue.lower in sync_values:
+            self.box_start.setValue(sync_values[SyncValue.lower])
+        if SyncValue.upper in sync_values:
+            self.box_stop.setValue(sync_values[SyncValue.upper])
+        if SyncValue.num_points in sync_values:
+            self.box_points.setValue(sync_values[SyncValue.num_points])
+
+    def write_sync_values(self, sync_values: dict) -> None:
+        sync_values[SyncValue.lower] = self.box_start.value()
+        sync_values[SyncValue.upper] = self.box_stop.value()
+        sync_values[SyncValue.num_points] = self.box_points.value()
+
+    def write_to_submission(self, submission) -> None:
+        submission.add_scan_axis(
+            fqn=self.schema["fqn"],
+            path=self.path,
+            axis_type="linear",
+            axis_range={
+                "start": self.box_start.value() * self.scale,
+                "stop": self.box_stop.value() * self.scale,
                 "num_points": self.box_points.value(),
-            }
+                "randomise_order": self.check_randomise.isChecked(),
+            },
+        )
+
+    def attempt_read_from_axis(self, axis: dict) -> bool:
+        if axis["type"] != "linear":
+            return False
+        self.box_start.setValue(axis["range"].get("start", 0.0) / self.scale)
+        self.box_stop.setValue(axis["range"].get("stop", 0.0) / self.scale)
+        self.box_points.setValue(axis["range"].get("num_points", 21))
+        self.check_randomise.setChecked(axis["range"].get("randomise_order", True))
+        return True
 
 
 class CentreSpanScanOption(RangeScanOption):
@@ -353,20 +434,86 @@ class CentreSpanScanOption(RangeScanOption):
         self.check_randomise.setChecked(axis["range"].get("randomise_order", True))
         return True
 
-    def write_type_and_range(self, spec: dict) -> None:
+    def write_type_and_range(self, axis_range: dict) -> str:
         centre = self.box_centre.value()
         half_span = self.box_half_span.value()
-        spec["range"] |= {
+        axis_range |= {
             "centre": centre * self.scale,
             "half_span": half_span * self.scale,
             "limit_lower": self.min,
             "limit_upper": self.max,
         }
         if self.check_infinite.isChecked():
-            spec["type"] = "centre_span_refining"
-        else:
-            spec["type"] = "centre_span"
-            spec["range"]["num_points"] = self.box_points.value()
+            return "centre_span_refining"
+
+        axis_range["num_points"] = self.box_points.value()
+        return "centre_span"
+
+
+class FiniteCentreSpanScanOption(NumericScanOption):
+    """Finite-only centre/span entry used by the host-runtime dashboard path."""
+
+    def build_ui(self, layout: QtWidgets.QLayout) -> None:
+        self.box_centre = self._make_spin_box()
+        layout.addWidget(self.box_centre)
+        layout.setStretchFactor(self.box_centre, 1)
+
+        plusminus = QtWidgets.QLabel("±")
+        layout.addWidget(plusminus)
+        layout.setStretchFactor(plusminus, 0)
+
+        self.box_half_span = self._make_spin_box(set_limits_from_spec=False)
+        layout.addWidget(self.box_half_span)
+        layout.setStretchFactor(self.box_half_span, 1)
+
+        layout.addWidget(make_divider())
+
+        self.box_points = QtWidgets.QSpinBox()
+        self.box_points.setMinimum(1)
+        self.box_points.setMaximum(0xFFFF)
+        self.box_points.setValue(21)
+        self.box_points.setSuffix(" pts")
+        self.box_points.valueChanged.connect(self.value_changed)
+        layout.addWidget(self.box_points)
+        layout.setStretchFactor(self.box_points, 0)
+
+        self.check_randomise = self.make_randomise_box()
+        layout.addWidget(self.check_randomise)
+        layout.setStretchFactor(self.check_randomise, 0)
+
+    def read_sync_values(self, sync_values: dict) -> None:
+        if SyncValue.centre in sync_values:
+            self.box_centre.setValue(sync_values[SyncValue.centre])
+        if SyncValue.num_points in sync_values:
+            self.box_points.setValue(sync_values[SyncValue.num_points])
+
+    def write_sync_values(self, sync_values: dict) -> None:
+        sync_values[SyncValue.centre] = self.box_centre.value()
+        sync_values[SyncValue.num_points] = self.box_points.value()
+
+    def write_to_submission(self, submission) -> None:
+        submission.add_scan_axis(
+            fqn=self.schema["fqn"],
+            path=self.path,
+            axis_type="centre_span",
+            axis_range={
+                "centre": self.box_centre.value() * self.scale,
+                "half_span": self.box_half_span.value() * self.scale,
+                "limit_lower": self.min,
+                "limit_upper": self.max,
+                "num_points": self.box_points.value(),
+                "randomise_order": self.check_randomise.isChecked(),
+            },
+        )
+
+    def attempt_read_from_axis(self, axis: dict) -> bool:
+        if axis["type"] != "centre_span":
+            return False
+        self.box_half_span.setValue(axis["range"].get("half_span", 0.0) / self.scale)
+        self.box_centre.setValue(axis["range"].get("centre", 0.0) / self.scale)
+        self.box_points.setValue(axis["range"].get("num_points", 21))
+        self.check_randomise.setChecked(axis["range"].get("randomise_order", True))
+        return True
 
 
 class ExpandingScanOption(NumericScanOption):
@@ -388,21 +535,19 @@ class ExpandingScanOption(NumericScanOption):
         layout.addWidget(self.box_spacing)
         layout.setStretchFactor(self.box_spacing, 1)
 
-    def write_to_params(self, params: dict) -> None:
-        schema = self.schema
-        spec = {
-            "fqn": schema["fqn"],
-            "path": self.path,
-            "type": "expanding",
-            "range": {
+    def write_to_submission(self, submission) -> None:
+        submission.add_scan_axis(
+            fqn=self.schema["fqn"],
+            path=self.path,
+            axis_type="expanding",
+            axis_range={
                 "centre": self.box_centre.value() * self.scale,
                 "spacing": self.box_spacing.value() * self.scale,
                 "randomise_order": self.check_randomise.isChecked(),
+                "limit_lower": self.min,
+                "limit_upper": self.max,
             },
-        }
-        spec["range"]["limit_lower"] = self.min
-        spec["range"]["limit_upper"] = self.max
-        params["scan"].setdefault("axes", []).append(spec)
+        )
 
     def read_sync_values(self, sync_values: dict) -> None:
         if SyncValue.centre in sync_values:
@@ -440,22 +585,21 @@ class ListScanOption(NumericScanOption):
         layout.addWidget(self.check_randomise)
         layout.setStretchFactor(self.check_randomise, 0)
 
-    def write_to_params(self, params: dict) -> None:
+    def write_to_submission(self, submission) -> None:
         try:
             values = [v * self.scale for v in parse_list_pyon(self.box_pyon.text())]
         except Exception as e:
             logger.info(e)
             values = []
-        spec = {
-            "fqn": self.schema["fqn"],
-            "path": self.path,
-            "type": "list",
-            "range": {
+        submission.add_scan_axis(
+            fqn=self.schema["fqn"],
+            path=self.path,
+            axis_type="list",
+            axis_range={
                 "values": values,
                 "randomise_order": self.check_randomise.isChecked(),
             },
-        }
-        params["scan"].setdefault("axes", []).append(spec)
+        )
 
     def attempt_read_from_axis(self, axis: dict) -> bool:
         if axis["type"] != "list":
@@ -480,17 +624,16 @@ class BoolScanOption(ScanOption):
         layout.addWidget(self.check_randomise)
         layout.setStretchFactor(self.check_randomise, 1)
 
-    def write_to_params(self, params: dict) -> None:
-        spec = {
-            "fqn": self.schema["fqn"],
-            "path": self.path,
-            "type": "list",
-            "range": {
+    def write_to_submission(self, submission) -> None:
+        submission.add_scan_axis(
+            fqn=self.schema["fqn"],
+            path=self.path,
+            axis_type="list",
+            axis_range={
                 "values": [False, True],
                 "randomise_order": self.check_randomise.isChecked(),
             },
-        }
-        params["scan"].setdefault("axes", []).append(spec)
+        )
 
     def attempt_read_from_axis(self, axis: dict) -> bool:
         if axis["type"] != "list":
@@ -505,17 +648,16 @@ class EnumScanOption(ScanOption):
         layout.addWidget(self.check_randomise)
         layout.setStretchFactor(self.check_randomise, 0)
 
-    def write_to_params(self, params: dict) -> None:
-        spec = {
-            "fqn": self.schema["fqn"],
-            "path": self.path,
-            "type": "list",
-            "range": {
+    def write_to_submission(self, submission) -> None:
+        submission.add_scan_axis(
+            fqn=self.schema["fqn"],
+            path=self.path,
+            axis_type="list",
+            axis_range={
                 "values": list(self.schema["spec"]["members"].keys()),
                 "randomise_order": self.check_randomise.isChecked(),
             },
-        }
-        params["scan"].setdefault("axes", []).append(spec)
+        )
 
     def attempt_read_from_axis(self, axis: dict) -> bool:
         if axis["type"] != "list":
@@ -551,6 +693,32 @@ def list_scan_option_types(
         if is_scannable:
             result["Min./Max."] = MinMaxScanOption
             result["Centered"] = CentreSpanScanOption
+            result["Expanding"] = ExpandingScanOption
+            result["List"] = ListScanOption
+    return result
+
+
+def list_host_scan_option_types(
+    schema_type: str, is_scannable: bool
+) -> OrderedDict[str, type[ScanOption]]:
+    """Return row option widgets for the editable host-runtime dashboard subset."""
+
+    result = OrderedDict([])
+    if schema_type == "string":
+        result["Fixed"] = StringFixedScanOption
+    elif schema_type == "bool":
+        result["Fixed"] = BoolFixedScanOption
+        if is_scannable:
+            result["Scanning"] = BoolScanOption
+    elif schema_type == "enum":
+        result["Fixed"] = EnumFixedScanOption
+        if is_scannable:
+            result["Scanning"] = EnumScanOption
+    else:
+        result["Fixed"] = FixedScanOption
+        if is_scannable:
+            result["Min./Max."] = FiniteMinMaxScanOption
+            result["Centered"] = FiniteCentreSpanScanOption
             result["Expanding"] = ExpandingScanOption
             result["List"] = ListScanOption
     return result
