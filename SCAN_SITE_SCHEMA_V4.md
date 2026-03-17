@@ -106,6 +106,7 @@ For one site prefix `<site>`, the runtime may write:
 ```text
 <site>scan.point_policy
 <site>scan.pseudoparams
+<site>scan.fixed_pseudoparams
 <site>scan.parameters
 <site>scan.fixed_parameters
 <site>scan.channels
@@ -171,6 +172,32 @@ Example:
       "type": "float",
       "spec": {}
     }
+  }
+}
+```
+
+### `scan.fixed_pseudoparams`
+
+Logical runtime-only symbols that stayed constant for the entire run.
+
+This is the schema counterpart to text-expression constants supplied through the
+host-scan submission layer. Unlike `scan.pseudoparams`, these values do not produce
+`points.pseudoparam_*` arrays because they never vary point-by-point.
+
+Entries are keyed by the symbolic name visible to rebind expressions.
+
+Example:
+
+```json
+{
+  "offset": {
+    "variable": {
+      "name": "offset",
+      "description": "",
+      "type": "float",
+      "spec": {}
+    },
+    "value": 0.5
   }
 }
 ```
@@ -244,6 +271,10 @@ Dependencies can refer to:
 - a `pseudoparam_*`
 - a `param_*`
 - an unscanned fragment parameter
+
+When an expression also uses fixed pseudoparams, those constants are described
+separately in `scan.fixed_pseudoparams`; they do not appear in the dependency list
+because they are not point-varying runtime inputs.
 
 Example:
 

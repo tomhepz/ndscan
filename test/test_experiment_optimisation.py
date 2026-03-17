@@ -8,6 +8,7 @@ try:
 
     from ndscan.experiment import (
         AskTellOptimiserPointPolicy,
+        compile_host_scan_schema,
         ExecutionPolicy,
         ExpFragment,
         ExplicitBatchExplorationStrategy,
@@ -228,6 +229,50 @@ if _OPTIMISATION_DEPS_AVAILABLE:
             self.assertEqual(self.dataset_db.get(prefix + "state.num_points"), 4)
             self.assertEqual(len(self.dataset_db.get(prefix + "points.channel_0")), 4)
             self.assertEqual(backend.describe()["kind"], "nubo_bayesian_optimisation")
+
+        def test_compile_host_scan_schema_builds_gpo_request(self):
+            fragment = self.create(OneDimQuadraticFragment, [])
+            request, overrides = compile_host_scan_schema(
+                fragment,
+                {
+                    "version": 1,
+                    "mode": {
+                        "type": "gpo",
+                        "objective": {
+                            "kind": "channel",
+                            "target": {"path": "cost"},
+                        },
+                        "backend": {
+                            "kind": "nubo",
+                            "batch_size": 2,
+                            "initial_design_size": 2,
+                            "max_batches": 1,
+                            "acquisition": "ucb",
+                        },
+                    },
+                    "entries": [
+                        {
+                            "id": "x",
+                            "kind": "param",
+                            "target": {"fqn": fragment.x.parameter.fqn, "path": "*"},
+                            "mode": {
+                                "type": "gpo_scan",
+                                "lower": -1.0,
+                                "upper": 1.0,
+                            },
+                        }
+                    ],
+                    "execution": {},
+                },
+            )
+
+            self.assertEqual(overrides, {})
+            self.assertEqual(request.point_policy.describe()["kind"], "ask_tell_optimiser")
+
+            result = HostScanSession(fragment, fragment, request).run()
+            prefix = result.site_prefix
+            self.assertEqual(self.dataset_db.get(prefix + "state.num_points"), 4)
+            self.assertEqual(len(self.dataset_db.get(prefix + "points.channel_0")), 4)
 
 
 if __name__ == "__main__":

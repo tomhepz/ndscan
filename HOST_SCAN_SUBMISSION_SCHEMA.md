@@ -3,15 +3,14 @@
 This document proposes the first concrete dashboard submission schema for the
 host-runtime path.
 
-It is intentionally narrower than the full host runtime:
+It is intentionally shaped around the current row-oriented UI:
 
-- it does not try to expose every `ScanRequest` field directly,
-- it keeps the existing parameter-row UI model as much as possible,
-- it adds only the new concepts needed to reach:
-  - pseudoparameters,
-  - rebind expressions,
-  - zip-groups over finite scan variables,
-  - Bayesian optimisation.
+- the user sees a list of parameters,
+- each row declares how that parameter is driven,
+- a top-level mode decides whether the run is a normal grid scan or a Gaussian
+  process optimisation (GPO),
+- pseudoparameters can be added at the top and then used exactly like ordinary
+  numeric rows.
 
 This document is a proposal, not a description of code already implemented.
 
@@ -21,7 +20,7 @@ The schema should:
 
 - fit naturally into the existing `ndscan_params` dashboard payload,
 - preserve the current per-parameter editing workflow,
-- separate legacy scan submission from host-runtime submission,
+- support pseudoparameters in both grid and GPO modes,
 - compile cleanly into:
   - `overrides`,
   - `ScanVariable`s,
@@ -37,8 +36,8 @@ The first version does not try to cover:
 - arbitrary explicit point tables,
 - text-defined multi-step strategies beyond rebind expressions,
 - no-axis `repeat`/`time_series` compatibility with the legacy runner,
-- full parity with every old generator inside zipped groups,
-- UI formula chaining through arbitrary intermediate derived quantities.
+- full parity with every old generator in every mode,
+- rebind chains between derived symbols.
 
 ## Outer `ndscan_params` Envelope
 
@@ -66,8 +65,14 @@ Rules:
 ```python
 {
     "version": 1,
+    "mode": {
+        "type": "grid" | "gpo",
+        # when type == "gpo":
+        "objective": {...},
+        "backend": {...},
+    },
     "entries": [...],
-    "strategy": {...},
+    "metadata": {...},
     "execution": {...},
 }
 ```
@@ -76,12 +81,17 @@ Fields:
 
 - `version`
   - integer schema revision for the host submission format
+- `mode`
+  - top-level behaviour:
+    - `{"type": "grid"}` for ordinary scans
+    - `{"type": "gpo", ...}` for Gaussian process optimisation
 - `entries`
   - parameter rows and pseudoparameter rows
-- `strategy`
-  - how active scanned variables are combined
+- `metadata`
+  - optional request metadata copied through to `ScanRequest.metadata`
 - `execution`
   - runtime scheduling knobs that belong in `ExecutionPolicy`
+- top-level mode metadata lives inside the `mode` object itself
 
 ## Entries
 
@@ -94,94 +104,154 @@ Each row in the host editor lowers to one `entry`.
     "target": {"fqn": "...", "path": "*"},  # required for kind="param"
     "description": "Logical drive",          # optional, pseudoparams mainly
     "default": 0.0,                          # optional, pseudoparams mainly
-    "mode": {...}
+    "mode": {
+        "type": "fixed" | "scan" | "gpo_scan" | "rebind",
+        ...
+    },
 }
 ```
 
 Rules:
 
 - `id` is required and must be unique within one `host_scan`.
-- `id` is the identifier used in rebind expressions and strategy dimension lists.
+- `id` is the identifier used in rebind expressions.
 - `kind="param"` refers to a real fragment parameter selected by `(fqn, path)`.
 - `kind="pseudoparam"` declares a runtime-only logical variable that will compile to a
   `ScanVariable`.
+- pseudoparameters should be creatable from a dedicated top-of-editor action, but once
+  created they follow the same row model as ordinary parameters.
 
-## Entry Modes
+## Row Modes
 
-### Fixed
+The available row modes depend on the top-level `host_scan.mode.type`.
+
+### Grid Mode
+
+When `host_scan.mode.type == "grid"`, each row may use:
+
+- `fixed`
+- `scan`
+- `rebind`
+
+### GPO Mode
+
+When `host_scan.mode.type == "gpo"`, each row may use:
+
+- `fixed`
+- `gpo_scan`
+- `rebind`
+
+This keeps the UI simple:
+
+- in ordinary scans, rows either scan directly or derive from scanned values,
+- in optimiser mode, rows either define bounded optimisation dimensions, remain fixed,
+  or derive from optimisation dimensions.
+
+## `fixed`
 
 ```python
 {
-    "kind": "fixed",
-    "value": 1.23
+    "mode": {
+        "type": "fixed",
+        "value": 1.23
+    }
 }
 ```
 
 Semantics:
 
 - for `kind="param"`:
-  - compile to a normal fixed override
+  - compile to a fixed override
 - for `kind="pseudoparam"`:
-  - compile to a constant available to rebind expressions
+  - compile to a constant symbol available to rebind expressions
   - not a scan axis
 
-### Scan
+## `scan`
 
 ```python
 {
-    "kind": "scan",
-    "generator": {
-        "type": "linear" | "centre_span" | "list" | ...,
-        "range": {...}
-    },
-    "zip_group": "pulse" | None
+    "mode": {
+        "type": "scan",
+        "generator": {
+            "type": "linear" | "centre_span" | "list" | "refining" | ...,
+            "range": {...},
+        },
+        "group": "pulse" | None
+    }
 }
 ```
 
 Semantics:
 
-- declares a scanned variable
-- `zip_group` is optional
-- entries with the same non-empty `zip_group` are zipped together
-- entries in different groups are orthogonal, i.e. combined by Cartesian product
+- only valid when `host_scan.mode.type == "grid"`
+- declares a directly scanned variable
+- `group` is the scan group previously discussed as a zip group
+- rows with the same non-empty `group` are zipped together
+- rows in different groups are orthogonal, i.e. combined by Cartesian product
 
-`generator` reuses the existing legacy generator schema shape, so current numeric scan
-widgets can be reused where possible.
+`mode.generator` should reuse the existing legacy generator-style schema shape wherever
+possible so the current scan widgets can be reused.
 
-### Rebind
+## `gpo_scan`
 
 ```python
 {
-    "kind": "rebind",
-    "expr": "0.2 + 0.05 * drive"
+    "mode": {
+        "type": "gpo_scan",
+        "lower": -1.0,
+        "upper": 1.0
+    }
 }
 ```
 
 Semantics:
 
-- only valid for `kind="param"`
-- this parameter is not directly scanned
-- its value is computed from other variables and lowered to a `ParameterMapping`
+- only valid when `host_scan.mode.type == "gpo"`
+- declares one bounded optimiser dimension
+- this lowers to a logical optimisation axis in the GP input space
 
 First-version restriction:
 
-- rebind expressions may reference only entry `id`s with:
-  - `kind="scan"`
-  - or `kind="fixed"` on pseudoparameters
-- rebind expressions may not reference other rebind entries
+- `gpo_scan` is numeric only
+- explicit finite lower and upper bounds are required
+
+## `rebind`
+
+```python
+{
+    "mode": {
+        "type": "rebind",
+        "expr": "0.2 + 0.05 * drive"
+    }
+}
+```
+
+Semantics:
+
+- intended primarily for `kind="param"`
+- the parameter is not driven directly by a scan or optimiser dimension
+- its value is computed from other symbols and lowered to a `ParameterMapping`
+
+First-version restriction:
+
+- rebind expressions may reference only non-rebound symbols:
+  - scanned rows
+  - optimiser-dimension rows
+  - fixed pseudoparameters
+- rebind expressions may not reference other rebind rows
 
 This keeps the dependency graph one layer deep and avoids cycle handling in the first
 compiler.
 
-## Zip-Group Semantics
+## Scan Groups in Grid Mode
 
-The `strategy.kind = "grid"` mode uses the active scanned entries and partitions them by
-`zip_group`.
+When `host_scan.mode.type == "grid"`, active scanned rows are partitioned by
+`entry.mode.group`.
 
 Rules:
 
-- scanned entries with `zip_group = null` or omitted are placed in singleton groups
-- scanned entries with the same `zip_group` are zipped together
+- scanned rows with `group = null` or omitted are placed in singleton groups
+- scanned rows with the same non-empty `group` are zipped together
 - different groups are combined orthogonally
 
 Compiler lowering:
@@ -190,124 +260,86 @@ Compiler lowering:
 - one multi-entry group -> `ZipPointPolicy`
 - product across groups -> `ProductPointPolicy`
 
-Example:
+Each unique group therefore behaves like one logical axis of an ND scan, even if that
+axis drives multiple concrete parameters together.
 
-```python
-entries = [
-    {"id": "a", "kind": "param", "target": ..., "mode": {"kind": "scan", "generator": G1}},
-    {"id": "b", "kind": "param", "target": ..., "mode": {"kind": "scan", "generator": G2, "zip_group": "g"}},
-    {"id": "c", "kind": "param", "target": ..., "mode": {"kind": "scan", "generator": G3, "zip_group": "g"}},
-]
-```
+### Shortest-Length Rule
 
-Meaning:
+Zip groups should follow ordinary zip semantics:
 
-- `b` and `c` are zipped
-- `a` is orthogonal to that zipped pair
-- overall result is an ND scan over:
-  - `a`
-  - `(b, c)` together
+- the group stops when the shortest member stops
+- longer generators are truncated
 
-### Zip-Group Restrictions
+This means equal lengths are not required for correctness. However, the dashboard
+should warn when a zip group mixes generators with different finite lengths so the user
+understands that some points will be dropped.
 
-First version:
+### Recommended First-Version Restrictions
 
-- zipped entries must lower to a finite ordered point list
-- all entries in a zip group must have the same number of points
+The cleanest initial implementation is:
 
-In practice, that means zip groups should initially support only generators that are
-obviously finite and level-free, such as:
+- allow only generators whose finite point sequence can be materialised up front inside
+  zip groups
+- warn on length mismatch
+- reject genuinely open-ended or level-driven generators in zip groups if they do not
+  yet have a clean lowering to a finite point list
+
+If needed, the first implementation can be narrower still and support only:
 
 - `linear`
 - finite `centre_span`
 - `list`
 - bool/enum-as-list
 
-The following should be rejected in zip groups for the first version:
+with later extension to refinement-style generators once their host-runtime lowering is
+finalised.
 
-- `refining`
-- `centre_span_refining`
-- `expanding`
+## Gaussian Process Optimisation Mode
 
-Those generators can still be used outside zip groups where their standalone semantics
-are well-defined.
+When `host_scan.mode.type == "gpo"`, the scan request is built from:
 
-## Strategy
+- all rows with `mode.type == "gpo_scan"` as the GP input dimensions,
+- all rows with `mode.type == "fixed"` as constants,
+- all rows with `mode.type == "rebind"` as downstream parameter mappings.
 
-The first host submission schema only needs two top-level strategies:
+This means:
 
-```python
-{"kind": "grid"}
-```
+- the GP lives in logical variable space,
+- rebound parameters may depend on those dimensions,
+- rebound parameters are not themselves GP dimensions.
 
-and
+That separation keeps the optimiser state clean and makes pseudoparameter-driven
+reparameterisations natural.
 
-```python
-{
-    "kind": "bayesopt",
-    "dimensions": ["detuning", "drive"],
-    "backend": {...},
-    "objective": {...}
-}
-```
-
-### Grid
-
-`{"kind": "grid"}` means:
-
-- gather all entries with `mode.kind == "scan"`
-- partition by `zip_group`
-- zip within groups
-- take the Cartesian product across groups
-
-This is the default host-submission mode.
-
-### Bayesian Optimisation
+## Top-Level GPO Metadata
 
 ```python
 {
-    "kind": "bayesopt",
-    "dimensions": ["detuning", "drive"],
-    "backend": {
-        "kind": "nubo",
-        "batch_size": 4,
-        "max_batches": 20,
-        "initial_design_size": 8,
-        "acquisition": "ucb"
+    "mode": {
+        "type": "gpo",
+        "objective": {
+            "kind": "channel",
+            "target": {"path": "probability"}
+        },
+        "backend": {
+            "kind": "nubo",
+            "batch_size": 4,
+            "max_batches": 20,
+            "initial_design_size": 8,
+            "acquisition": "ucb"
+        }
     },
-    "objective": {
-        "kind": "channel",
-        "target": {"path": "probability"}
-    }
 }
 ```
 
-Semantics:
+Fields:
 
-- `dimensions` selects which scanned entry ids form the GP input space
-- rebound parameters may depend on those dimensions, but are not dimensions
-- the backend lowers to the existing ask/tell optimiser path
+- `objective`
+  - the scalar quantity to optimise
+- `backend`
+  - optimiser configuration that lowers to the existing ask/tell backend path
 
-### Bayesian Optimisation Restrictions
-
-First version:
-
-- every BO dimension must come from an entry with:
-  - `mode.kind == "scan"`
-  - numeric type
-  - explicit finite lower/upper bounds
-- no zipped groups are used in BO mode
-- no non-numeric lists/bool/enum dimensions
-- no refining/expanding generators
-
-Practical first-version rule:
-
-- only `linear` scan entries should be accepted as BO dimensions
-
-This aligns with the current UI idea that BO dimensions come from a min/max style
-selection.
-
-## Objective Selection
+### Objective Selection
 
 The first schema only needs scalar channel objectives:
 
@@ -324,6 +356,16 @@ Future extensions can add:
 - explicit noise/error channel pairing
 
 but these are not required for the first compiler pass.
+
+### First-Version GPO Restrictions
+
+- every `mode.type == "gpo_scan"` row must be numeric
+- every `mode.type == "gpo_scan"` row must have explicit finite lower/upper bounds
+- rebinds are allowed, but only downstream of those dimensions
+- scan-group metadata is irrelevant in GPO mode and should be ignored or rejected
+
+In practical UI terms, this matches the intended "min/max over a chosen set of
+parameters" model.
 
 ## Execution
 
@@ -349,19 +391,19 @@ Given a validated `host_scan`, the compiler should:
 
 1. Resolve each `kind="param"` target against the fragment tree.
 2. Convert fixed real params into `overrides`.
-3. Convert fixed/scanned pseudoparam entries into `ScanVariable`s and constants.
-4. Convert scan entries into logical scan variables.
-5. Convert rebind entries into `ParameterMapping`s.
-6. Lower:
-   - `strategy.kind == "grid"` to zipped groups + Cartesian product
-   - `strategy.kind == "bayesopt"` to the optimiser point policy
-7. Produce:
+3. Convert fixed/scanned/GPO-scanned pseudoparam entries into `ScanVariable`s or
+   constants as appropriate.
+4. Convert rebind entries into `ParameterMapping`s.
+5. Lower:
+   - `host_scan.mode.type == "grid"` to zipped groups + Cartesian product
+   - `host_scan.mode.type == "gpo"` to the optimiser point policy
+6. Produce:
    - `ScanRequest`
    - `overrides`
 
 ### Direct vs logical axes
 
-When lowering scanned `kind="param"` entries:
+When lowering directly driven `kind="param"` rows:
 
 - if the target resolves to exactly one concrete handle:
   - the compiler may use the real `ParamHandle` directly as a scan axis
@@ -372,24 +414,32 @@ When lowering scanned `kind="param"` entries:
 This keeps wildcard path selection compatible with the host runtime's core identity
 model.
 
-## Example: Grid with Pseudoparam and Rebind
+## Example: Grid Mode with Scan Groups and Rebind
 
 ```python
 {
     "version": 1,
+    "mode": {
+        "type": "grid"
+    },
     "entries": [
         {
             "id": "t",
             "kind": "param",
             "target": {"fqn": "pkg.Exp.t", "path": "*"},
             "mode": {
-                "kind": "scan",
+                "type": "scan",
                 "generator": {
                     "type": "linear",
-                    "range": {"start": 0.0, "stop": 10.0, "num_points": 11,
-                              "randomise_order": False}
-                }
-            }
+                    "range": {
+                        "start": 0.0,
+                        "stop": 10.0,
+                        "num_points": 11,
+                        "randomise_order": False
+                    }
+                },
+                "group": None
+            },
         },
         {
             "id": "drive",
@@ -397,110 +447,110 @@ model.
             "description": "Logical drive",
             "default": 0.0,
             "mode": {
-                "kind": "scan",
+                "type": "scan",
                 "generator": {
                     "type": "linear",
-                    "range": {"start": -1.0, "stop": 1.0, "num_points": 21,
-                              "randomise_order": False}
+                    "range": {
+                        "start": -1.0,
+                        "stop": 1.0,
+                        "num_points": 21,
+                        "randomise_order": False
+                    }
                 },
-                "zip_group": "pair"
-            }
+                "group": "pair"
+            },
         },
         {
             "id": "phase",
             "kind": "param",
             "target": {"fqn": "pkg.Exp.phase", "path": "*"},
             "mode": {
-                "kind": "scan",
+                "type": "scan",
                 "generator": {
                     "type": "linear",
-                    "range": {"start": 0.0, "stop": 180.0, "num_points": 21,
-                              "randomise_order": False}
+                    "range": {
+                        "start": 0.0,
+                        "stop": 180.0,
+                        "num_points": 21,
+                        "randomise_order": False
+                    }
                 },
-                "zip_group": "pair"
-            }
+                "group": "pair"
+            },
         },
         {
             "id": "amp",
             "kind": "param",
             "target": {"fqn": "pkg.Exp.amp", "path": "*"},
             "mode": {
-                "kind": "rebind",
+                "type": "rebind",
                 "expr": "0.5 + 0.2 * drive"
-            }
+            },
         }
     ],
-    "strategy": {"kind": "grid"},
     "execution": {"max_points_per_batch": 32}
 }
 ```
 
 Meaning:
 
-- `drive` and `phase` are zipped together
+- `drive` and `phase` are zipped together as one logical axis
 - `t` is orthogonal to that zipped pair
 - `amp` is derived from `drive`
 
-## Example: Bayesian Optimisation with Rebind
+## Example: GPO Mode with Pseudoparameters and Rebind
 
 ```python
 {
     "version": 1,
-    "entries": [
-        {
-            "id": "x",
-            "kind": "pseudoparam",
-            "default": 0.0,
-            "mode": {
-                "kind": "scan",
-                "generator": {
-                    "type": "linear",
-                    "range": {"start": -3.0, "stop": 3.0, "num_points": 21,
-                              "randomise_order": False}
-                }
-            }
+    "mode": {
+        "type": "gpo",
+        "objective": {
+            "kind": "channel",
+            "target": {"path": "cost"}
         },
-        {
-            "id": "y",
-            "kind": "pseudoparam",
-            "default": 0.0,
-            "mode": {
-                "kind": "scan",
-                "generator": {
-                    "type": "linear",
-                    "range": {"start": -2.0, "stop": 2.0, "num_points": 21,
-                              "randomise_order": False}
-                }
-            }
-        },
-        {
-            "id": "physical_x",
-            "kind": "param",
-            "target": {"fqn": "pkg.Exp.x", "path": "*"},
-            "mode": {"kind": "rebind", "expr": "x"}
-        },
-        {
-            "id": "physical_y",
-            "kind": "param",
-            "target": {"fqn": "pkg.Exp.y", "path": "*"},
-            "mode": {"kind": "rebind", "expr": "2.0 * y"}
-        }
-    ],
-    "strategy": {
-        "kind": "bayesopt",
-        "dimensions": ["x", "y"],
         "backend": {
             "kind": "nubo",
             "batch_size": 4,
             "max_batches": 20,
             "initial_design_size": 8,
             "acquisition": "ucb"
-        },
-        "objective": {
-            "kind": "channel",
-            "target": {"path": "cost"}
         }
     },
+    "entries": [
+        {
+            "id": "x",
+            "kind": "pseudoparam",
+            "default": 0.0,
+            "mode": {
+                "type": "gpo_scan",
+                "lower": -3.0,
+                "upper": 3.0
+            },
+        },
+        {
+            "id": "y",
+            "kind": "pseudoparam",
+            "default": 0.0,
+            "mode": {
+                "type": "gpo_scan",
+                "lower": -2.0,
+                "upper": 2.0
+            },
+        },
+        {
+            "id": "physical_x",
+            "kind": "param",
+            "target": {"fqn": "pkg.Exp.x", "path": "*"},
+            "mode": {"type": "rebind", "expr": "x"}
+        },
+        {
+            "id": "physical_y",
+            "kind": "param",
+            "target": {"fqn": "pkg.Exp.y", "path": "*"},
+            "mode": {"type": "rebind", "expr": "2.0 * y"}
+        }
+    ],
     "execution": {"max_points_per_batch": 4}
 }
 ```
@@ -518,5 +568,3 @@ The first code steps implied by this schema are:
 1. host submission dataclasses / validation
 2. compiler from `host_scan` to `ScanRequest + overrides`
 3. AST-based rebind expression compiler
-4. grid mode with zip-group lowering
-5. BO mode with bounded linear dimensions only

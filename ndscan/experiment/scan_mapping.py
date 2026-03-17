@@ -18,10 +18,12 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from .expression import compile_expression
 from .parameters import ParamHandle
 
 __all__ = [
     "ScanVariable",
+    "FixedPseudoparam",
     "ParameterMapping",
 ]
 
@@ -73,6 +75,24 @@ class ScanVariable:
 
 
 @dataclass(frozen=True)
+class FixedPseudoparam:
+    """Constant logical value available to text mappings but not scanned point-by-point.
+
+    Fixed pseudoparams exist for request-level reparameterisations where a symbolic
+    name is still useful for expressions and offline inspection, even though the value
+    never changes during the run. They are written into the scan-site schema under
+    ``scan.fixed_pseudoparams`` rather than ``points.pseudoparam_*``.
+    """
+
+    variable: ScanVariable
+    value: Any
+
+    @property
+    def name(self) -> str:
+        return self.variable.name
+
+
+@dataclass(frozen=True)
 class ParameterMapping:
     """Map logical inputs to one or more concrete fragment parameters.
 
@@ -94,6 +114,7 @@ class ParameterMapping:
     dependencies: tuple[ParamHandle | ScanVariable, ...]
     evaluate: Callable[[Mapping[ParamHandle | ScanVariable, Any]], Any]
     description: str = ""
+    expression: str | None = None
 
     def __post_init__(self) -> None:
         if not self.targets:
@@ -124,20 +145,100 @@ class ParameterMapping:
         cls,
         *,
         targets: Sequence[ParamHandle],
-        dependencies: Sequence[ParamHandle | ScanVariable],
         expression: str,
+        symbols: Mapping[str, ParamHandle | ScanVariable | Any] | None = None,
+        dependencies: Sequence[ParamHandle | ScanVariable] | None = None,
+        constants: Mapping[str, Any] | None = None,
+        functions: Mapping[str, Callable[..., Any]] | None = None,
         description: str = "",
     ) -> "ParameterMapping":
-        """Future GUI-oriented text entry for parameter mappings.
+        """Compile a small text expression into a normal ``ParameterMapping``.
 
-        The intended design is for dashboard/UI formula entry to compile to ordinary
-        ``ParameterMapping`` objects. The runtime should not need a second execution
-        path just because a mapping originated from text rather than Python code.
+        This is the GUI-oriented counterpart to writing a mapping function in Python.
+        The expression language is intentionally tiny and is implemented by the
+        standalone :mod:`ndscan.experiment.expression` module.
+
+        ``symbols`` maps expression variable names onto either dynamic dependencies
+        (``ParamHandle`` / ``ScanVariable``) or fixed values. Fixed values are baked
+        into the compiled expression; dynamic values become ``dependencies`` of the
+        resulting mapping.
+
+        ``dependencies`` remains as a convenience for simple cases. It auto-generates
+        names from the dependency objects themselves:
+
+        - ``ScanVariable("logical")`` -> ``logical``
+        - ``fragment.drive`` -> ``drive``
+
+        Exactly one of ``symbols`` or ``dependencies`` may be provided.
+
+        For multi-target mappings the expression result is broadcast to every target.
+        This matches the intended GUI semantics where one row defines one formula for
+        one logical quantity, even if that quantity is rebound onto several concrete
+        handles selected by a wildcard path.
         """
+        if symbols is not None and dependencies is not None:
+            raise ValueError(
+                "ParameterMapping.from_text() accepts either symbols= or "
+                "dependencies=, not both"
+            )
+        if symbols is None:
+            symbols = _symbols_from_dependencies(dependencies or ())
+        elif not isinstance(symbols, Mapping):
+            raise TypeError("symbols must be a mapping when specified")
 
-        raise NotImplementedError(
-            "Text-based mapping expressions are not implemented yet; compile GUI "
-            "formula input to a ParameterMapping before execution."
+        symbol_map = dict(symbols)
+        if constants is None:
+            constant_map: dict[str, Any] = {}
+        else:
+            constant_map = dict(constants)
+        overlap = set(symbol_map.keys()) & set(constant_map.keys())
+        if overlap:
+            raise ValueError(
+                "Expression symbols and explicit constants overlap: "
+                + ", ".join(sorted(overlap))
+            )
+
+        dynamic_symbols: dict[str, ParamHandle | ScanVariable] = {}
+        fixed_symbols: dict[str, Any] = {}
+        for name, value in symbol_map.items():
+            if not isinstance(name, str):
+                raise TypeError("Expression symbol names must be strings")
+            if isinstance(value, (ParamHandle, ScanVariable)):
+                dynamic_symbols[name] = value
+            else:
+                fixed_symbols[name] = value
+
+        compiled = compile_expression(
+            expression,
+            variable_names=dynamic_symbols.keys(),
+            constants={**constant_map, **fixed_symbols},
+            functions=functions,
+        )
+        referenced_symbol_map = {
+            name: dynamic_symbols[name] for name in compiled.variable_names
+        }
+        referenced_dependencies = tuple(
+            referenced_symbol_map[name] for name in compiled.variable_names
+        )
+
+        targets = tuple(targets)
+        if len(targets) == 1:
+            return cls(
+                targets=targets,
+                dependencies=referenced_dependencies,
+                evaluate=_make_text_mapping_evaluator(compiled, referenced_symbol_map),
+                description=description,
+                expression=expression,
+            )
+
+        return cls(
+            targets=targets,
+            dependencies=referenced_dependencies,
+            evaluate=_make_text_broadcast_mapping_evaluator(
+                compiled, referenced_symbol_map, targets
+            ),
+            description=description,
+            expression=expression,
         )
 
     def compute(
@@ -244,6 +345,7 @@ class ParameterMapping:
                 for target in self.targets
             ],
             "dependencies": dependencies,
+            **({} if self.expression is None else {"expression": self.expression}),
         }
 
 
@@ -255,3 +357,46 @@ def _dependency_name(dependency: ParamHandle | ScanVariable) -> str:
     if isinstance(dependency, ParamHandle):
         return f"{dependency.owner._stringize_path()}/{dependency.name}"
     return dependency.name
+
+
+def _symbols_from_dependencies(
+    dependencies: Sequence[ParamHandle | ScanVariable],
+) -> dict[str, ParamHandle | ScanVariable]:
+    result: dict[str, ParamHandle | ScanVariable] = {}
+    for dependency in dependencies:
+        name = dependency.name
+        if name in result:
+            raise ValueError(
+                "Auto-generated dependency names are not unique; use symbols= "
+                f"instead (duplicate name: {name!r})"
+            )
+        result[name] = dependency
+    return result
+
+
+def _make_text_mapping_evaluator(
+    compiled_expression,
+    dynamic_symbols: Mapping[str, ParamHandle | ScanVariable],
+) -> Callable[[Mapping[ParamHandle | ScanVariable, Any]], Any]:
+    def evaluate(values: Mapping[ParamHandle | ScanVariable, Any]) -> Any:
+        return compiled_expression.evaluate(
+            {name: values[dependency] for name, dependency in dynamic_symbols.items()}
+        )
+
+    return evaluate
+
+
+def _make_text_broadcast_mapping_evaluator(
+    compiled_expression,
+    dynamic_symbols: Mapping[str, ParamHandle | ScanVariable],
+    targets: Sequence[ParamHandle],
+) -> Callable[[Mapping[ParamHandle | ScanVariable, Any]], dict[ParamHandle, Any]]:
+    def evaluate(
+        values: Mapping[ParamHandle | ScanVariable, Any],
+    ) -> dict[ParamHandle, Any]:
+        result = compiled_expression.evaluate(
+            {name: values[dependency] for name, dependency in dynamic_symbols.items()}
+        )
+        return {target: result for target in targets}
+
+    return evaluate

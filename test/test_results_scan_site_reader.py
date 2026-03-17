@@ -9,6 +9,7 @@ import h5py
 from mock_environment import ExpFragmentCase
 
 from ndscan.experiment import (
+    compile_host_scan_schema,
     ExpFragment,
     ExplicitPointPolicy,
     FloatChannel,
@@ -175,6 +176,71 @@ class ScanSiteReaderCase(ExpFragmentCase):
         self.assertEqual(list(site.point_data["pseudoparam_0"]), [0.0, 1.0, 2.0])
         self.assertEqual(list(site.point_data["param_0"]), [0.5, 1.5, 2.5])
         self.assertEqual(site.choose_default_x_key(), ("pseudoparam", "pseudoparam_0"))
+
+    def test_reads_fixed_pseudoparams_from_schema_compiled_scan(self):
+        fragment = self.create(PhysicalDriveFragment)
+        request, overrides = compile_host_scan_schema(
+            fragment,
+            {
+                "version": 1,
+                "mode": {"type": "grid"},
+                "entries": [
+                    {
+                        "id": "logical_drive",
+                        "kind": "pseudoparam",
+                        "mode": {
+                            "type": "scan",
+                            "generator": {
+                                "type": "list",
+                                "range": {
+                                    "values": [0.0, 1.0, 2.0],
+                                    "randomise_order": False,
+                                },
+                            },
+                        },
+                    },
+                    {
+                        "id": "offset",
+                        "kind": "pseudoparam",
+                        "mode": {
+                            "type": "fixed",
+                            "value": 0.5,
+                        },
+                    },
+                    {
+                        "id": "drive",
+                        "kind": "param",
+                        "target": {"fqn": fragment.drive.parameter.fqn, "path": "*"},
+                        "mode": {
+                            "type": "rebind",
+                            "expr": "logical_drive + offset",
+                        },
+                    },
+                ],
+            },
+        )
+        session = HostScanSession(fragment, fragment, request, overrides=overrides)
+        session.run()
+
+        with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
+            self._write_snapshot(fragment, tmp.name)
+            snapshot = read_host_runtime_snapshot(tmp.name)
+
+        site = snapshot.get_site(())
+        self.assertEqual(
+            site.fixed_pseudoparams,
+            {
+                "offset": {
+                    "variable": {
+                        "name": "offset",
+                        "description": "",
+                        "type": "float",
+                        "spec": {},
+                    },
+                    "value": 0.5,
+                }
+            },
+        )
 
     def test_reads_nested_child_sites(self):
         parent = self.create(NestedChildScanParent)

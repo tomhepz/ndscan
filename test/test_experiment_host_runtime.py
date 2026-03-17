@@ -34,6 +34,7 @@ from ndscan.experiment import (
     HostScanSession,
     OnlineFit,
     ParameterMapping,
+    compile_host_scan_schema,
     ScanRequest,
     ScanVariable,
     ScanSite,
@@ -48,6 +49,25 @@ from ndscan.experiment import (
     run_subscan,
 )
 from ndscan.utils import FIT_OBJECTS
+
+
+class DictShimFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_result("value", FloatChannel)
+
+    def run_once(self):
+        self.value.push(1.23)
+
+
+class GridSchemaFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("x", FloatParam, "x", default=0.0)
+        self.setattr_param("y", FloatParam, "y", default=0.0)
+        self.setattr_param("z", FloatParam, "z", default=0.0)
+        self.setattr_result("value", FloatChannel)
+
+    def run_once(self):
+        self.value.push(self.x.get() + self.y.get() + self.z.get())
 
 
 class PointPolicyTest(unittest.TestCase):
@@ -219,6 +239,7 @@ class PointPolicyTest(unittest.TestCase):
             [(0,), (0,), (0,), (1,), (1,), (1,)],
         )
 
+
     def test_repeat_point_policy_can_stop_current_point_from_batch_feedback(self):
         source = RepeatPointPolicy(
             ExplicitPointPolicy(1, [(5.0,)]),
@@ -248,6 +269,172 @@ class PointPolicyTest(unittest.TestCase):
             )
 
         self.assertEqual(num_observations, 3)
+
+
+class HostScanSchemaCompilationTest(HasEnvironmentCase):
+    def test_compile_grid_schema_without_scan_entries_returns_single_request(self):
+        fragment = self.create(DictShimFragment, [])
+        request, overrides = compile_host_scan_schema(
+            fragment,
+            {
+                "version": 1,
+                "mode": {"type": "grid"},
+                "entries": [],
+                "execution": {},
+                "metadata": {"demo_name": "dict_single"},
+            },
+        )
+
+        self.assertEqual(request.axes, ())
+        self.assertEqual(request.point_policy.describe()["kind"], "single")
+        self.assertEqual(request.metadata["demo_name"], "dict_single")
+        self.assertEqual(overrides, {})
+
+    def test_compile_grid_schema_uses_zip_groups_with_shortest_length(self):
+        fragment = self.create(GridSchemaFragment, [])
+        request, overrides = compile_host_scan_schema(
+            fragment,
+            {
+                "version": 1,
+                "mode": {"type": "grid"},
+                "entries": [
+                    {
+                        "id": "x",
+                        "kind": "param",
+                        "target": {"fqn": fragment.x.parameter.fqn, "path": "*"},
+                        "mode": {
+                            "type": "scan",
+                            "generator": {
+                                "type": "list",
+                                "range": {
+                                    "values": [1.0, 2.0],
+                                    "randomise_order": False,
+                                },
+                            },
+                            "group": "pair",
+                        },
+                    },
+                    {
+                        "id": "y",
+                        "kind": "param",
+                        "target": {"fqn": fragment.y.parameter.fqn, "path": "*"},
+                        "mode": {
+                            "type": "scan",
+                            "generator": {
+                                "type": "list",
+                                "range": {
+                                    "values": [10.0, 11.0, 12.0],
+                                    "randomise_order": False,
+                                },
+                            },
+                            "group": "pair",
+                        },
+                    },
+                    {
+                        "id": "z",
+                        "kind": "param",
+                        "target": {"fqn": fragment.z.parameter.fqn, "path": "*"},
+                        "mode": {
+                            "type": "scan",
+                            "generator": {
+                                "type": "list",
+                                "range": {
+                                    "values": [100.0, 200.0],
+                                    "randomise_order": False,
+                                },
+                            },
+                        },
+                    },
+                ],
+                "execution": {},
+            },
+        )
+
+        self.assertEqual(overrides, {})
+        self.assertEqual(
+            [point.axis_values for point in request.point_policy],
+            [
+                (1.0, 10.0, 100.0),
+                (1.0, 10.0, 200.0),
+                (2.0, 11.0, 100.0),
+                (2.0, 11.0, 200.0),
+            ],
+        )
+
+    def test_compile_grid_schema_supports_rebind_expressions(self):
+        fragment = self.create(PhysicalDriveFragment, [])
+        request, overrides = compile_host_scan_schema(
+            fragment,
+            {
+                "version": 1,
+                "mode": {"type": "grid"},
+                "entries": [
+                    {
+                        "id": "logical_drive",
+                        "kind": "pseudoparam",
+                        "mode": {
+                            "type": "scan",
+                            "generator": {
+                                "type": "list",
+                                "range": {
+                                    "values": [0.0, 1.0, 2.0],
+                                    "randomise_order": False,
+                                },
+                            },
+                        },
+                    },
+                    {
+                        "id": "offset",
+                        "kind": "pseudoparam",
+                        "mode": {
+                            "type": "fixed",
+                            "value": 0.5,
+                        },
+                    },
+                    {
+                        "id": "drive",
+                        "kind": "param",
+                        "target": {"fqn": fragment.drive.parameter.fqn, "path": "*"},
+                        "mode": {
+                            "type": "rebind",
+                            "expr": "logical_drive + offset",
+                        },
+                    },
+                ],
+                "execution": {},
+            },
+        )
+
+        self.assertEqual(overrides, {})
+        self.assertEqual(request.axes[0].name, "logical_drive")
+        self.assertEqual(len(request.parameter_mappings), 1)
+        self.assertEqual(len(request.fixed_pseudoparams), 1)
+        self.assertEqual(request.fixed_pseudoparams[0].name, "offset")
+        self.assertEqual(request.fixed_pseudoparams[0].value, 0.5)
+        self.assertEqual(
+            request.parameter_mappings[0].expression,
+            "logical_drive + offset",
+        )
+
+    def test_make_fragment_host_scan_exp_accepts_dict_schema(self):
+        DictShimExperiment = make_fragment_host_scan_exp(
+            DictShimFragment,
+            {
+                "version": 1,
+                "mode": {"type": "grid"},
+                "entries": [],
+                "execution": {},
+                "metadata": {"demo_name": "dict_shim"},
+            },
+        )
+
+        exp = self.create(DictShimExperiment)
+        exp.prepare()
+        exp.run()
+
+        prefix = "ndscan.rid_0.site.root."
+        self.assertEqual(self.dataset_db.get(prefix + "state.num_points"), 1)
+        self.assertEqual(self.dataset_db.get(prefix + "points.channel_0"), [1.23])
 
 
 class TwoParamAddFragment(ExpFragment):
@@ -1079,17 +1266,122 @@ class HostRuntimeCase(HasEnvironmentCase):
             },
         )
 
-    def test_parameter_mapping_from_text_is_reserved_for_future_gui_compilation(self):
+    def test_schema_compiled_rebind_expression_uses_same_runtime_mapping_path(self):
+        fragment = self.create(PhysicalDriveFragment, [])
+        request, overrides = compile_host_scan_schema(
+            fragment,
+            {
+                "version": 1,
+                "mode": {"type": "grid"},
+                "entries": [
+                    {
+                        "id": "logical_drive",
+                        "kind": "pseudoparam",
+                        "mode": {
+                            "type": "scan",
+                            "generator": {
+                                "type": "list",
+                                "range": {
+                                    "values": [0.0, 1.0, 2.0],
+                                    "randomise_order": False,
+                                },
+                            },
+                        },
+                    },
+                    {
+                        "id": "offset",
+                        "kind": "pseudoparam",
+                        "mode": {
+                            "type": "fixed",
+                            "value": 0.5,
+                        },
+                    },
+                    {
+                        "id": "drive",
+                        "kind": "param",
+                        "target": {"fqn": fragment.drive.parameter.fqn, "path": "*"},
+                        "mode": {
+                            "type": "rebind",
+                            "expr": "logical_drive + offset",
+                        },
+                    },
+                ],
+                "execution": {},
+            },
+        )
+
+        session = HostScanSession(fragment, fragment, request, overrides=overrides)
+        result = session.run()
+
+        prefix = result.site_prefix
+        self.assertEqual(self.d(prefix, "points.pseudoparam_0"), [0.0, 1.0, 2.0])
+        self.assertEqual(self.d(prefix, "points.param_0"), [0.5, 1.5, 2.5])
+        self.assertEqual(self.d(prefix, "points.channel_0"), [1.0, 3.0, 5.0])
+        self.assertEqual(
+            self.j(prefix, "scan.fixed_pseudoparams"),
+            {
+                "offset": {
+                    "variable": {
+                        "name": "offset",
+                        "description": "",
+                        "type": "float",
+                        "spec": {},
+                    },
+                    "value": 0.5,
+                }
+            },
+        )
+        self.assertEqual(
+            self.j(prefix, "scan.parameter_mappings"),
+            {
+                "mapping_0": {
+                    "description": "",
+                    "expression": "logical_drive + offset",
+                    "targets": [
+                        {
+                            "path": "",
+                            "param": {
+                                "description": "drive",
+                                "default": "0.0",
+                                "fqn": f"{__name__}.PhysicalDriveFragment.drive",
+                                "spec": {
+                                    "is_scannable": True,
+                                    "scale": 1.0,
+                                    "step": 0.1,
+                                },
+                                "type": "float",
+                            },
+                        }
+                    ],
+                    "dependencies": [
+                        {
+                            "kind": "pseudoparam",
+                            "key": "pseudoparam_0",
+                        }
+                    ],
+                }
+            },
+        )
+
+    def test_parameter_mapping_from_text_compiles_to_normal_runtime_mapping(self):
         fragment = self.create(PhysicalDriveFragment, [])
         logical_drive = ScanVariable("logical_drive")
+        spare = ScanVariable("spare")
 
-        with self.assertRaises(NotImplementedError):
-            ParameterMapping.from_text(
-                targets=[fragment.drive],
-                dependencies=[logical_drive],
-                expression="logical_drive + 0.5",
-                description="Future GUI formula",
-            )
+        mapping = ParameterMapping.from_text(
+            targets=[fragment.drive],
+            symbols={
+                "logical_drive": logical_drive,
+                "offset": 0.5,
+                "spare": spare,
+            },
+            expression="logical_drive + offset",
+            description="GUI formula",
+        )
+
+        self.assertEqual(mapping.expression, "logical_drive + offset")
+        self.assertEqual(mapping.dependencies, (logical_drive,))
+        self.assertEqual(mapping.compute({logical_drive: 2.0}), {fragment.drive: 2.5})
 
     def test_host_scan_session_rejects_scan_axes_that_are_also_mapping_targets(self):
         fragment = self.create(PhysicalDriveFragment, [])

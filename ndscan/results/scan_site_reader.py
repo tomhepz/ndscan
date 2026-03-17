@@ -28,6 +28,7 @@ _STRUCTURED_KEYS = {
     "site.parent_path",
     "scan.point_policy",
     "scan.pseudoparams",
+    "scan.fixed_pseudoparams",
     "scan.parameters",
     "scan.fixed_parameters",
     "scan.channels",
@@ -152,6 +153,7 @@ class HostRuntimeSiteData:
     parent_path: tuple[str, ...] | None
     fragment_fqn: str
     pseudoparams: dict[str, Any]
+    fixed_pseudoparams: dict[str, Any]
     parameters: dict[str, Any]
     fixed_parameters: dict[str, Any]
     channels: dict[str, Any]
@@ -295,6 +297,7 @@ def read_host_runtime_snapshot(path: str | Path) -> HostRuntimeSnapshot:
             parent_path=None if parent_path is None else tuple(parent_path),
             fragment_fqn=datasets[prefix + "site.fragment_fqn"],
             pseudoparams=datasets.get(prefix + "scan.pseudoparams", {}),
+            fixed_pseudoparams=datasets.get(prefix + "scan.fixed_pseudoparams", {}),
             parameters=datasets.get(prefix + "scan.parameters", {}),
             fixed_parameters=datasets.get(prefix + "scan.fixed_parameters", {}),
             channels=datasets.get(prefix + "scan.channels", {}),

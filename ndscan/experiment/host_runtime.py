@@ -51,17 +51,20 @@ from .point_policy import (
     CartesianPointPolicy,
     ExplicitPointPolicy,
     PointPolicy,
+    ProductPointPolicy,
     SinglePointPolicy,
     ZipPointPolicy,
 )
 from .result_channels import ResultChannel, SingleUseSink
-from .scan_mapping import ParameterMapping, ScanVariable
+from .scan_mapping import FixedPseudoparam, ParameterMapping, ScanVariable
 from .scan_site import ScanSite, ScanSiteDatasetWriter
 from .utils import is_kernel
 
 __all__ = [
     "ExecutionPolicy",
     "PreviewPolicy",
+    "HostScanSchemaError",
+    "compile_host_scan_schema",
     "ScanVariable",
     "ParameterMapping",
     "ScanRequest",
@@ -364,6 +367,7 @@ class ScanRequest:
     metadata: Mapping[str, Any] = field(default_factory=dict)
     execution_policy: ExecutionPolicy = field(default_factory=ExecutionPolicy)
     parameter_mappings: tuple[ParameterMapping, ...] = ()
+    fixed_pseudoparams: tuple[FixedPseudoparam, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.execution_policy, ExecutionPolicy):
@@ -372,6 +376,11 @@ class ScanRequest:
             if not isinstance(mapping, ParameterMapping):
                 raise TypeError(
                     "parameter_mappings must contain ParameterMapping instances"
+                )
+        for pseudoparam in self.fixed_pseudoparams:
+            if not isinstance(pseudoparam, FixedPseudoparam):
+                raise TypeError(
+                    "fixed_pseudoparams must contain FixedPseudoparam instances"
                 )
 
     def with_site(self, site: ScanSite) -> "ScanRequest":
@@ -390,6 +399,7 @@ class ScanRequest:
             metadata=self.metadata,
             execution_policy=self.execution_policy,
             parameter_mappings=self.parameter_mappings,
+            fixed_pseudoparams=self.fixed_pseudoparams,
         )
 
     def with_parameter_mappings(
@@ -409,6 +419,7 @@ class ScanRequest:
             metadata=self.metadata,
             execution_policy=self.execution_policy,
             parameter_mappings=self.parameter_mappings + tuple(parameter_mappings),
+            fixed_pseudoparams=self.fixed_pseudoparams,
         )
 
     @classmethod
@@ -478,6 +489,10 @@ class ScanRequest:
             metadata={} if metadata is None else metadata,
             execution_policy=ExecutionPolicy() if execution_policy is None else execution_policy,
         )
+
+# Imported here rather than at module top because the schema compiler constructs
+# ``ScanRequest`` and ``ExecutionPolicy`` instances from this module.
+from .host_scan_schema import HostScanSchemaError, compile_host_scan_schema
 
 
 @dataclass(frozen=True)
@@ -918,6 +933,13 @@ class HostScanProgram:
                 axis.point_key: axis.metadata()
                 for axis in self.axes
                 if isinstance(axis.source, ScanVariable)
+            },
+            "scan.fixed_pseudoparams": {
+                pseudoparam.name: {
+                    "variable": pseudoparam.variable.describe(),
+                    "value": _parameter_value_for_metadata(pseudoparam.value),
+                }
+                for pseudoparam in self.request.fixed_pseudoparams
             },
             "scan.fixed_parameters": _collect_fixed_parameter_metadata(
                 self.fragment,
@@ -1718,11 +1740,14 @@ class HostScanExperiment(EnvExperiment):
         self._session = None
 
     def prepare(self) -> None:
-        request = self._request_factory(self.fragment)
+        request, overrides = _resolve_host_scan_request_spec(
+            self.fragment, self._request_factory
+        )
         self._session = HostScanSession(
             self,
             self.fragment,
             request,
+            overrides=overrides,
             max_rtio_underflow_retries=self._max_rtio_underflow_retries,
             max_transitory_error_retries=self._max_transitory_error_retries,
         )
@@ -1752,6 +1777,9 @@ def make_fragment_host_scan_exp(
             ),
         )
 
+    The second argument may also be a dict-based host scan schema. In that case the
+    runtime compiles it to ``ScanRequest`` plus fixed overrides during ``prepare()``.
+
     The request factory is intentionally passed the fragment instance so callers can
     build requests directly from fragment handles.
     """
@@ -1772,3 +1800,30 @@ def make_fragment_host_scan_exp(
     FragmentHostScanShim.__module__ = fragment_class.__module__
     FragmentHostScanShim.__doc__ = fragment_class.__doc__
     return FragmentHostScanShim
+
+
+def _resolve_host_scan_request_spec(
+    fragment: ExpFragment,
+    request_spec: Any,
+) -> tuple[ScanRequest, dict[str, list[tuple[str, ParamStore]]]]:
+    if callable(request_spec):
+        request_spec = request_spec(fragment)
+
+    if isinstance(request_spec, ScanRequest):
+        return request_spec, {}
+
+    if isinstance(request_spec, Mapping):
+        return compile_host_scan_schema(fragment, request_spec)
+
+    if (
+        isinstance(request_spec, tuple)
+        and len(request_spec) == 2
+        and isinstance(request_spec[0], ScanRequest)
+        and isinstance(request_spec[1], Mapping)
+    ):
+        return request_spec[0], dict(request_spec[1])
+
+    raise TypeError(
+        "Host scan request must be a ScanRequest, a dict schema, or a callable "
+        "returning one of those"
+    )
