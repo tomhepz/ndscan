@@ -239,6 +239,27 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
         )
         self.assertTrue(backend.supports_editing)
 
+    def test_host_backend_accepts_rebind_entries(self):
+        backend = HostSubmissionBackend(
+            {
+                "host_scan": {
+                    "version": 1,
+                    "mode": {"type": "grid"},
+                    "entries": [
+                        {
+                            "id": "detuning",
+                            "kind": "param",
+                            "target": {"fqn": "frag.detuning", "path": "*"},
+                            "mode": {"type": "rebind", "expr": "x + offset"},
+                        }
+                    ],
+                    "execution": {},
+                    "metadata": {},
+                }
+            }
+        )
+        self.assertTrue(backend.supports_editing)
+
     def test_host_backend_iterates_existing_param_entries(self):
         backend = HostSubmissionBackend(
             {
@@ -330,6 +351,42 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
             for entry in params["host_scan"]["entries"]
         ]
         self.assertEqual(groups, ["pair", "pair"])
+
+    def test_host_backend_serialises_rebind_entry(self):
+        backend = HostSubmissionBackend(
+            {
+                "host_scan": {
+                    "version": 1,
+                    "mode": {"type": "grid"},
+                    "entries": [],
+                    "execution": {},
+                    "metadata": {},
+                }
+            }
+        )
+        state = backend.new_submission_state()
+        state.add_scan_axis(
+            fqn="frag.x",
+            path="",
+            axis_type="linear",
+            axis_range={"start": 0.0, "stop": 1.0, "num_points": 11},
+        )
+        state.add_rebind(
+            fqn="frag.y",
+            path="",
+            expression="x + 0.5",
+        )
+
+        params = {"host_scan": {"old": True}, "overrides": {}}
+        backend.apply_submission_state(params, state)
+
+        by_fqn = {
+            entry["target"]["fqn"]: entry for entry in params["host_scan"]["entries"]
+        }
+        self.assertEqual(
+            by_fqn["frag.y"]["mode"],
+            {"type": "rebind", "expr": "x + 0.5"},
+        )
 
 
 if __name__ == "__main__":

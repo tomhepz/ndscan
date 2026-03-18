@@ -130,6 +130,11 @@ class HostOverrideEntry(_BaseOverrideEntry):
     def __init__(self, schema, path, *, is_scannable: bool, backend, **kwargs):
         super().__init__(schema, path, **kwargs)
         self._host_backend = backend
+        self._supports_rebind = schema["type"] not in {"string", "bool", "enum"}
+        self._symbol_name = backend.symbol_name_for_target(
+            fqn=schema["fqn"],
+            path=path,
+        )
         self._fixed_option = self._build_option(get_host_fixed_option_type(schema["type"]))
         self._scan_option_names = []
         self._scan_options = []
@@ -144,6 +149,8 @@ class HostOverrideEntry(_BaseOverrideEntry):
         self._mode_box.addItem("Fixed")
         if self._scan_options:
             self._mode_box.addItem("Scan")
+        if self._supports_rebind:
+            self._mode_box.addItem("Rebind")
         self._mode_box.currentIndexChanged.connect(self._mode_changed)
         self.addWidget(self._mode_box, col=0)
 
@@ -168,6 +175,9 @@ class HostOverrideEntry(_BaseOverrideEntry):
         self._scan_kind_box.setVisible(len(self._scan_options) > 1)
 
         self._mode_stack.addWidget(self._scan_container)
+        self._rebind_editor = _HostRebindEditor(symbol_name=self._symbol_name)
+        self._rebind_editor.box.textChanged.connect(lambda *_: self.value_changed.emit())
+        self._mode_stack.addWidget(self._rebind_editor.container)
         self.addWidget(self._mode_stack, col=1)
 
         self._group_container = LayoutWidget()
@@ -181,7 +191,7 @@ class HostOverrideEntry(_BaseOverrideEntry):
         self._group_box.setPlaceholderText("optional")
         self._group_box.setMaximumWidth(110)
         self._group_box.setToolTip(group_label.toolTip())
-        self._group_box.textChanged.connect(self.value_changed)
+        self._group_box.textChanged.connect(lambda *_: self.value_changed.emit())
         self._group_container.addWidget(group_label, col=0)
         self._group_container.addWidget(self._group_box, col=1)
         self.addWidget(self._group_container, col=2)
@@ -216,6 +226,12 @@ class HostOverrideEntry(_BaseOverrideEntry):
                         return
                 logger.warning("Failed to read host scan params for %s", id_for_log)
 
+            if entry.mode.type == "rebind":
+                self._group_box.setText("")
+                self._rebind_editor.set_expression(entry.mode.expr)
+                self._mode_box.setCurrentText("Rebind")
+                return
+
         for override in params.get("overrides", {}).get(self.schema["fqn"], []):
             if override["path"] == self.path:
                 self._group_box.setText("")
@@ -225,19 +241,32 @@ class HostOverrideEntry(_BaseOverrideEntry):
 
         self._group_box.setText("")
         self._set_fixed_value(self._default_value(manager_datasets, id_for_log))
+        if self._supports_rebind and not self._rebind_editor.expression():
+            self._rebind_editor.set_expression("0.0")
         self.disable_scan()
 
     def write_to_submission(self, submission_state) -> None:
-        if self._mode_box.currentText() == "Fixed":
+        mode = self._mode_box.currentText()
+        if mode == "Fixed":
             self._fixed_option.write_to_submission(submission_state)
             return
-        grouped_submission = _HostGroupedSubmissionProxy(
-            submission_state,
-            self._normalised_scan_group(),
-        )
-        self._scan_options[self._scan_kind_box.currentIndex()].write_to_submission(
-            grouped_submission
-        )
+        if mode == "Scan":
+            grouped_submission = _HostGroupedSubmissionProxy(
+                submission_state,
+                self._normalised_scan_group(),
+            )
+            self._scan_options[self._scan_kind_box.currentIndex()].write_to_submission(
+                grouped_submission
+            )
+            return
+        if mode == "Rebind":
+            submission_state.add_rebind(
+                fqn=self.schema["fqn"],
+                path=self.path,
+                expression=self._rebind_editor.expression(),
+            )
+            return
+        raise RuntimeError(f"Unsupported host row mode: {mode!r}")
 
     def _normalised_scan_group(self) -> str | None:
         text = self._group_box.text().strip()
@@ -263,6 +292,8 @@ class HostOverrideEntry(_BaseOverrideEntry):
     def _active_option(self):
         if self._current_mode == "Scan" and self._scan_options:
             return self._scan_options[self._current_scan_option_idx]
+        if self._current_mode == "Rebind" and self._supports_rebind:
+            return self._rebind_editor
         return self._fixed_option
 
     def _mode_changed(self, new_idx) -> None:
@@ -274,6 +305,8 @@ class HostOverrideEntry(_BaseOverrideEntry):
                 self.sync_values
             )
             self._mode_stack.setCurrentWidget(self._scan_container)
+        elif new_mode == "Rebind" and self._supports_rebind:
+            self._mode_stack.setCurrentWidget(self._rebind_editor.container)
         else:
             self._fixed_option.read_sync_values(self.sync_values)
             self._mode_stack.setCurrentWidget(self._fixed_option.container)
@@ -306,6 +339,44 @@ class _HostOptionWidget:
 
     def __getattr__(self, name):
         return getattr(self.option, name)
+
+
+class _HostRebindEditor:
+    """Simple line-edit based host rebind editor.
+
+    The actual expression parsing/semantic validation lives in the worker-side
+    expression compiler. The dashboard keeps the widget intentionally lightweight and
+    only ensures that a non-empty string is transported.
+    """
+
+    def __init__(self, *, symbol_name: str):
+        self.container = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.container.setLayout(layout)
+
+        self.box = QtWidgets.QLineEdit()
+        self.box.setText("0.0")
+        self.box.setPlaceholderText("0.0")
+        self.box.setToolTip(
+            "Arithmetic expression compiled into a runtime parameter mapping. "
+            "Refer to other rows by their stable ids, e.g. x or detuning. "
+            f"This row's id is {symbol_name!r}."
+        )
+        layout.addWidget(self.box)
+
+    def expression(self) -> str:
+        text = self.box.text().strip()
+        return text or "0.0"
+
+    def set_expression(self, expression: str) -> None:
+        self.box.setText(expression)
+
+    def read_sync_values(self, sync_values: dict) -> None:
+        del sync_values
+
+    def write_sync_values(self, sync_values: dict) -> None:
+        del sync_values
 
 
 class _HostGroupedSubmissionProxy:
