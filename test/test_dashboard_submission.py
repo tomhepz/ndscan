@@ -260,6 +260,32 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
         )
         self.assertTrue(backend.supports_editing)
 
+    def test_host_backend_accepts_pseudoparam_entries(self):
+        backend = HostSubmissionBackend(
+            {
+                "host_scan": {
+                    "version": 1,
+                    "mode": {"type": "grid"},
+                    "entries": [
+                        {
+                            "id": "logical_drive",
+                            "kind": "pseudoparam",
+                            "mode": {
+                                "type": "scan",
+                                "generator": {
+                                    "type": "list",
+                                    "range": {"values": [0.0, 1.0, 2.0]},
+                                },
+                            },
+                        }
+                    ],
+                    "execution": {},
+                    "metadata": {},
+                }
+            }
+        )
+        self.assertTrue(backend.supports_editing)
+
     def test_host_backend_iterates_existing_param_entries(self):
         backend = HostSubmissionBackend(
             {
@@ -314,6 +340,58 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
             )
         )
         self.assertEqual(entries, [("frag.x", "*"), ("frag.y", "*")])
+
+    def test_host_backend_iterates_existing_pseudoparam_entries(self):
+        backend = HostSubmissionBackend(
+            {
+                "host_scan": {
+                    "version": 1,
+                    "mode": {"type": "grid"},
+                    "entries": [
+                        {
+                            "id": "logical_drive",
+                            "kind": "pseudoparam",
+                            "mode": {
+                                "type": "scan",
+                                "generator": {
+                                    "type": "list",
+                                    "range": {"values": [0.0, 1.0, 2.0]},
+                                },
+                            },
+                        }
+                    ],
+                    "execution": {},
+                    "metadata": {},
+                }
+            }
+        )
+        entries = tuple(
+            backend.iter_configured_pseudoparams(
+                {
+                    "host_scan": {
+                        "version": 1,
+                        "mode": {"type": "grid"},
+                        "entries": [
+                            {
+                                "id": "logical_drive",
+                                "kind": "pseudoparam",
+                                "mode": {
+                                    "type": "scan",
+                                    "generator": {
+                                        "type": "list",
+                                        "range": {"values": [0.0, 1.0, 2.0]},
+                                    },
+                                },
+                            }
+                        ],
+                        "execution": {},
+                        "metadata": {},
+                    }
+                }
+            )
+        )
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].id, "logical_drive")
 
     def test_host_backend_serialises_scan_group(self):
         backend = HostSubmissionBackend(
@@ -386,6 +464,45 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
         self.assertEqual(
             by_fqn["frag.y"]["mode"],
             {"type": "rebind", "expr": "x + 0.5"},
+        )
+
+    def test_host_backend_serialises_pseudoparam_entries(self):
+        backend = HostSubmissionBackend(
+            {
+                "host_scan": {
+                    "version": 1,
+                    "mode": {"type": "grid"},
+                    "entries": [],
+                    "execution": {},
+                    "metadata": {},
+                }
+            }
+        )
+        state = backend.new_submission_state()
+        state.add_pseudoparam_fixed(entry_id="offset", value=0.5)
+        state.add_pseudoparam_scan(
+            entry_id="logical_drive",
+            axis_type="list",
+            axis_range={"values": [0.0, 1.0, 2.0]},
+            scan_group="pair",
+        )
+
+        params = {"host_scan": {"old": True}, "overrides": {}}
+        backend.apply_submission_state(params, state)
+
+        by_id = {entry["id"]: entry for entry in params["host_scan"]["entries"]}
+        self.assertEqual(by_id["offset"]["kind"], "pseudoparam")
+        self.assertEqual(by_id["offset"]["mode"], {"type": "fixed", "value": 0.5})
+        self.assertEqual(
+            by_id["logical_drive"]["mode"],
+            {
+                "type": "scan",
+                "group": "pair",
+                "generator": {
+                    "type": "list",
+                    "range": {"values": [0.0, 1.0, 2.0]},
+                },
+            },
         )
 
 

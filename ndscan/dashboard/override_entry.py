@@ -11,7 +11,7 @@ import logging
 
 from artiq.gui.tools import LayoutWidget
 
-from .._qt import QtCore, QtWidgets
+from .._qt import QtCore, QtGui, QtWidgets
 from .host_scan_options import (
     get_host_fixed_option_type,
     list_host_scan_generator_option_types,
@@ -20,7 +20,7 @@ from .utils import eval_default_using_local_datasets, format_override_identity
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["OverrideEntry", "HostOverrideEntry"]
+__all__ = ["OverrideEntry", "HostOverrideEntry", "HostPseudoparamEntry"]
 
 
 class _BaseOverrideEntry(LayoutWidget):
@@ -330,6 +330,206 @@ class HostOverrideEntry(_BaseOverrideEntry):
             self._scan_stack.setCurrentIndex(self._current_scan_option_idx)
 
 
+class HostPseudoparamEntry(LayoutWidget):
+    """Host-runtime pseudoparameter row editor.
+
+    Pseudoparams are purely logical symbols, so this widget focuses on three pieces of
+    state only:
+
+    - the user-editable symbol id,
+    - whether the symbol is fixed or scanned,
+    - the finite scan generator and optional scan group if scanned.
+    """
+
+    value_changed = QtCore.pyqtSignal()
+
+    def __init__(self, entry_id: str, *args):
+        super().__init__(*args)
+        self.sync_values = {}
+        self._last_valid_id = entry_id
+
+        self._schema = {
+            "fqn": "__pseudoparam__",
+            "type": "float",
+            "default": "0.0",
+            "spec": {},
+        }
+        self._fixed_option = self._build_option(get_host_fixed_option_type("float"))
+        self._scan_option_names = []
+        self._scan_options = []
+        for name, option_cls in list_host_scan_generator_option_types("float", True).items():
+            self._scan_option_names.append(name)
+            self._scan_options.append(self._build_option(option_cls))
+
+        self._id_label = QtWidgets.QLabel("Id")
+        self.addWidget(self._id_label, col=0)
+
+        self._id_box = QtWidgets.QLineEdit(entry_id)
+        self._id_box.setToolTip(
+            "Stable identifier used by rebind expressions. Duplicates are suffixed "
+            "deterministically on save."
+        )
+        self._id_box.setValidator(
+            QtGui.QRegularExpressionValidator(
+                QtCore.QRegularExpression(r"[A-Za-z_][A-Za-z0-9_]*")
+            )
+        )
+        self._id_box.textChanged.connect(self._id_text_changed)
+        self.addWidget(self._id_box, col=1)
+
+        self._mode_box = QtWidgets.QComboBox()
+        self._mode_box.addItem("Fixed")
+        self._mode_box.addItem("Scan")
+        self._mode_box.currentIndexChanged.connect(self._mode_changed)
+        self.addWidget(self._mode_box, col=2)
+
+        self._mode_stack = QtWidgets.QStackedWidget()
+        self._mode_stack.addWidget(self._fixed_option.container)
+
+        self._scan_container = QtWidgets.QWidget()
+        self._scan_layout = QtWidgets.QHBoxLayout()
+        self._scan_layout.setContentsMargins(0, 0, 0, 0)
+        self._scan_container.setLayout(self._scan_layout)
+
+        self._scan_kind_box = QtWidgets.QComboBox()
+        for name in self._scan_option_names:
+            self._scan_kind_box.addItem(name)
+        self._scan_kind_box.currentIndexChanged.connect(self._scan_kind_changed)
+        self._scan_layout.addWidget(self._scan_kind_box)
+
+        self._scan_stack = QtWidgets.QStackedWidget()
+        for option in self._scan_options:
+            self._scan_stack.addWidget(option.container)
+        self._scan_layout.addWidget(self._scan_stack, stretch=1)
+        self._scan_kind_box.setVisible(len(self._scan_options) > 1)
+
+        self._mode_stack.addWidget(self._scan_container)
+        self.addWidget(self._mode_stack, col=3)
+
+        self._group_container = LayoutWidget()
+        self._group_container.layout.setContentsMargins(6, 0, 0, 0)
+        self._group_label = QtWidgets.QLabel("Group")
+        self._group_label.setToolTip(
+            "Scan rows in the same non-empty group are zipped together. "
+            "Different groups remain Cartesian."
+        )
+        self._group_box = QtWidgets.QLineEdit()
+        self._group_box.setPlaceholderText("optional")
+        self._group_box.setMaximumWidth(110)
+        self._group_box.setToolTip(self._group_label.toolTip())
+        self._group_box.textChanged.connect(lambda *_: self.value_changed.emit())
+        self._group_container.addWidget(self._group_label, col=0)
+        self._group_container.addWidget(self._group_box, col=1)
+        self.addWidget(self._group_container, col=4)
+
+        self._current_mode = "Fixed"
+        self._current_scan_option_idx = 0
+        self._update_mode_ui()
+
+    def read_from_entry(self, entry) -> None:
+        self._set_identifier(entry.id)
+        if entry.mode.type == "fixed":
+            self._group_box.setText("")
+            self._set_fixed_value(entry.mode.value)
+            self.disable_scan()
+            return
+
+        if entry.mode.type == "scan":
+            axis = {
+                "type": entry.mode.generator.type,
+                "range": dict(entry.mode.generator.range),
+            }
+            for idx, option in enumerate(self._scan_options):
+                if option.attempt_read_from_axis(axis):
+                    self._group_box.setText(entry.mode.group or "")
+                    self._scan_kind_box.setCurrentIndex(idx)
+                    self._mode_box.setCurrentText("Scan")
+                    return
+            logger.warning("Failed to read host pseudoparam scan params for %s", entry.id)
+
+    def write_to_submission(self, submission_state) -> None:
+        proxy = _HostPseudoparamSubmissionProxy(
+            submission_state,
+            entry_id=self.identifier(),
+            scan_group=self._normalised_scan_group(),
+        )
+        if self._mode_box.currentText() == "Fixed":
+            self._fixed_option.write_to_submission(proxy)
+            return
+        self._scan_options[self._scan_kind_box.currentIndex()].write_to_submission(proxy)
+
+    def disable_scan(self) -> None:
+        self._mode_box.setCurrentText("Fixed")
+
+    def identifier(self) -> str:
+        text = self._id_box.text().strip()
+        if text.isidentifier():
+            return text
+        return self._last_valid_id
+
+    def _set_identifier(self, text: str) -> None:
+        self._last_valid_id = text
+        self._id_box.setText(text)
+
+    def _id_text_changed(self, text: str) -> None:
+        if text.isidentifier():
+            self._last_valid_id = text
+        self.value_changed.emit()
+
+    def _set_fixed_value(self, value) -> None:
+        self._fixed_option.set_value(value)
+        self._fixed_option.write_sync_values(self.sync_values)
+
+    def _build_option(self, option_cls):
+        option = option_cls(self._schema, "")
+        option.value_changed.connect(self.value_changed)
+        container = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        option.build_ui(layout)
+        container.setLayout(layout)
+        return _HostOptionWidget(option=option, container=container)
+
+    def _mode_changed(self, new_idx) -> None:
+        del new_idx
+        if self._current_mode == "Scan" and self._scan_options:
+            self._scan_options[self._current_scan_option_idx].write_sync_values(
+                self.sync_values
+            )
+        else:
+            self._fixed_option.write_sync_values(self.sync_values)
+
+        new_mode = self._mode_box.currentText()
+        if new_mode == "Scan":
+            self._scan_options[self._current_scan_option_idx].read_sync_values(
+                self.sync_values
+            )
+            self._mode_stack.setCurrentWidget(self._scan_container)
+        else:
+            self._fixed_option.read_sync_values(self.sync_values)
+            self._mode_stack.setCurrentWidget(self._fixed_option.container)
+        self._current_mode = new_mode
+        self._update_mode_ui()
+
+    def _scan_kind_changed(self, new_idx) -> None:
+        self._scan_options[self._current_scan_option_idx].write_sync_values(
+            self.sync_values
+        )
+        self._scan_options[new_idx].read_sync_values(self.sync_values)
+        self._scan_stack.setCurrentIndex(new_idx)
+        self._current_scan_option_idx = new_idx
+
+    def _update_mode_ui(self) -> None:
+        is_scan = self._mode_box.currentText() == "Scan"
+        self._group_container.setVisible(is_scan)
+        if is_scan:
+            self._scan_stack.setCurrentIndex(self._current_scan_option_idx)
+
+    def _normalised_scan_group(self) -> str | None:
+        text = self._group_box.text().strip()
+        return text or None
+
+
 class _HostOptionWidget:
     """Small wrapper so row code can treat fixed and scan widgets uniformly."""
 
@@ -400,6 +600,38 @@ class _HostGroupedSubmissionProxy:
         self._submission_state.add_scan_axis(
             fqn=fqn,
             path=path,
+            axis_type=axis_type,
+            axis_range=axis_range,
+            scan_group=self._scan_group,
+        )
+
+
+class _HostPseudoparamSubmissionProxy:
+    """Route existing scan-option serialisation calls into pseudoparam state."""
+
+    def __init__(self, submission_state, *, entry_id: str, scan_group: str | None):
+        self._submission_state = submission_state
+        self._entry_id = entry_id
+        self._scan_group = scan_group
+
+    def add_override(self, *, fqn: str, path: str, value):
+        del fqn, path
+        self._submission_state.add_pseudoparam_fixed(
+            entry_id=self._entry_id,
+            value=value,
+        )
+
+    def add_scan_axis(
+        self,
+        *,
+        fqn: str,
+        path: str,
+        axis_type: str,
+        axis_range,
+    ):
+        del fqn, path
+        self._submission_state.add_pseudoparam_scan(
+            entry_id=self._entry_id,
             axis_type=axis_type,
             axis_range=axis_range,
             scan_group=self._scan_group,

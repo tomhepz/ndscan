@@ -4,14 +4,15 @@ This backend is intentionally narrower than the worker-side ``HostScanSpec`` mod
 It implements the first useful dashboard-editable subset:
 
 - grid mode only,
-- real fragment parameters only,
-- row modes ``fixed``, finite ``scan``, and ``rebind``.
+- real fragment parameters and pseudoparams,
+- parameter row modes ``fixed``, finite ``scan``, and ``rebind``,
+- pseudoparam row modes ``fixed`` and finite ``scan``.
 
 That is enough to give the host runtime a clean "dashboard submission path" distinct
 from the code-first ``make_fragment_host_scan_exp()`` path, without pretending that the
 full host schema already has a matching dashboard UI. More advanced host specs such as
-GPO or pseudoparameters are rejected up front so the editor does not silently drop
-information it cannot display.
+GPO are rejected up front so the editor does not silently drop information it cannot
+display.
 """
 
 from __future__ import annotations
@@ -94,6 +95,41 @@ class HostSubmissionState:
             )
         )
 
+    def add_pseudoparam_fixed(self, *, entry_id: str, value: Any) -> None:
+        self.entries.append(
+            HostScanEntry(
+                id=entry_id,
+                kind="pseudoparam",
+                mode=HostScanFixedModeSpec(value=value),
+            )
+        )
+
+    def add_pseudoparam_scan(
+        self,
+        *,
+        entry_id: str,
+        axis_type: str,
+        axis_range: Mapping[str, Any],
+        scan_group: str | None = None,
+    ) -> None:
+        if axis_type not in _EDITABLE_GENERATOR_TYPES:
+            raise ValueError(
+                f"Dashboard host backend does not support generator type {axis_type!r}"
+            )
+        self.entries.append(
+            HostScanEntry(
+                id=entry_id,
+                kind="pseudoparam",
+                mode=HostScanScanModeSpec(
+                    generator=HostScanGeneratorSpec(
+                        type=axis_type,
+                        range=dict(axis_range),
+                    ),
+                    group=scan_group,
+                ),
+            )
+        )
+
 
 class HostSubmissionBackend(DashboardSubmissionBackend):
     """Adapter for the editable subset of ``host_scan`` transport payloads."""
@@ -131,6 +167,14 @@ class HostSubmissionBackend(DashboardSubmissionBackend):
                 seen.add(key)
                 yield key
 
+    def iter_configured_pseudoparams(
+        self, params: Mapping[str, Any]
+    ) -> Iterable[HostScanEntry]:
+        spec = _load_host_spec(params)
+        if spec is None or not _is_editable_host_spec(spec):
+            return ()
+        return tuple(entry for entry in spec.entries if entry.kind == "pseudoparam")
+
     def new_submission_state(self) -> HostSubmissionState:
         return HostSubmissionState()
 
@@ -142,7 +186,7 @@ class HostSubmissionBackend(DashboardSubmissionBackend):
         if self._base_spec is None:
             raise NotImplementedError(
                 "Dashboard host-scan editing is only implemented for simple grid-mode "
-                "parameter rows"
+                "parameter and pseudoparam rows"
             )
 
         spec = HostScanSpec(
@@ -192,18 +236,28 @@ def _is_editable_host_spec(spec: HostScanSpec) -> bool:
     if not isinstance(spec.mode, HostScanGridModeSpec):
         return False
     for entry in spec.entries:
-        if entry.kind != "param":
-            return False
-        if entry.target is None:
-            return False
-        if isinstance(entry.mode, HostScanFixedModeSpec):
-            continue
-        if isinstance(entry.mode, HostScanScanModeSpec):
-            if entry.mode.generator.type not in _EDITABLE_GENERATOR_TYPES:
+        if entry.kind == "param":
+            if entry.target is None:
                 return False
-            continue
-        if isinstance(entry.mode, HostScanRebindModeSpec):
-            continue
+            if isinstance(entry.mode, HostScanFixedModeSpec):
+                continue
+            if isinstance(entry.mode, HostScanScanModeSpec):
+                if entry.mode.generator.type not in _EDITABLE_GENERATOR_TYPES:
+                    return False
+                continue
+            if isinstance(entry.mode, HostScanRebindModeSpec):
+                continue
+            return False
+        if entry.kind == "pseudoparam":
+            if entry.target is not None:
+                return False
+            if isinstance(entry.mode, HostScanFixedModeSpec):
+                continue
+            if isinstance(entry.mode, HostScanScanModeSpec):
+                if entry.mode.generator.type not in _EDITABLE_GENERATOR_TYPES:
+                    return False
+                continue
+            return False
         return False
     return True
 
@@ -222,7 +276,7 @@ def _editable_host_spec(params: Mapping[str, Any]) -> HostScanSpec | None:
     The first case should not brick the editor; we can safely fall back to a fresh
     empty grid spec and let the next save replace the stale transport data.  The
     second case *must* stay non-editable so we do not silently drop advanced semantics
-    such as GPO or pseudoparameters.
+    such as GPO.
     """
 
     spec = _load_host_spec(params)

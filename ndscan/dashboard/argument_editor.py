@@ -15,7 +15,7 @@ from ..utils import (
     NoAxesMode,
     shorten_to_unambiguous_suffixes,
 )
-from .override_entry import HostOverrideEntry, OverrideEntry
+from .override_entry import HostOverrideEntry, HostPseudoparamEntry, OverrideEntry
 from .param_tree_dialog import OverrideProvider, OverrideStatus, ParamTreeDialog
 from .scan_options import list_scan_option_types
 from .submission import (
@@ -270,9 +270,12 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
         self._save_timer.timeout.connect(self._save_to_argument)
 
         self._param_entries = OrderedDict()
+        self._pseudoparam_entries = OrderedDict()
         self._groups = dict()
         self._arg_to_widgets = dict()
         self._override_items = dict()
+        self._pseudoparam_items = dict()
+        self._next_pseudoparam_serial = 1
 
         self._add_override_icon = load_icon_cached("list-add-32.png")
         self._open_param_tree_icon = load_icon_cached("view-list-tree-32.png")
@@ -321,6 +324,13 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
                     )
                 )
             else:
+                if isinstance(self._submission_backend, HostSubmissionBackend):
+                    self._append_host_pseudoparam_section()
+                    for entry in self._submission_backend.iter_configured_pseudoparams(
+                        ndscan_params
+                    ):
+                        self._append_host_pseudoparam_item(entry=entry)
+
                 for fqn, path in ndscan_params["always_shown"]:
                     self._append_param_items(fqn, path, True)
 
@@ -386,15 +396,18 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
     def save_state(self):
         expanded = []
         for k, v in self._groups.items():
-            if v.isExpanded():
-                expanded.append(k)
+            try:
+                if v.isExpanded():
+                    expanded.append(k)
+            except RuntimeError:
+                continue
         return {"expanded": expanded, "scroll": self.verticalScrollBar().value()}
 
     def restore_state(self, state):
         for e in state["expanded"]:
             try:
                 self._groups[e].setExpanded(True)
-            except KeyError:
+            except (KeyError, RuntimeError):
                 pass
         self.verticalScrollBar().setValue(state["scroll"])
 
@@ -406,6 +419,8 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
 
     def disable_all_scans(self):
         for entry in self._param_entries.values():
+            entry.disable_scan()
+        for entry in self._pseudoparam_entries.values():
             entry.disable_scan()
 
     def override_status(self, fqn, path) -> OverrideStatus:
@@ -522,6 +537,87 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
             remove_override.setVisible(False)
 
         return id_item, main_item
+
+    def _append_host_pseudoparam_section(self):
+        if hasattr(self, "_host_pseudoparam_group"):
+            return
+
+        group = self._make_group_header_item("Pseudoparameters")
+        self.addTopLevelItem(group)
+        group.setExpanded(True)
+        self._groups["Pseudoparameters"] = group
+        self._host_pseudoparam_group = group
+
+        prompt_item = QtWidgets.QTreeWidgetItem()
+        group.addChild(prompt_item)
+        self._host_pseudoparam_prompt_item = prompt_item
+
+        prompt = LayoutWidget()
+        prompt.layout.setContentsMargins(3, 3, 3, 3)
+        add_button = QtWidgets.QPushButton("Add pseudoparam")
+        add_button.setIcon(self._add_override_icon)
+        add_button.clicked.connect(lambda *_: self._append_host_pseudoparam_item())
+        prompt.addWidget(add_button)
+        prompt.layout.setColumnStretch(1, 1)
+        self.setItemWidget(prompt_item, 1, prompt)
+
+    def _append_host_pseudoparam_item(self, entry=None):
+        serial = self._next_pseudoparam_serial
+        self._next_pseudoparam_serial += 1
+
+        widget_item = QtWidgets.QTreeWidgetItem()
+        insert_at = self._host_pseudoparam_group.indexOfChild(
+            self._host_pseudoparam_prompt_item
+        )
+        self._host_pseudoparam_group.insertChild(insert_at, widget_item)
+
+        label_container = LayoutWidget()
+        label_container.layout.setContentsMargins(3, 1, 6, 6)
+        label = QtWidgets.QLabel("Pseudoparam")
+        font = label.font()
+        font.setBold(True)
+        label.setFont(font)
+        label_container.addWidget(label)
+        self.setItemWidget(widget_item, 0, label_container)
+
+        entry_widget = HostPseudoparamEntry(
+            entry.id if entry is not None else self._default_host_pseudoparam_id()
+        )
+        if entry is not None:
+            entry_widget.read_from_entry(entry)
+        entry_widget.layout.setContentsMargins(3, 1, 3, 6)
+        entry_widget.value_changed.connect(self._set_save_timer)
+        self._pseudoparam_entries[serial] = entry_widget
+        self.setItemWidget(widget_item, 1, entry_widget)
+
+        buttons = LayoutWidget()
+        buttons.layout.setContentsMargins(3, 1, 3, 6)
+        remove = QtWidgets.QToolButton()
+        remove.setIcon(self._remove_override_icon)
+        remove.setToolTip("Remove this pseudoparameter")
+        remove.clicked.connect(partial(self._remove_host_pseudoparam, serial))
+        buttons.addWidget(remove, col=0)
+        self.setItemWidget(widget_item, 2, buttons)
+        self._pseudoparam_items[serial] = widget_item
+
+        if entry is None:
+            self._set_save_timer()
+
+    def _default_host_pseudoparam_id(self) -> str:
+        existing = {entry.identifier() for entry in self._pseudoparam_entries.values()}
+        index = 1
+        while True:
+            candidate = f"pseudoparam_{index}"
+            if candidate not in existing:
+                return candidate
+            index += 1
+
+    def _remove_host_pseudoparam(self, serial: int):
+        item = self._pseudoparam_items.pop(serial)
+        idx = self._host_pseudoparam_group.indexOfChild(item)
+        self._host_pseudoparam_group.takeChild(idx)
+        del self._pseudoparam_entries[serial]
+        self._set_save_timer()
 
     def _append_vanilla_argument_item(self, name, argument):
         if name in self._arg_to_widgets:
@@ -799,6 +895,8 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
             return
 
         submission_state = self._submission_backend.new_submission_state()
+        for item in self._pseudoparam_entries.values():
+            item.write_to_submission(submission_state)
         for item in self._param_entries.values():
             item.write_to_submission(submission_state)
         if self.scan_options is not None:
