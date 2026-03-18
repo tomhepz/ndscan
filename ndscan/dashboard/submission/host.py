@@ -10,8 +10,8 @@ It implements the first useful dashboard-editable subset:
 That is enough to give the host runtime a clean "dashboard submission path" distinct
 from the code-first ``make_fragment_host_scan_exp()`` path, without pretending that the
 full host schema already has a matching dashboard UI.  More advanced host specs such as
-GPO, pseudoparameters, rebind expressions, or zip groups are rejected up front so the
-editor does not silently drop information it cannot display.
+GPO, pseudoparameters, or rebind expressions are rejected up front so the editor does
+not silently drop information it cannot display.
 """
 
 from __future__ import annotations

@@ -15,19 +15,15 @@ from ..utils import (
     NoAxesMode,
     shorten_to_unambiguous_suffixes,
 )
+from .override_entry import HostOverrideEntry, OverrideEntry
 from .param_tree_dialog import OverrideProvider, OverrideStatus, ParamTreeDialog
-from .scan_options import list_host_scan_option_types, list_scan_option_types
+from .scan_options import list_scan_option_types
 from .submission import (
     HostSubmissionBackend,
     LegacyScanOptionsState,
     select_submission_backend,
 )
-from .utils import (
-    eval_default_using_local_datasets,
-    format_override_identity,
-    load_icon_cached,
-    set_column_resize_mode,
-)
+from .utils import format_override_identity, load_icon_cached, set_column_resize_mode
 
 logger = logging.getLogger(__name__)
 
@@ -819,8 +815,12 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
             "is_scannable", True
         )
         if isinstance(self._submission_backend, HostSubmissionBackend):
-            options = list_host_scan_option_types(schema["type"], is_scannable)
-            return HostOverrideEntry(options, schema, path, self._submission_backend)
+            return HostOverrideEntry(
+                schema,
+                path,
+                is_scannable=is_scannable,
+                backend=self._submission_backend,
+            )
 
         options = list_scan_option_types(schema["type"], is_scannable)
         return OverrideEntry(options, schema, path)
@@ -831,221 +831,3 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
         # undergoing API changes; once it stabilises, should implement this (e.g. on top
         # of the newly factored-out artiq.gui.entries.EntryTreeWidget).
         pass
-
-
-class OverrideEntry(LayoutWidget):
-    value_changed = QtCore.pyqtSignal()
-
-    def __init__(self, option_classes, schema, path, *args):
-        super().__init__(*args)
-
-        self.schema = schema
-        self.path = path
-
-        self.scan_type = QtWidgets.QComboBox()
-        self.addWidget(self.scan_type, col=0)
-
-        self.widget_stack = QtWidgets.QStackedWidget()
-
-        # The non-scan option should be on the top.
-        assert next(iter(option_classes.keys())) == "Fixed"
-        if len(option_classes) == 1:
-            self.scan_type.setEnabled(False)
-        self.current_option_idx = 0
-
-        self.options = []
-        for name, option_cls in option_classes.items():
-            self.scan_type.addItem(name)
-
-            option = option_cls(self.schema, self.path)
-            option.value_changed.connect(self.value_changed)
-            container = QtWidgets.QWidget()
-            layout = QtWidgets.QHBoxLayout()
-            # For tight spacing, let other parts of entry line dominate margins.
-            layout.setContentsMargins(0, 0, 0, 0)
-            option.build_ui(layout)
-            container.setLayout(layout)
-
-            self.widget_stack.addWidget(container)
-            self.options.append(option)
-        self.scan_type.currentIndexChanged.connect(self._current_index_changed)
-        self.addWidget(self.widget_stack, col=1)
-        self.sync_values = {}
-
-    def read_from_params(self, params: dict, manager_datasets) -> None:
-        id_for_log = format_override_identity(self.schema["fqn"], self.path)
-
-        # Check if this parameter is part of the scan axes
-        for axis in params.get("scan", {}).get("axes", []):
-            if axis["fqn"] == self.schema["fqn"] and axis["path"] == self.path:
-                for idx, option in enumerate(self.options):
-                    if option.attempt_read_from_axis(axis):
-                        self.current_option_idx = idx
-                        self._current_index_changed(idx)
-                        self.scan_type.setCurrentIndex(idx)
-                        return
-                logger.warning(f"Failed to read scan params for {id_for_log}")
-
-        for o in params.get("overrides", {}).get(self.schema["fqn"], []):
-            if o["path"] == self.path:
-                self._set_fixed_value(o["value"])
-                return
-        try:
-            value = eval_default_using_local_datasets(
-                self.schema["default"], manager_datasets
-            )
-        except Exception as e:
-            logger.error(
-                'Failed to evaluate defaults string "%s" for %s: %s',
-                self.schema["default"],
-                id_for_log,
-                e,
-            )
-            value = None
-        self._set_fixed_value(value)
-        self.disable_scan()
-
-    def write_to_submission(self, submission_state) -> None:
-        self.options[self.scan_type.currentIndex()].write_to_submission(submission_state)
-
-    def disable_scan(self) -> None:
-        self.scan_type.setCurrentIndex(0)
-
-    def _set_fixed_value(self, value) -> None:
-        self.options[0].set_value(value)
-        self.options[0].write_sync_values(self.sync_values)
-
-    def _current_index_changed(self, new_idx) -> None:
-        self.options[self.current_option_idx].write_sync_values(self.sync_values)
-        self.options[new_idx].read_sync_values(self.sync_values)
-        self.widget_stack.setCurrentIndex(new_idx)
-        self.current_option_idx = new_idx
-
-
-class HostOverrideEntry(OverrideEntry):
-    """Host-runtime row editor for the currently supported dashboard subset.
-
-    The widget mechanics are the same as ``OverrideEntry``.  The difference is only
-    how the row initialises itself from the stored submission payload: host-runtime
-    specs live under ``host_scan`` rather than the legacy ``scan`` / ``overrides``
-    keys.
-    """
-
-    def __init__(self, option_classes, schema, path, backend, *args):
-        self._host_backend = backend
-        super().__init__(option_classes, schema, path, *args)
-        self._group_container = LayoutWidget()
-        self._group_container.layout.setContentsMargins(6, 0, 0, 0)
-        group_label = QtWidgets.QLabel("Group")
-        group_label.setToolTip(
-            "Scan rows in the same non-empty group are zipped together. "
-            "Different groups remain Cartesian."
-        )
-        self._group_box = QtWidgets.QLineEdit()
-        self._group_box.setPlaceholderText("optional")
-        self._group_box.setMaximumWidth(110)
-        self._group_box.setToolTip(group_label.toolTip())
-        self._group_box.textChanged.connect(self.value_changed)
-        self._group_container.addWidget(group_label, col=0)
-        self._group_container.addWidget(self._group_box, col=1)
-        self.addWidget(self._group_container, col=2)
-        self._update_scan_group_visibility()
-
-    def read_from_params(self, params: dict, manager_datasets) -> None:
-        id_for_log = format_override_identity(self.schema["fqn"], self.path)
-        entry = self._host_backend.find_entry(
-            params,
-            fqn=self.schema["fqn"],
-            path=self.path,
-        )
-        if entry is not None:
-            if entry.mode.type == "fixed":
-                self._group_box.setText("")
-                self._set_fixed_value(entry.mode.value)
-                self.disable_scan()
-                return
-
-            if entry.mode.type == "scan":
-                axis = {
-                    "type": entry.mode.generator.type,
-                    "range": dict(entry.mode.generator.range),
-                }
-                for idx, option in enumerate(self.options):
-                    if option.attempt_read_from_axis(axis):
-                        self.current_option_idx = idx
-                        self._current_index_changed(idx)
-                        self._group_box.setText(entry.mode.group or "")
-                        self.scan_type.setCurrentIndex(idx)
-                        return
-                logger.warning(f"Failed to read host scan params for {id_for_log}")
-
-        for override in params.get("overrides", {}).get(self.schema["fqn"], []):
-            if override["path"] == self.path:
-                self._group_box.setText("")
-                self._set_fixed_value(override["value"])
-                self.disable_scan()
-                return
-
-        try:
-            value = eval_default_using_local_datasets(
-                self.schema["default"], manager_datasets
-            )
-        except Exception as e:
-            logger.error(
-                'Failed to evaluate defaults string "%s" for %s: %s',
-                self.schema["default"],
-                id_for_log,
-                e,
-            )
-            value = None
-        self._group_box.setText("")
-        self._set_fixed_value(value)
-        self.disable_scan()
-
-    def write_to_submission(self, submission_state) -> None:
-        if self.scan_type.currentIndex() == 0:
-            super().write_to_submission(submission_state)
-            return
-        grouped_submission = _HostGroupedSubmissionProxy(
-            submission_state,
-            self._normalised_scan_group(),
-        )
-        self.options[self.scan_type.currentIndex()].write_to_submission(grouped_submission)
-
-    def _current_index_changed(self, new_idx) -> None:
-        super()._current_index_changed(new_idx)
-        self._update_scan_group_visibility()
-
-    def _update_scan_group_visibility(self) -> None:
-        self._group_container.setVisible(self.scan_type.currentIndex() != 0)
-
-    def _normalised_scan_group(self) -> str | None:
-        text = self._group_box.text().strip()
-        return text or None
-
-
-class _HostGroupedSubmissionProxy:
-    """Inject a host scan-group into the existing row widget serialisation calls."""
-
-    def __init__(self, submission_state, scan_group: str | None):
-        self._submission_state = submission_state
-        self._scan_group = scan_group
-
-    def add_override(self, *, fqn: str, path: str, value):
-        self._submission_state.add_override(fqn=fqn, path=path, value=value)
-
-    def add_scan_axis(
-        self,
-        *,
-        fqn: str,
-        path: str,
-        axis_type: str,
-        axis_range,
-    ):
-        self._submission_state.add_scan_axis(
-            fqn=fqn,
-            path=path,
-            axis_type=axis_type,
-            axis_range=axis_range,
-            scan_group=self._scan_group,
-        )
