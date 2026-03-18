@@ -1214,6 +1214,16 @@ class HostRuntimeCase(HasEnvironmentCase):
             },
         )
 
+    def test_scan_request_linear_helper_materialises_even_spacing(self):
+        fragment = self.create(LinearResponseFragment, [])
+        request = ScanRequest.linear(fragment.x, start=-2.0, stop=2.0, num_points=5)
+
+        self.assertEqual(request.axes, (fragment.x,))
+        self.assertEqual(
+            [point.axis_values for point in request.point_policy],
+            [(-2.0,), (-1.0,), (0.0,), (1.0,), (2.0,)],
+        )
+
     def test_host_scan_session_supports_ad_hoc_scan_variables_and_parameter_mappings(
         self,
     ):

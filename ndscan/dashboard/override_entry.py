@@ -247,23 +247,23 @@ class HostOverrideEntry(_BaseOverrideEntry):
 
     def write_to_submission(self, submission_state) -> None:
         mode = self._mode_box.currentText()
+        proxy = _HostParamSubmissionProxy(
+            submission_state,
+            entry_id=self._symbol_name,
+            scan_group=self._normalised_scan_group(),
+        )
         if mode == "Fixed":
-            self._fixed_option.write_to_submission(submission_state)
+            self._fixed_option.write_to_submission(proxy)
             return
         if mode == "Scan":
-            grouped_submission = _HostGroupedSubmissionProxy(
-                submission_state,
-                self._normalised_scan_group(),
-            )
-            self._scan_options[self._scan_kind_box.currentIndex()].write_to_submission(
-                grouped_submission
-            )
+            self._scan_options[self._scan_kind_box.currentIndex()].write_to_submission(proxy)
             return
         if mode == "Rebind":
             submission_state.add_rebind(
                 fqn=self.schema["fqn"],
                 path=self.path,
                 expression=self._rebind_editor.expression(),
+                entry_id=self._symbol_name,
             )
             return
         raise RuntimeError(f"Unsupported host row mode: {mode!r}")
@@ -271,6 +271,9 @@ class HostOverrideEntry(_BaseOverrideEntry):
     def _normalised_scan_group(self) -> str | None:
         text = self._group_box.text().strip()
         return text or None
+
+    def symbol_name(self) -> str:
+        return self._symbol_name
 
     def disable_scan(self) -> None:
         self._mode_box.setCurrentText("Fixed")
@@ -579,15 +582,21 @@ class _HostRebindEditor:
         del sync_values
 
 
-class _HostGroupedSubmissionProxy:
-    """Inject a host scan-group into the existing row widget serialisation calls."""
+class _HostParamSubmissionProxy:
+    """Inject host-only metadata into existing row-widget serialisation calls."""
 
-    def __init__(self, submission_state, scan_group: str | None):
+    def __init__(self, submission_state, *, entry_id: str, scan_group: str | None):
         self._submission_state = submission_state
+        self._entry_id = entry_id
         self._scan_group = scan_group
 
     def add_override(self, *, fqn: str, path: str, value):
-        self._submission_state.add_override(fqn=fqn, path=path, value=value)
+        self._submission_state.add_override(
+            fqn=fqn,
+            path=path,
+            value=value,
+            entry_id=self._entry_id,
+        )
 
     def add_scan_axis(
         self,
@@ -602,6 +611,7 @@ class _HostGroupedSubmissionProxy:
             path=path,
             axis_type=axis_type,
             axis_range=axis_range,
+            entry_id=self._entry_id,
             scan_group=self._scan_group,
         )
 

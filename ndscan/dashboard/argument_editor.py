@@ -486,7 +486,22 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
         font = label.font()
         font.setBold(True)
         label.setFont(font)
-        label_container.addWidget(label)
+        label_container.addWidget(label, 0, 0)
+
+        if isinstance(self._submission_backend, HostSubmissionBackend):
+            symbol_label = QtWidgets.QLabel(
+                f"id: {self._submission_backend.symbol_name_for_target(fqn=fqn, path=path)}"
+            )
+            symbol_font = symbol_label.font()
+            symbol_font.setPointSizeF(symbol_font.pointSizeF() * 0.9)
+            symbol_font.setFamilies(["Monospace"])
+            symbol_label.setFont(symbol_font)
+            symbol_color = self.palette().mid().color().darker(175)
+            symbol_label.setStyleSheet(f"color: {symbol_color.name()};")
+            symbol_label.setToolTip(
+                "Stable symbol id used by host-runtime rebind expressions."
+            )
+            label_container.addWidget(symbol_label, 1, 0)
 
         # For whatever reason, the auto-sized column is not wide enough to display the
         # whole label if displayed through a widget – whether through an extra
@@ -497,7 +512,10 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
         # to be a Qt bug (incorrect handling of the group expand arrows?). The fixed
         # extra horizontal margin was just determined visually and might be brittle
         # across platforms/…; a proper fix would be desirable.
-        label_container.setMinimumSize(label.sizeHint() + QtCore.QSize(28, 0))
+        min_width = label.sizeHint().width()
+        if isinstance(self._submission_backend, HostSubmissionBackend):
+            min_width = max(min_width, symbol_label.sizeHint().width())
+        label_container.setMinimumSize(QtCore.QSize(min_width + 28, 0))
 
         self.setItemWidget(main_item, 0, label_container)
 

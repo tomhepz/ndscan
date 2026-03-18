@@ -505,6 +505,82 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
             },
         )
 
+    def test_host_backend_preserves_existing_param_entry_id(self):
+        backend = HostSubmissionBackend(
+            {
+                "host_scan": {
+                    "version": 1,
+                    "mode": {"type": "grid"},
+                    "entries": [
+                        {
+                            "id": "detuning_symbol",
+                            "kind": "param",
+                            "target": {"fqn": "frag.detuning", "path": ""},
+                            "mode": {"type": "fixed", "value": 1.0},
+                        }
+                    ],
+                    "execution": {},
+                    "metadata": {},
+                }
+            }
+        )
+        self.assertEqual(
+            backend.symbol_name_for_target(fqn="frag.detuning", path=""),
+            "detuning_symbol",
+        )
+
+    def test_host_backend_derives_unique_default_param_entry_ids(self):
+        backend = HostSubmissionBackend(
+            {
+                "host_scan": {
+                    "version": 1,
+                    "mode": {"type": "grid"},
+                    "entries": [],
+                    "execution": {},
+                    "metadata": {},
+                },
+                "schemata": {
+                    "pkg.root.detuning": {},
+                    "pkg.child.detuning": {},
+                },
+                "instances": {
+                    "": ["pkg.root.detuning"],
+                    "child": ["pkg.child.detuning"],
+                },
+            }
+        )
+        root_id = backend.symbol_name_for_target(fqn="pkg.root.detuning", path="")
+        child_id = backend.symbol_name_for_target(fqn="pkg.child.detuning", path="child")
+        self.assertEqual(root_id, "root_detuning")
+        self.assertEqual(child_id, "child_detuning")
+        self.assertNotEqual(root_id, child_id)
+
+    def test_host_backend_prefers_short_name_for_unambiguous_parameter(self):
+        backend = HostSubmissionBackend(
+            {
+                "host_scan": {
+                    "version": 1,
+                    "mode": {"type": "grid"},
+                    "entries": [],
+                    "execution": {},
+                    "metadata": {},
+                },
+                "schemata": {
+                    "pkg.demo.DashboardMappedDriveFragment.logical_drive": {},
+                },
+                "instances": {
+                    "": ["pkg.demo.DashboardMappedDriveFragment.logical_drive"],
+                },
+            }
+        )
+        self.assertEqual(
+            backend.symbol_name_for_target(
+                fqn="pkg.demo.DashboardMappedDriveFragment.logical_drive",
+                path="",
+            ),
+            "logical_drive",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

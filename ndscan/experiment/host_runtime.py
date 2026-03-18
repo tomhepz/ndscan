@@ -547,6 +547,36 @@ class ScanRequest:
         )
 
     @classmethod
+    def linear(
+        cls,
+        axis: ParamHandle | ScanVariable,
+        *,
+        start: float,
+        stop: float,
+        num_points: int,
+        site: ScanSite | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        execution_policy: ExecutionPolicy | None = None,
+    ) -> "ScanRequest":
+        """Return a simple 1D linear scan request.
+
+        This is a small code-first convenience for the common case where an experiment
+        wants one evenly spaced axis without manually materialising a point list. More
+        complex shapes should continue to use ``cartesian()``, ``zipped()``, or
+        ``explicit()`` directly.
+        """
+
+        if num_points < 2:
+            raise ValueError("linear scans require at least 2 points")
+        values = np.linspace(start=float(start), stop=float(stop), num=int(num_points))
+        return cls.cartesian(
+            [(axis, values.tolist())],
+            site=site,
+            metadata=metadata,
+            execution_policy=execution_policy,
+        )
+
+    @classmethod
     def cartesian(
         cls,
         axes: Sequence[tuple[ParamHandle | ScanVariable, Sequence[Any]]],

@@ -18,6 +18,7 @@ display.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -47,10 +48,12 @@ class HostSubmissionState:
 
     entries: list[HostScanEntry] = field(default_factory=list)
 
-    def add_override(self, *, fqn: str, path: str, value: Any) -> None:
+    def add_override(
+        self, *, fqn: str, path: str, value: Any, entry_id: str | None = None
+    ) -> None:
         self.entries.append(
             HostScanEntry(
-                id=_entry_id_for_target(fqn, path),
+                id=entry_id or _entry_id_for_target(fqn, path),
                 kind="param",
                 target=HostScanParamTargetSpec(fqn=fqn, path=path),
                 mode=HostScanFixedModeSpec(value=value),
@@ -64,6 +67,7 @@ class HostSubmissionState:
         path: str,
         axis_type: str,
         axis_range: Mapping[str, Any],
+        entry_id: str | None = None,
         scan_group: str | None = None,
     ) -> None:
         if axis_type not in _EDITABLE_GENERATOR_TYPES:
@@ -72,7 +76,7 @@ class HostSubmissionState:
             )
         self.entries.append(
             HostScanEntry(
-                id=_entry_id_for_target(fqn, path),
+                id=entry_id or _entry_id_for_target(fqn, path),
                 kind="param",
                 target=HostScanParamTargetSpec(fqn=fqn, path=path),
                 mode=HostScanScanModeSpec(
@@ -85,10 +89,17 @@ class HostSubmissionState:
             )
         )
 
-    def add_rebind(self, *, fqn: str, path: str, expression: str) -> None:
+    def add_rebind(
+        self,
+        *,
+        fqn: str,
+        path: str,
+        expression: str,
+        entry_id: str | None = None,
+    ) -> None:
         self.entries.append(
             HostScanEntry(
-                id=_entry_id_for_target(fqn, path),
+                id=entry_id or _entry_id_for_target(fqn, path),
                 kind="param",
                 target=HostScanParamTargetSpec(fqn=fqn, path=path),
                 mode=HostScanRebindModeSpec(expr=expression),
@@ -135,7 +146,9 @@ class HostSubmissionBackend(DashboardSubmissionBackend):
     """Adapter for the editable subset of ``host_scan`` transport payloads."""
 
     def __init__(self, params: Mapping[str, Any] | None = None):
-        self._base_spec = _editable_host_spec(params or {})
+        params = params or {}
+        self._base_spec = _editable_host_spec(params)
+        self._param_symbol_names = _build_param_symbol_name_map(params, self._base_spec)
         self.supports_editing = self._base_spec is not None
 
     def is_scannable(self, params: Mapping[str, Any]) -> bool:
@@ -218,7 +231,7 @@ class HostSubmissionBackend(DashboardSubmissionBackend):
         return None
 
     def symbol_name_for_target(self, *, fqn: str, path: str) -> str:
-        return _entry_id_for_target(fqn, path)
+        return self._param_symbol_names.get((fqn, path), _entry_id_for_target(fqn, path))
 
 
 def _load_host_spec(params: Mapping[str, Any]) -> HostScanSpec | None:
@@ -296,15 +309,136 @@ def _entry_id_for_target(fqn: str, path: str) -> str:
     ``_ensure_unique_entry_ids()`` when the host transport dict is written back out.
     """
 
-    pieces = []
-    if path not in {"", "*"}:
-        pieces.extend(part for part in re.split(r"[^0-9A-Za-z_]+", path) if part)
-    pieces.append(fqn.split(".")[-1])
-    text = "_".join(pieces)
+    suffix = "all" if path == "*" else path
+    text = f"{fqn}_{suffix}" if suffix else fqn
+    return _normalise_symbol_identifier(text)
+
+
+def _normalise_symbol_identifier(text: str) -> str:
     text = re.sub(r"[^0-9A-Za-z_]+", "_", text).strip("_")
     if not text or text[0].isdigit():
         text = "param_" + text
     return text
+
+
+def _build_param_symbol_name_map(
+    params: Mapping[str, Any],
+    base_spec: HostScanSpec | None,
+) -> dict[tuple[str, str], str]:
+    result: dict[tuple[str, str], str] = {}
+
+    if base_spec is not None:
+        for entry in base_spec.entries:
+            if entry.kind != "param" or entry.target is None:
+                continue
+            result[(entry.target.fqn, entry.target.path)] = entry.id
+
+    default_names = _default_param_symbol_names(params)
+    for key, value in default_names.items():
+        result.setdefault(key, value)
+    return result
+
+
+def _default_param_symbol_names(params: Mapping[str, Any]) -> dict[tuple[str, str], str]:
+    schemata = params.get("schemata", {})
+    instances = params.get("instances", {})
+    if not isinstance(schemata, Mapping) or not isinstance(instances, Mapping):
+        return {}
+    if not schemata:
+        return {}
+
+    occurrence_count = Counter[str]()
+    targets: list[tuple[str, str]] = []
+    for path, fqns in instances.items():
+        if not isinstance(path, str):
+            continue
+        if not isinstance(fqns, Iterable):
+            continue
+        for fqn in fqns:
+            if not isinstance(fqn, str):
+                continue
+            targets.append((fqn, path))
+            occurrence_count[fqn] += 1
+    for fqn, count in occurrence_count.items():
+        if count > 1:
+            targets.append((fqn, "*"))
+
+    raw_names = _choose_minimal_unique_symbol_names(targets)
+    return _dedupe_symbol_names(raw_names)
+
+
+def _choose_minimal_unique_symbol_names(
+    targets: Iterable[tuple[str, str]],
+) -> dict[tuple[str, str], str]:
+    targets = tuple(sorted(targets))
+    token_lists = {target: _symbol_candidate_tokens(*target) for target in targets}
+    widths = {target: 1 for target in targets}
+    unresolved = set(targets)
+
+    while unresolved:
+        counts = Counter(
+            tuple(token_lists[target][: widths[target]]) for target in unresolved
+        )
+        next_unresolved = set()
+        progress = False
+        for target in unresolved:
+            key = tuple(token_lists[target][: widths[target]])
+            if counts[key] == 1:
+                continue
+            if widths[target] < len(token_lists[target]):
+                widths[target] += 1
+                progress = True
+            next_unresolved.add(target)
+        if not next_unresolved or not progress:
+            unresolved = next_unresolved
+            break
+        unresolved = next_unresolved
+
+    return {
+        target: _normalise_symbol_identifier(
+            "_".join(reversed(token_lists[target][: widths[target]]))
+        )
+        for target in targets
+    }
+
+
+def _symbol_candidate_tokens(fqn: str, path: str) -> list[str]:
+    fqn_parts = [_normalise_symbol_identifier(part) for part in fqn.split(".") if part]
+    if fqn_parts:
+        param_name = fqn_parts[-1]
+        context = list(reversed(fqn_parts[:-1]))
+    else:
+        param_name = _normalise_symbol_identifier(fqn)
+        context = []
+
+    if path == "*":
+        context.insert(0, "all")
+    elif path:
+        path_suffix = _normalise_symbol_identifier(path)
+        if path_suffix:
+            context.insert(0, path_suffix)
+
+    tokens = [param_name]
+    for token in context:
+        if token and token not in tokens:
+            tokens.append(token)
+    return tokens
+
+
+def _dedupe_symbol_names(
+    names: Mapping[tuple[str, str], str]
+) -> dict[tuple[str, str], str]:
+    result: dict[tuple[str, str], str] = {}
+    counts: dict[str, int] = {}
+    for key in sorted(names):
+        base = names[key]
+        count = counts.get(base, 0)
+        counts[base] = count + 1
+        if count == 0:
+            result[key] = base
+        else:
+            result[key] = f"{base}_{count + 1}"
+    return result
 
 
 def _ensure_unique_entry_ids(entries: Iterable[HostScanEntry]) -> list[HostScanEntry]:
