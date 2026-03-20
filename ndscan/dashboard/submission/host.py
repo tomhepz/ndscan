@@ -3,15 +3,16 @@
 This backend is intentionally narrower than the worker-side ``HostScanSpec`` model.
 It implements the first useful dashboard-editable subset:
 
-- grid mode only,
+- grid and GPO top-level modes,
 - real fragment parameters and pseudoparams,
-- parameter row modes ``fixed``, finite ``scan``, and ``rebind``,
-- pseudoparam row modes ``fixed`` and finite ``scan``.
+- grid row modes ``fixed``, finite ``scan``, and ``rebind``,
+- GPO row modes ``fixed``, ``gpo_scan``, and ``rebind`` for real parameters,
+- GPO row modes ``fixed`` and ``gpo_scan`` for pseudoparams.
 
 That is enough to give the host runtime a clean "dashboard submission path" distinct
 from the code-first ``make_fragment_host_scan_exp()`` path, without pretending that the
-full host schema already has a matching dashboard UI. More advanced host specs such as
-GPO are rejected up front so the editor does not silently drop information it cannot
+full host schema already has a matching dashboard UI. Specs outside this subset are
+still rejected up front so the editor does not silently drop information it cannot
 display.
 """
 
@@ -24,10 +25,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ...experiment.host_scan_schema import (
+    HostScanChannelObjectiveSpec,
+    HostScanChannelTargetSpec,
     HostScanEntry,
     HostScanFixedModeSpec,
     HostScanGeneratorSpec,
+    HostScanGpoModeSpec,
+    HostScanGpoScanModeSpec,
     HostScanGridModeSpec,
+    HostScanNuboBackendSpec,
     HostScanParamTargetSpec,
     HostScanRebindModeSpec,
     HostScanScanModeSpec,
@@ -43,10 +49,62 @@ _EDITABLE_GENERATOR_TYPES = {"linear", "centre_span", "expanding", "list"}
 
 
 @dataclass(slots=True)
+class HostSubmissionGpoSettings:
+    """Dashboard-side transport settings for the future GPO editor."""
+
+    objective_channel_path: str
+    batch_size: int | None = None
+    initial_design_size: int = 1
+    max_batches: int | None = None
+    acquisition: str = "ucb"
+    minimise: bool = True
+
+    def to_mode_spec(self) -> HostScanGpoModeSpec:
+        return HostScanGpoModeSpec(
+            objective=HostScanChannelObjectiveSpec(
+                target=HostScanChannelTargetSpec(path=self.objective_channel_path)
+            ),
+            backend=HostScanNuboBackendSpec(
+                batch_size=self.batch_size,
+                initial_design_size=self.initial_design_size,
+                max_batches=self.max_batches,
+                acquisition=self.acquisition,
+                minimise=self.minimise,
+            ),
+        )
+
+
+@dataclass(slots=True)
 class HostSubmissionState:
     """Mutable accumulation target for editable host-runtime dashboard rows."""
 
+    mode_type: str = "grid"
+    gpo_settings: HostSubmissionGpoSettings | None = None
     entries: list[HostScanEntry] = field(default_factory=list)
+
+    def set_grid_mode(self) -> None:
+        self.mode_type = "grid"
+        self.gpo_settings = None
+
+    def set_gpo_mode(
+        self,
+        *,
+        objective_channel_path: str,
+        batch_size: int | None = None,
+        initial_design_size: int = 1,
+        max_batches: int | None = None,
+        acquisition: str = "ucb",
+        minimise: bool = True,
+    ) -> None:
+        self.mode_type = "gpo"
+        self.gpo_settings = HostSubmissionGpoSettings(
+            objective_channel_path=objective_channel_path,
+            batch_size=batch_size,
+            initial_design_size=initial_design_size,
+            max_batches=max_batches,
+            acquisition=acquisition,
+            minimise=minimise,
+        )
 
     def add_override(
         self, *, fqn: str, path: str, value: Any, entry_id: str | None = None
@@ -106,6 +164,24 @@ class HostSubmissionState:
             )
         )
 
+    def add_gpo_axis(
+        self,
+        *,
+        fqn: str,
+        path: str,
+        lower: float,
+        upper: float,
+        entry_id: str | None = None,
+    ) -> None:
+        self.entries.append(
+            HostScanEntry(
+                id=entry_id or _entry_id_for_target(fqn, path),
+                kind="param",
+                target=HostScanParamTargetSpec(fqn=fqn, path=path),
+                mode=HostScanGpoScanModeSpec(lower=lower, upper=upper),
+            )
+        )
+
     def add_pseudoparam_fixed(self, *, entry_id: str, value: Any) -> None:
         self.entries.append(
             HostScanEntry(
@@ -141,12 +217,37 @@ class HostSubmissionState:
             )
         )
 
+    def add_pseudoparam_gpo_axis(
+        self,
+        *,
+        entry_id: str,
+        lower: float,
+        upper: float,
+    ) -> None:
+        self.entries.append(
+            HostScanEntry(
+                id=entry_id,
+                kind="pseudoparam",
+                mode=HostScanGpoScanModeSpec(lower=lower, upper=upper),
+            )
+        )
+
+    def mode_spec(self) -> HostScanGridModeSpec | HostScanGpoModeSpec:
+        if self.mode_type == "grid":
+            return HostScanGridModeSpec()
+        if self.mode_type == "gpo":
+            if self.gpo_settings is None:
+                raise ValueError("GPO submission state requires gpo_settings")
+            return self.gpo_settings.to_mode_spec()
+        raise ValueError(f"Unsupported host submission mode {self.mode_type!r}")
+
 
 class HostSubmissionBackend(DashboardSubmissionBackend):
     """Adapter for the editable subset of ``host_scan`` transport payloads."""
 
     def __init__(self, params: Mapping[str, Any] | None = None):
         params = params or {}
+        self._params = params
         self._base_spec = _editable_host_spec(params)
         self._param_symbol_names = _build_param_symbol_name_map(params, self._base_spec)
         self.supports_editing = self._base_spec is not None
@@ -160,6 +261,27 @@ class HostSubmissionBackend(DashboardSubmissionBackend):
     ) -> Mapping[str, Any] | None:
         del params
         return None
+
+    def initial_mode_state(self) -> dict[str, Any]:
+        if self._base_spec is None:
+            return {"mode_type": "grid"}
+        mode = self._base_spec.mode
+        if isinstance(mode, HostScanGridModeSpec):
+            return {"mode_type": "grid"}
+        assert isinstance(mode, HostScanGpoModeSpec)
+        return {
+            "mode_type": "gpo",
+            "objective_channel_path": mode.objective.target.path,
+            "batch_size": mode.backend.batch_size,
+            "initial_design_size": mode.backend.initial_design_size,
+            "max_batches": mode.backend.max_batches,
+            "acquisition": mode.backend.acquisition,
+            "minimise": mode.backend.minimise,
+        }
+
+    def available_result_channels(self) -> tuple[dict[str, Any], ...]:
+        channels = _params_channels(self._params)
+        return tuple(channels[path] for path in sorted(channels))
 
     def iter_configured_entries(
         self, params: Mapping[str, Any]
@@ -189,7 +311,23 @@ class HostSubmissionBackend(DashboardSubmissionBackend):
         return tuple(entry for entry in spec.entries if entry.kind == "pseudoparam")
 
     def new_submission_state(self) -> HostSubmissionState:
-        return HostSubmissionState()
+        state = HostSubmissionState()
+        if self._base_spec is None:
+            return state
+        mode = self._base_spec.mode
+        if isinstance(mode, HostScanGridModeSpec):
+            state.set_grid_mode()
+            return state
+        assert isinstance(mode, HostScanGpoModeSpec)
+        state.set_gpo_mode(
+            objective_channel_path=mode.objective.target.path,
+            batch_size=mode.backend.batch_size,
+            initial_design_size=mode.backend.initial_design_size,
+            max_batches=mode.backend.max_batches,
+            acquisition=mode.backend.acquisition,
+            minimise=mode.backend.minimise,
+        )
+        return state
 
     def apply_submission_state(
         self,
@@ -204,7 +342,7 @@ class HostSubmissionBackend(DashboardSubmissionBackend):
 
         spec = HostScanSpec(
             version=self._base_spec.version,
-            mode=HostScanGridModeSpec(),
+            mode=state.mode_spec(),
             entries=tuple(_ensure_unique_entry_ids(state.entries)),
             execution=self._base_spec.execution,
             metadata=self._base_spec.metadata,
@@ -246,8 +384,9 @@ def _load_host_spec(params: Mapping[str, Any]) -> HostScanSpec | None:
 
 
 def _is_editable_host_spec(spec: HostScanSpec) -> bool:
-    if not isinstance(spec.mode, HostScanGridModeSpec):
+    if not isinstance(spec.mode, (HostScanGridModeSpec, HostScanGpoModeSpec)):
         return False
+    in_grid_mode = isinstance(spec.mode, HostScanGridModeSpec)
     for entry in spec.entries:
         if entry.kind == "param":
             if entry.target is None:
@@ -255,7 +394,13 @@ def _is_editable_host_spec(spec: HostScanSpec) -> bool:
             if isinstance(entry.mode, HostScanFixedModeSpec):
                 continue
             if isinstance(entry.mode, HostScanScanModeSpec):
+                if not in_grid_mode:
+                    return False
                 if entry.mode.generator.type not in _EDITABLE_GENERATOR_TYPES:
+                    return False
+                continue
+            if isinstance(entry.mode, HostScanGpoScanModeSpec):
+                if in_grid_mode:
                     return False
                 continue
             if isinstance(entry.mode, HostScanRebindModeSpec):
@@ -267,7 +412,13 @@ def _is_editable_host_spec(spec: HostScanSpec) -> bool:
             if isinstance(entry.mode, HostScanFixedModeSpec):
                 continue
             if isinstance(entry.mode, HostScanScanModeSpec):
+                if not in_grid_mode:
+                    return False
                 if entry.mode.generator.type not in _EDITABLE_GENERATOR_TYPES:
+                    return False
+                continue
+            if isinstance(entry.mode, HostScanGpoScanModeSpec):
+                if in_grid_mode:
                     return False
                 continue
             return False
@@ -289,7 +440,7 @@ def _editable_host_spec(params: Mapping[str, Any]) -> HostScanSpec | None:
     The first case should not brick the editor; we can safely fall back to a fresh
     empty grid spec and let the next save replace the stale transport data.  The
     second case *must* stay non-editable so we do not silently drop advanced semantics
-    such as GPO.
+    outside the currently supported dashboard subset.
     """
 
     spec = _load_host_spec(params)
@@ -298,6 +449,19 @@ def _editable_host_spec(params: Mapping[str, Any]) -> HostScanSpec | None:
     if _is_editable_host_spec(spec):
         return spec
     return None
+
+
+    
+def _params_channels(params: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    channels = params.get("channels", {})
+    if not isinstance(channels, Mapping):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for path, desc in channels.items():
+        if not isinstance(path, str) or not isinstance(desc, Mapping):
+            continue
+        result[path] = dict(desc)
+    return result
 
 
 def _entry_id_for_target(fqn: str, path: str) -> str:

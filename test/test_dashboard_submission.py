@@ -34,17 +34,19 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
             {
                 "host_scan": {
                     "version": 1,
-                    "mode": {
-                        "type": "gpo",
-                        "objective": {"kind": "channel", "target": {"path": "y"}},
-                        "backend": {"kind": "nubo"},
-                    },
+                    "mode": {"type": "grid"},
                     "entries": [
                         {
                             "id": "x",
                             "kind": "param",
                             "target": {"fqn": "frag.x", "path": "*"},
-                            "mode": {"type": "gpo_scan", "lower": 0.0, "upper": 1.0},
+                            "mode": {
+                                "type": "scan",
+                                "generator": {
+                                    "type": "refining",
+                                    "range": {"lower": 0.0, "upper": 1.0},
+                                },
+                            },
                         }
                     ],
                     "execution": {},
@@ -285,6 +287,63 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
             }
         )
         self.assertTrue(backend.supports_editing)
+
+    def test_host_backend_accepts_simple_gpo_entries(self):
+        backend = HostSubmissionBackend(
+            {
+                "host_scan": {
+                    "version": 1,
+                    "mode": {
+                        "type": "gpo",
+                        "objective": {
+                            "kind": "channel",
+                            "target": {"path": "scattering_rate"},
+                        },
+                        "backend": {
+                            "kind": "nubo",
+                            "initial_design_size": 3,
+                            "acquisition": "ucb",
+                            "minimise": True,
+                        },
+                    },
+                    "entries": [
+                        {
+                            "id": "detuning",
+                            "kind": "param",
+                            "target": {"fqn": "frag.detuning", "path": ""},
+                            "mode": {"type": "gpo_scan", "lower": -1.0, "upper": 1.0},
+                        },
+                        {
+                            "id": "drive",
+                            "kind": "param",
+                            "target": {"fqn": "frag.drive", "path": ""},
+                            "mode": {"type": "rebind", "expr": "detuning + 0.5"},
+                        },
+                    ],
+                    "execution": {},
+                    "metadata": {},
+                },
+                "channels": {
+                    "scattering_rate": {
+                        "path": "scattering_rate",
+                        "description": "Scattering rate",
+                        "type": "float",
+                    }
+                },
+            }
+        )
+        self.assertTrue(backend.supports_editing)
+        self.assertEqual(backend.initial_mode_state()["mode_type"], "gpo")
+        self.assertEqual(
+            backend.available_result_channels(),
+            (
+                {
+                    "path": "scattering_rate",
+                    "description": "Scattering rate",
+                    "type": "float",
+                },
+            ),
+        )
 
     def test_host_backend_iterates_existing_param_entries(self):
         backend = HostSubmissionBackend(
@@ -579,6 +638,83 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
                 path="",
             ),
             "logical_drive",
+        )
+
+    def test_host_backend_serialises_gpo_mode_and_dimensions(self):
+        backend = HostSubmissionBackend(
+            {
+                "host_scan": {
+                    "version": 1,
+                    "mode": {"type": "grid"},
+                    "entries": [],
+                    "execution": {"max_points_per_batch": 8},
+                    "metadata": {"demo_name": "host_dashboard"},
+                }
+            }
+        )
+        state = backend.new_submission_state()
+        state.set_gpo_mode(
+            objective_channel_path="hardware/scattering_rate",
+            batch_size=4,
+            initial_design_size=7,
+            max_batches=12,
+            acquisition="ei",
+            minimise=False,
+        )
+        state.add_gpo_axis(
+            fqn="frag.detuning",
+            path="",
+            lower=-20.0,
+            upper=20.0,
+        )
+        state.add_rebind(
+            fqn="frag.frequency",
+            path="",
+            expression="80.0 + detuning / 2.0",
+        )
+        state.add_pseudoparam_gpo_axis(
+            entry_id="logical_intensity",
+            lower=0.5,
+            upper=2.0,
+        )
+
+        params = {"host_scan": {"old": True}, "overrides": {"old": []}}
+        backend.apply_submission_state(params, state)
+
+        self.assertEqual(params["overrides"], {})
+        self.assertEqual(
+            params["host_scan"]["mode"],
+            {
+                "type": "gpo",
+                "objective": {
+                    "kind": "channel",
+                    "target": {"path": "hardware/scattering_rate"},
+                },
+                "backend": {
+                    "kind": "nubo",
+                    "batch_size": 4,
+                    "initial_design_size": 7,
+                    "max_batches": 12,
+                    "acquisition": "ei",
+                    "minimise": False,
+                },
+            },
+        )
+        by_target = {
+            entry.get("target", {}).get("fqn", entry["id"]): entry
+            for entry in params["host_scan"]["entries"]
+        }
+        self.assertEqual(
+            by_target["frag.detuning"]["mode"],
+            {"type": "gpo_scan", "lower": -20.0, "upper": 20.0},
+        )
+        self.assertEqual(
+            by_target["logical_intensity"]["mode"],
+            {"type": "gpo_scan", "lower": 0.5, "upper": 2.0},
+        )
+        self.assertEqual(
+            by_target["frag.frequency"]["mode"],
+            {"type": "rebind", "expr": "80.0 + detuning / 2.0"},
         )
 
 

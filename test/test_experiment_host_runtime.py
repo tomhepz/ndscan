@@ -2101,8 +2101,10 @@ class HostRuntimeCase(HasEnvironmentCase):
         self.assertEqual(exp.argument_ui, "ndscan")
         self.assertIn("schemata", exp.args._params)
         self.assertIn("instances", exp.args._params)
+        self.assertIn("channels", exp.args._params)
         self.assertIn("overrides", exp.args._params)
         self.assertIn("host_scan", exp.args._params)
+        self.assertIn("result", exp.args._params["channels"])
 
         backend = select_submission_backend(exp.args._params)
         self.assertIsInstance(backend, HostSubmissionBackend)

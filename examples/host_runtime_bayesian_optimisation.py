@@ -32,6 +32,7 @@ from ndscan.experiment import (
     FloatParam,
     ScanRequest,
     make_fragment_host_scan_exp,
+    make_fragment_host_dashboard_scan_exp
 )
 
 try:
@@ -134,3 +135,5 @@ HostRuntimeBayesianOptimisation = make_fragment_host_scan_exp(
     MultiWellSurfaceFragment,
     _make_request,
 )
+
+HostRuntimeBayesianOptimisationDashboard = make_fragment_host_dashboard_scan_exp(MultiWellSurfaceFragment)

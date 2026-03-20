@@ -15,6 +15,7 @@ from ..utils import (
     NoAxesMode,
     shorten_to_unambiguous_suffixes,
 )
+from .host_scan_options import HostSubmissionModeSettings
 from .override_entry import HostOverrideEntry, HostPseudoparamEntry, OverrideEntry
 from .param_tree_dialog import OverrideProvider, OverrideStatus, ParamTreeDialog
 from .scan_options import list_scan_option_types
@@ -276,6 +277,8 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
         self._override_items = dict()
         self._pseudoparam_items = dict()
         self._next_pseudoparam_serial = 1
+        self._host_submission_settings = None
+        self._host_submission_settings_item = None
 
         self._add_override_icon = load_icon_cached("list-add-32.png")
         self._open_param_tree_icon = load_icon_cached("view-list-tree-32.png")
@@ -325,6 +328,7 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
                 )
             else:
                 if isinstance(self._submission_backend, HostSubmissionBackend):
+                    self._append_host_submission_settings()
                     self._append_host_pseudoparam_section()
                     for entry in self._submission_backend.iter_configured_pseudoparams(
                         ndscan_params
@@ -601,6 +605,10 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
         entry_widget = HostPseudoparamEntry(
             entry.id if entry is not None else self._default_host_pseudoparam_id()
         )
+        if self._host_submission_settings is not None:
+            entry_widget.set_submission_mode(
+                self._host_submission_settings.submission_mode()
+            )
         if entry is not None:
             entry_widget.read_from_entry(entry)
         entry_widget.layout.setContentsMargins(3, 1, 3, 6)
@@ -817,6 +825,55 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
         self._groups[name] = group
         return group
 
+    def _append_host_submission_settings(self):
+        if self._host_submission_settings is not None:
+            return
+
+        group = self._make_group_header_item("Host scan settings")
+        self.addTopLevelItem(group)
+        group.setExpanded(True)
+        self._groups["Host scan settings"] = group
+
+        item = QtWidgets.QTreeWidgetItem()
+        group.addChild(item)
+
+        settings = HostSubmissionModeSettings(
+            initial_state=self._submission_backend.initial_mode_state(),
+            channels=self._submission_backend.available_result_channels(),
+        )
+        settings.value_changed.connect(self._set_save_timer)
+        settings.mode_changed.connect(self._host_submission_mode_changed)
+        self._host_submission_settings = settings
+        self._host_submission_settings_item = item
+        self.setItemWidget(item, 1, settings)
+        self._refresh_host_submission_settings_geometry()
+
+    def _host_submission_mode_changed(self, mode: str) -> None:
+        for entry in self._param_entries.values():
+            if hasattr(entry, "set_submission_mode"):
+                entry.set_submission_mode(mode)
+        for entry in self._pseudoparam_entries.values():
+            entry.set_submission_mode(mode)
+        self._refresh_host_submission_settings_geometry()
+        QtCore.QTimer.singleShot(0, self._refresh_host_submission_settings_geometry)
+
+    def _refresh_host_submission_settings_geometry(self):
+        if (
+            self._host_submission_settings is None
+            or self._host_submission_settings_item is None
+        ):
+            return
+        layout = self._host_submission_settings.layout()
+        if layout is not None:
+            layout.activate()
+        self._host_submission_settings.adjustSize()
+        self._host_submission_settings_item.setSizeHint(
+            1, self._host_submission_settings.sizeHint()
+        )
+        self.scheduleDelayedItemsLayout()
+        self.updateGeometries()
+        self.viewport().update()
+
     def _recompute_vanilla_argument_clicked(self, name):
         asyncio.ensure_future(self._recompute_vanilla_argument(name))
 
@@ -913,6 +970,8 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
             return
 
         submission_state = self._submission_backend.new_submission_state()
+        if self._host_submission_settings is not None:
+            self._host_submission_settings.write_to_submission(submission_state)
         for item in self._pseudoparam_entries.values():
             item.write_to_submission(submission_state)
         for item in self._param_entries.values():
@@ -936,6 +995,11 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
                 path,
                 is_scannable=is_scannable,
                 backend=self._submission_backend,
+                submission_mode=(
+                    self._host_submission_settings.submission_mode()
+                    if self._host_submission_settings is not None
+                    else self._submission_backend.initial_mode_state()["mode_type"]
+                ),
             )
 
         options = list_scan_option_types(schema["type"], is_scannable)

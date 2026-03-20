@@ -13,6 +13,7 @@ from artiq.gui.tools import LayoutWidget
 
 from .._qt import QtCore, QtGui, QtWidgets
 from .host_scan_options import (
+    GpoBoundsScanOption,
     get_host_fixed_option_type,
     list_host_scan_generator_option_types,
 )
@@ -127,14 +128,25 @@ class HostOverrideEntry(_BaseOverrideEntry):
     generator selector chooses between min/max, centered, expanding, and list.
     """
 
-    def __init__(self, schema, path, *, is_scannable: bool, backend, **kwargs):
+    def __init__(
+        self,
+        schema,
+        path,
+        *,
+        is_scannable: bool,
+        backend,
+        submission_mode: str = "grid",
+        **kwargs,
+    ):
         super().__init__(schema, path, **kwargs)
         self._host_backend = backend
         self._supports_rebind = schema["type"] not in {"string", "bool", "enum"}
+        self._supports_gpo_scan = schema["type"] not in {"string", "bool", "enum"} and is_scannable
         self._symbol_name = backend.symbol_name_for_target(
             fqn=schema["fqn"],
             path=path,
         )
+        self._submission_mode = submission_mode
         self._fixed_option = self._build_option(get_host_fixed_option_type(schema["type"]))
         self._scan_option_names = []
         self._scan_options = []
@@ -144,13 +156,11 @@ class HostOverrideEntry(_BaseOverrideEntry):
         ).items():
             self._scan_option_names.append(name)
             self._scan_options.append(self._build_option(option_cls))
+        self._gpo_option = (
+            self._build_option(GpoBoundsScanOption) if self._supports_gpo_scan else None
+        )
 
         self._mode_box = QtWidgets.QComboBox()
-        self._mode_box.addItem("Fixed")
-        if self._scan_options:
-            self._mode_box.addItem("Scan")
-        if self._supports_rebind:
-            self._mode_box.addItem("Rebind")
         self._mode_box.currentIndexChanged.connect(self._mode_changed)
         self.addWidget(self._mode_box, col=0)
 
@@ -175,6 +185,8 @@ class HostOverrideEntry(_BaseOverrideEntry):
         self._scan_kind_box.setVisible(len(self._scan_options) > 1)
 
         self._mode_stack.addWidget(self._scan_container)
+        if self._gpo_option is not None:
+            self._mode_stack.addWidget(self._gpo_option.container)
         self._rebind_editor = _HostRebindEditor(symbol_name=self._symbol_name)
         self._rebind_editor.box.textChanged.connect(lambda *_: self.value_changed.emit())
         self._mode_stack.addWidget(self._rebind_editor.container)
@@ -197,6 +209,7 @@ class HostOverrideEntry(_BaseOverrideEntry):
         self.addWidget(self._group_container, col=2)
         self._current_mode = "Fixed"
         self._current_scan_option_idx = 0
+        self._rebuild_mode_box()
         self._update_mode_ui()
 
     def read_from_params(self, params: dict, manager_datasets) -> None:
@@ -232,6 +245,13 @@ class HostOverrideEntry(_BaseOverrideEntry):
                 self._mode_box.setCurrentText("Rebind")
                 return
 
+            if entry.mode.type == "gpo_scan" and self._gpo_option is not None:
+                axis = {"type": "gpo_scan", "lower": entry.mode.lower, "upper": entry.mode.upper}
+                if self._gpo_option.attempt_read_from_axis(axis):
+                    self._group_box.setText("")
+                    self._mode_box.setCurrentText("GPO scan")
+                    return
+
         for override in params.get("overrides", {}).get(self.schema["fqn"], []):
             if override["path"] == self.path:
                 self._group_box.setText("")
@@ -258,6 +278,9 @@ class HostOverrideEntry(_BaseOverrideEntry):
         if mode == "Scan":
             self._scan_options[self._scan_kind_box.currentIndex()].write_to_submission(proxy)
             return
+        if mode == "GPO scan" and self._gpo_option is not None:
+            self._gpo_option.write_to_submission(proxy)
+            return
         if mode == "Rebind":
             submission_state.add_rebind(
                 fqn=self.schema["fqn"],
@@ -278,6 +301,14 @@ class HostOverrideEntry(_BaseOverrideEntry):
     def disable_scan(self) -> None:
         self._mode_box.setCurrentText("Fixed")
 
+    def set_submission_mode(self, mode: str) -> None:
+        if mode == self._submission_mode:
+            return
+        current = self._mode_box.currentText()
+        self._submission_mode = mode
+        self._rebuild_mode_box(preferred_mode=current)
+        self._update_mode_ui()
+
     def _set_fixed_value(self, value) -> None:
         self._fixed_option.set_value(value)
         self._fixed_option.write_sync_values(self.sync_values)
@@ -295,6 +326,8 @@ class HostOverrideEntry(_BaseOverrideEntry):
     def _active_option(self):
         if self._current_mode == "Scan" and self._scan_options:
             return self._scan_options[self._current_scan_option_idx]
+        if self._current_mode == "GPO scan" and self._gpo_option is not None:
+            return self._gpo_option
         if self._current_mode == "Rebind" and self._supports_rebind:
             return self._rebind_editor
         return self._fixed_option
@@ -308,6 +341,9 @@ class HostOverrideEntry(_BaseOverrideEntry):
                 self.sync_values
             )
             self._mode_stack.setCurrentWidget(self._scan_container)
+        elif new_mode == "GPO scan" and self._gpo_option is not None:
+            self._gpo_option.read_sync_values(self.sync_values)
+            self._mode_stack.setCurrentWidget(self._gpo_option.container)
         elif new_mode == "Rebind" and self._supports_rebind:
             self._mode_stack.setCurrentWidget(self._rebind_editor.container)
         else:
@@ -332,6 +368,27 @@ class HostOverrideEntry(_BaseOverrideEntry):
         if is_scan and self._scan_options:
             self._scan_stack.setCurrentIndex(self._current_scan_option_idx)
 
+    def _allowed_mode_labels(self) -> list[str]:
+        labels = ["Fixed"]
+        if self._submission_mode == "grid" and self._scan_options:
+            labels.append("Scan")
+        if self._submission_mode == "gpo" and self._gpo_option is not None:
+            labels.append("GPO scan")
+        if self._supports_rebind:
+            labels.append("Rebind")
+        return labels
+
+    def _rebuild_mode_box(self, preferred_mode: str | None = None) -> None:
+        allowed = self._allowed_mode_labels()
+        target = preferred_mode if preferred_mode in allowed else "Fixed"
+        old_mode = self._current_mode
+        with QtCore.QSignalBlocker(self._mode_box):
+            self._mode_box.clear()
+            self._mode_box.addItems(allowed)
+            self._mode_box.setCurrentText(target)
+        self._current_mode = old_mode
+        self._mode_changed(0)
+
 
 class HostPseudoparamEntry(LayoutWidget):
     """Host-runtime pseudoparameter row editor.
@@ -346,10 +403,11 @@ class HostPseudoparamEntry(LayoutWidget):
 
     value_changed = QtCore.pyqtSignal()
 
-    def __init__(self, entry_id: str, *args):
+    def __init__(self, entry_id: str, *args, submission_mode: str = "grid"):
         super().__init__(*args)
         self.sync_values = {}
         self._last_valid_id = entry_id
+        self._submission_mode = submission_mode
 
         self._schema = {
             "fqn": "__pseudoparam__",
@@ -363,6 +421,7 @@ class HostPseudoparamEntry(LayoutWidget):
         for name, option_cls in list_host_scan_generator_option_types("float", True).items():
             self._scan_option_names.append(name)
             self._scan_options.append(self._build_option(option_cls))
+        self._gpo_option = self._build_option(GpoBoundsScanOption)
 
         self._id_label = QtWidgets.QLabel("Id")
         self.addWidget(self._id_label, col=0)
@@ -381,8 +440,6 @@ class HostPseudoparamEntry(LayoutWidget):
         self.addWidget(self._id_box, col=1)
 
         self._mode_box = QtWidgets.QComboBox()
-        self._mode_box.addItem("Fixed")
-        self._mode_box.addItem("Scan")
         self._mode_box.currentIndexChanged.connect(self._mode_changed)
         self.addWidget(self._mode_box, col=2)
 
@@ -407,6 +464,7 @@ class HostPseudoparamEntry(LayoutWidget):
         self._scan_kind_box.setVisible(len(self._scan_options) > 1)
 
         self._mode_stack.addWidget(self._scan_container)
+        self._mode_stack.addWidget(self._gpo_option.container)
         self.addWidget(self._mode_stack, col=3)
 
         self._group_container = LayoutWidget()
@@ -427,6 +485,7 @@ class HostPseudoparamEntry(LayoutWidget):
 
         self._current_mode = "Fixed"
         self._current_scan_option_idx = 0
+        self._rebuild_mode_box()
         self._update_mode_ui()
 
     def read_from_entry(self, entry) -> None:
@@ -449,6 +508,14 @@ class HostPseudoparamEntry(LayoutWidget):
                     self._mode_box.setCurrentText("Scan")
                     return
             logger.warning("Failed to read host pseudoparam scan params for %s", entry.id)
+            return
+
+        if entry.mode.type == "gpo_scan":
+            axis = {"type": "gpo_scan", "lower": entry.mode.lower, "upper": entry.mode.upper}
+            if self._gpo_option.attempt_read_from_axis(axis):
+                self._group_box.setText("")
+                self._mode_box.setCurrentText("GPO scan")
+                return
 
     def write_to_submission(self, submission_state) -> None:
         proxy = _HostPseudoparamSubmissionProxy(
@@ -456,13 +523,28 @@ class HostPseudoparamEntry(LayoutWidget):
             entry_id=self.identifier(),
             scan_group=self._normalised_scan_group(),
         )
-        if self._mode_box.currentText() == "Fixed":
+        mode = self._mode_box.currentText()
+        if mode == "Fixed":
             self._fixed_option.write_to_submission(proxy)
             return
-        self._scan_options[self._scan_kind_box.currentIndex()].write_to_submission(proxy)
+        if mode == "Scan":
+            self._scan_options[self._scan_kind_box.currentIndex()].write_to_submission(proxy)
+            return
+        if mode == "GPO scan":
+            self._gpo_option.write_to_submission(proxy)
+            return
+        raise RuntimeError(f"Unsupported host pseudoparam mode: {mode!r}")
 
     def disable_scan(self) -> None:
         self._mode_box.setCurrentText("Fixed")
+
+    def set_submission_mode(self, mode: str) -> None:
+        if mode == self._submission_mode:
+            return
+        current = self._mode_box.currentText()
+        self._submission_mode = mode
+        self._rebuild_mode_box(preferred_mode=current)
+        self._update_mode_ui()
 
     def identifier(self) -> str:
         text = self._id_box.text().strip()
@@ -499,6 +581,8 @@ class HostPseudoparamEntry(LayoutWidget):
             self._scan_options[self._current_scan_option_idx].write_sync_values(
                 self.sync_values
             )
+        elif self._current_mode == "GPO scan":
+            self._gpo_option.write_sync_values(self.sync_values)
         else:
             self._fixed_option.write_sync_values(self.sync_values)
 
@@ -508,6 +592,9 @@ class HostPseudoparamEntry(LayoutWidget):
                 self.sync_values
             )
             self._mode_stack.setCurrentWidget(self._scan_container)
+        elif new_mode == "GPO scan":
+            self._gpo_option.read_sync_values(self.sync_values)
+            self._mode_stack.setCurrentWidget(self._gpo_option.container)
         else:
             self._fixed_option.read_sync_values(self.sync_values)
             self._mode_stack.setCurrentWidget(self._fixed_option.container)
@@ -527,6 +614,25 @@ class HostPseudoparamEntry(LayoutWidget):
         self._group_container.setVisible(is_scan)
         if is_scan:
             self._scan_stack.setCurrentIndex(self._current_scan_option_idx)
+
+    def _allowed_mode_labels(self) -> list[str]:
+        labels = ["Fixed"]
+        if self._submission_mode == "grid":
+            labels.append("Scan")
+        if self._submission_mode == "gpo":
+            labels.append("GPO scan")
+        return labels
+
+    def _rebuild_mode_box(self, preferred_mode: str | None = None) -> None:
+        allowed = self._allowed_mode_labels()
+        target = preferred_mode if preferred_mode in allowed else "Fixed"
+        old_mode = self._current_mode
+        with QtCore.QSignalBlocker(self._mode_box):
+            self._mode_box.clear()
+            self._mode_box.addItems(allowed)
+            self._mode_box.setCurrentText(target)
+        self._current_mode = old_mode
+        self._mode_changed(0)
 
     def _normalised_scan_group(self) -> str | None:
         text = self._group_box.text().strip()
@@ -615,6 +721,15 @@ class _HostParamSubmissionProxy:
             scan_group=self._scan_group,
         )
 
+    def add_gpo_axis(self, *, fqn: str, path: str, lower, upper):
+        self._submission_state.add_gpo_axis(
+            fqn=fqn,
+            path=path,
+            lower=lower,
+            upper=upper,
+            entry_id=self._entry_id,
+        )
+
 
 class _HostPseudoparamSubmissionProxy:
     """Route existing scan-option serialisation calls into pseudoparam state."""
@@ -645,4 +760,12 @@ class _HostPseudoparamSubmissionProxy:
             axis_type=axis_type,
             axis_range=axis_range,
             scan_group=self._scan_group,
+        )
+
+    def add_gpo_axis(self, *, fqn: str, path: str, lower, upper):
+        del fqn, path
+        self._submission_state.add_pseudoparam_gpo_axis(
+            entry_id=self._entry_id,
+            lower=lower,
+            upper=upper,
         )

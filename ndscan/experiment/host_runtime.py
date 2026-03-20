@@ -286,8 +286,10 @@ class HostArgumentInterface(HasEnvironment):
         self._schemata = dict[str, dict]()
         self._sample_instances = dict[str, Any]()
         always_shown_params = []
+        result_channels = dict[str, ResultChannel]()
 
         fragment._collect_params(instances, self._schemata, self._sample_instances)
+        fragment._collect_result_channels(result_channels)
         for handle in fragment.get_always_shown_params():
             path = handle.owner._stringize_path()
             try:
@@ -305,6 +307,11 @@ class HostArgumentInterface(HasEnvironment):
             "instances": instances,
             "schemata": self._schemata,
             "always_shown": always_shown_params,
+            "channels": {
+                path: channel.describe()
+                for path, channel in result_channels.items()
+                if channel.save_by_default
+            },
             "overrides": {},
         }
         default_transport = _host_request_transport_dict(default_request_spec)
