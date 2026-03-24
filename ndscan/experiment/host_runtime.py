@@ -1,8 +1,8 @@
-"""A minimal parallel host-only runtime for ndscan fragments.
+"""A minimal host-directed runtime for ndscan fragments.
 
 This module is intentionally narrower than the legacy runtime:
 
-- the scan infrastructure runs on the host,
+- the scan structure and point selection live on the host,
 - code-first requests rather than dashboard parsing,
 - one flat scan-site dataset layout,
 - point policies as the only point-selection abstraction.
@@ -11,13 +11,11 @@ The goal is not to replace the old runtime in one shot. The goal is to establish
 small execution core that is easy to read, extend, and eventually reuse from both
 top-level scans and subscans.
 
-Fragments are still free to call ``@kernel`` helpers from host methods. What makes this
-runtime "host-only" is that the *scan loop* itself is driven from the host rather than
-by a dedicated kernel-side runner.
+The runtime remains host-directed even when an executor enters the core:
 
-Direct ``@kernel`` point bodies remain a separate concern. The loop structure here is
-host-side, but the per-point result collection contract still expects values to be
-visible to the host collector by the time a point returns.
+- the host still owns the scan request and point policy,
+- the host still owns batch boundaries, persistence, and analyses,
+- a kernel executor is only an implementation detail for how a chosen point body runs.
 """
 
 from __future__ import annotations
@@ -30,6 +28,7 @@ from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
+from copy import copy, deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import reduce
@@ -42,12 +41,22 @@ from sipyco import pyon
 
 from artiq import __version__ as artiq_version
 from artiq.coredevice.exceptions import RTIOUnderflow
-from artiq.language import EnvExperiment, HasEnvironment, PYONValue, kernel, portable
+from artiq.language import (
+    EnvExperiment,
+    HasEnvironment,
+    PYONValue,
+    host_only,
+    kernel,
+    kernel_from_string,
+    portable,
+    rpc,
+)
 
 from ._host_analysis import HostScanAnalysisEngine
-from .fragment import ExpFragment, RestartKernelTransitoryError, TransitoryError
+from .fragment import ExpFragment, Fragment, RestartKernelTransitoryError, TransitoryError
 from .parameters import ParamHandle, ParamStore
 from .point_policy import (
+    BasePoint,
     BatchFeedback,
     CartesianPointPolicy,
     ExplicitPointPolicy,
@@ -56,11 +65,11 @@ from .point_policy import (
     SinglePointPolicy,
     ZipPointPolicy,
 )
-from .result_channels import ResultChannel, SingleUseSink
+from .result_channels import FloatChannel, IntChannel, ResultChannel, SingleUseSink
 from .scan_mapping import FixedPseudoparam, ParameterMapping, ScanVariable
 from .scan_site import ScanSite, ScanSiteDatasetWriter
 from .utils import is_kernel
-from ..utils import PARAMS_ARG_KEY
+from ..utils import PARAMS_ARG_KEY, merge_no_duplicates
 
 __all__ = [
     "ExecutionPolicy",
@@ -80,6 +89,9 @@ __all__ = [
     "PointObservation",
     "HostScanRunResult",
     "HostScanSession",
+    "PreparedChildScan",
+    "prepare_child_scan",
+    "setattr_prepared_child_scan",
     "run_host_scan",
     "run_subscan",
     "make_fragment_host_scan_exp",
@@ -110,9 +122,24 @@ class ActiveScanContext:
     point_index: int
 
 
+@dataclass(frozen=True)
+class _KernelParentScanContextProvider:
+    """Host-side view of a point currently executing inside a resident kernel."""
+
+    site_path: tuple[str, ...]
+    point_index_getter: Any
+
+    def snapshot(self) -> ActiveScanContext:
+        return ActiveScanContext(self.site_path, int(self.point_index_getter()))
+
+
 _active_scan_context: ContextVar[tuple[ActiveScanContext, ...]] = ContextVar(
     "_active_scan_context", default=()
 )
+_active_kernel_parent_scan_context: ContextVar[
+    tuple[_KernelParentScanContextProvider, ...]
+] = ContextVar("_active_kernel_parent_scan_context", default=())
+_persistent_kernel_parent_scan_context: list[_KernelParentScanContextProvider] = []
 
 
 @dataclass(frozen=True)
@@ -374,6 +401,22 @@ def current_scan_context() -> ActiveScanContext | None:
     return stack[-1] if stack else None
 
 
+def _current_effective_scan_context() -> ActiveScanContext | None:
+    """Return the active parent point context from host or resident-kernel execution."""
+
+    context = current_scan_context()
+    if context is not None:
+        return context
+
+    if _persistent_kernel_parent_scan_context:
+        return _persistent_kernel_parent_scan_context[-1].snapshot()
+
+    stack = _active_kernel_parent_scan_context.get()
+    if not stack:
+        return None
+    return stack[-1].snapshot()
+
+
 def current_run_context() -> RunContext | None:
     """Return the root-scoped runtime context for the current host scan tree."""
 
@@ -399,6 +442,16 @@ def _push_run_context(context: RunContext):
         _active_run_context.reset(token)
 
 
+@contextmanager
+def _push_kernel_parent_scan_context(provider: _KernelParentScanContextProvider):
+    stack = _active_kernel_parent_scan_context.get()
+    token = _active_kernel_parent_scan_context.set(stack + (provider,))
+    try:
+        yield
+    finally:
+        _active_kernel_parent_scan_context.reset(token)
+
+
 def make_child_scan_site(
     name: str,
     *,
@@ -419,7 +472,7 @@ def make_child_scan_site(
     calling this helper outside an active scan context is an error.
     """
 
-    parent = current_scan_context()
+    parent = _current_effective_scan_context()
     if parent is None:
         raise RuntimeError(
             "make_child_scan_site() can only be used while a parent scan point is active"
@@ -742,6 +795,102 @@ class PointObservation:
     acquired_at_unix: float | None = None
 
 
+@dataclass(frozen=True)
+class _ResolvedExecutionPoint:
+    """Concrete point installation plan shared by host and kernel executors.
+
+    ``point`` keeps the original point-policy choice around for index/metadata, while
+    the remaining fields capture the fully resolved execution state after direct axis
+    installation and any parameter mappings have been applied on the host.
+    """
+
+    point: BasePoint
+    axis_values: OrderedDict[str, Any]
+    pseudoparam_values: OrderedDict[str, Any]
+    parameter_values: OrderedDict[str, Any]
+    rpc_parameter_values: tuple[Any, ...]
+
+
+class _ResidentKernelBatchState:
+    """Shared host-side state for one resident kernel execution region."""
+
+    def __init__(
+        self,
+        axes: Sequence[BoundScanAxis],
+        parameters: Sequence[BoundScanParameter],
+        parameter_mappings: Sequence[_BoundParameterMapping],
+        collector: _PointResultCollector,
+    ):
+        self._axes = tuple(axes)
+        self._parameters = tuple(parameters)
+        self._parameter_mappings = tuple(parameter_mappings)
+        self._collector = collector
+        self._current_chunk = list[_ResolvedExecutionPoint]()
+        self._completed_batch = list[PointObservation]()
+        self._current_next_point_index = 0
+
+    @property
+    def current_next_point_index(self) -> int:
+        return self._current_next_point_index
+
+    @host_only
+    def reset(self) -> None:
+        self._current_chunk.clear()
+        self._completed_batch.clear()
+        self._current_next_point_index = 0
+
+    @host_only
+    def get_param_values_chunk(self, *, next_batch, next_point_index):
+        if not self._current_chunk:
+            batch = next_batch()
+            if not batch:
+                return tuple([] for _ in self._parameters)
+            self._current_chunk = _resolve_execution_batch(
+                batch,
+                self._axes,
+                self._parameters,
+                self._parameter_mappings,
+            )
+            self._current_next_point_index = next_point_index()
+            self._update_host_param_stores()
+
+        values = tuple([] for _ in self._parameters)
+        for point in self._current_chunk:
+            for index, value in enumerate(point.rpc_parameter_values):
+                values[index].append(value)
+        return values
+
+    @host_only
+    def _update_host_param_stores(self) -> None:
+        if not self._current_chunk:
+            return
+        _apply_resolved_parameter_values(self._parameters, self._current_chunk[0])
+
+    def retry_point(self) -> None:
+        self._collector.discard_current()
+
+    def point_completed(self) -> None:
+        point = self._current_chunk.pop(0)
+        observation = PointObservation(
+            point_index=self._current_next_point_index,
+            axis_values=point.axis_values,
+            pseudoparam_values=point.pseudoparam_values,
+            parameter_values=point.parameter_values,
+            channel_values=self._collector.finish_point(),
+            point_metadata=OrderedDict(point.point.metadata.items()),
+            acquired_at_unix=time.time(),
+        )
+        self._completed_batch.append(observation)
+        self._current_next_point_index += 1
+        self._update_host_param_stores()
+
+    @host_only
+    def take_completed_batch(self) -> tuple[PointObservation, ...]:
+        completed = tuple(self._completed_batch)
+        self._completed_batch.clear()
+        return completed
+
+
 @dataclass
 class HostScanRunResult:
     """In-memory copy of the data produced by a host-runtime scan.
@@ -759,6 +908,7 @@ class HostScanRunResult:
     analysis_results: dict[str, Any]
     annotations: list[dict[str, Any]]
     site_prefix: str
+    runtime_stats: "HostScanRuntimeStats"
 
     @classmethod
     def empty(
@@ -780,6 +930,7 @@ class HostScanRunResult:
             analysis_results={},
             annotations=list(initial_annotations),
             site_prefix=site_prefix,
+            runtime_stats=HostScanRuntimeStats(),
         )
 
     def record(
@@ -808,6 +959,240 @@ class HostScanRunResult:
             self.record(observation, axes, parameters, channels)
 
 
+class _HostPointBatchSource:
+    """Host-side batch source/fallback point-feedback seam.
+
+    Today this is just an adapter around ``PointPolicy`` plus the execution-policy
+    batch limit. Later a kernel-capable point source can slot in behind the same
+    runtime shape without changing the public scan API.
+    """
+
+    def __init__(self, point_policy: PointPolicy, execution_policy: ExecutionPolicy):
+        self._point_policy = point_policy
+        self._execution_policy = execution_policy
+
+    @property
+    def point_policy(self) -> PointPolicy:
+        return self._point_policy
+
+    def describe(self) -> dict[str, Any]:
+        return self._point_policy.describe()
+
+    def effective_batch_size(self) -> int:
+        request_limit = self._execution_policy.max_points_per_batch
+        if request_limit is None:
+            request_limit = 1
+
+        preferred = self._point_policy.preferred_batch_size(request_limit)
+        if preferred <= 0:
+            raise ValueError("preferred_batch_size() must return a positive integer")
+        return min(request_limit, preferred)
+
+    def next_batch(self):
+        requested_size = self.effective_batch_size()
+        batch = self._point_policy.next_batch(requested_size)
+        if batch:
+            return batch
+        if self._point_policy.is_finished():
+            return []
+        raise RuntimeError(
+            f"{type(self._point_policy).__name__} returned no points before finishing"
+        )
+
+    def has_more_work(self) -> bool:
+        return not self._point_policy.is_finished()
+
+    def observe_batch(self, feedback: BatchFeedback) -> None:
+        self._point_policy.observe_batch(feedback)
+
+    def kernel_batch_source(self):
+        """Optional future kernel-capable point source descriptor."""
+
+        return None
+
+
+class _HostAnalysisAdapter:
+    """Host-side analysis seam.
+
+    Today this forwards directly to ``HostScanAnalysisEngine``. The separate adapter
+    makes it easier to later support optional kernel reducers without changing the
+    controller/batch-publication flow.
+    """
+
+    def __init__(self, engine: HostScanAnalysisEngine):
+        self._engine = engine
+
+    @property
+    def engine(self) -> HostScanAnalysisEngine:
+        return self._engine
+
+    def metadata(self) -> dict[str, Any]:
+        return self._engine.metadata()
+
+    def initial_annotations(self) -> list[dict[str, Any]]:
+        return self._engine.initial_annotations()
+
+    def observe_batch(
+        self,
+        completed_batch: Sequence[PointObservation],
+        result: HostScanRunResult,
+        site_writer: ScanSiteDatasetWriter,
+    ):
+        return self._engine.observe_batch(completed_batch, result, site_writer)
+
+    def execute_final(
+        self, result: HostScanRunResult, site_writer: ScanSiteDatasetWriter
+    ) -> None:
+        self._engine.execute_final(result, site_writer)
+
+    def kernel_reducer(self):
+        """Optional future kernel-capable reducer descriptor."""
+
+        return None
+
+
+class _HostObservationTransport:
+    """Host-side persistence/preview seam for completed observations."""
+
+    def __init__(self, site_writer: ScanSiteDatasetWriter):
+        self._site_writer = site_writer
+
+    @property
+    def site_writer(self) -> ScanSiteDatasetWriter:
+        return self._site_writer
+
+    @property
+    def prefix(self) -> str:
+        return self._site_writer.prefix
+
+    @property
+    def next_point_index(self) -> int:
+        return self._site_writer.next_point_index
+
+    def register_preview(self, preview: PreviewCoordinator | None) -> None:
+        if preview is not None:
+            preview.register_writer(self._site_writer)
+
+    def unregister_preview(self, preview: PreviewCoordinator | None) -> None:
+        if preview is not None:
+            preview.unregister_writer(self._site_writer)
+
+    def publish_metadata(
+        self,
+        metadata: Mapping[str, Any],
+        *,
+        extra_metadata: Mapping[str, Any],
+        start_unix_time: float,
+    ) -> None:
+        self._site_writer.publish_metadata(
+            metadata,
+            extra_metadata=extra_metadata,
+            start_unix_time=start_unix_time,
+        )
+
+    def start_segment(
+        self, *, parent_point_index: int | None, start_unix_time: float
+    ) -> None:
+        self._site_writer.start_segment(
+            parent_point_index=parent_point_index,
+            start_unix_time=start_unix_time,
+        )
+
+    def append_observations(self, observations: Sequence[PointObservation]) -> None:
+        self._site_writer.append_observations(observations)
+
+    def flush(self) -> None:
+        self._site_writer.flush()
+
+    def finish_segment(self) -> None:
+        self._site_writer.finish_segment()
+
+    def set_completed(self, completed: bool) -> None:
+        self._site_writer.set_completed(completed)
+
+    def close(self) -> None:
+        self._site_writer.close()
+
+    def maybe_write_preview(self, preview: PreviewCoordinator | None) -> None:
+        if preview is not None:
+            preview.maybe_write_preview()
+
+    def write_completion_preview(self, preview: PreviewCoordinator | None) -> None:
+        if preview is not None:
+            preview.write_completion_preview()
+
+    def kernel_transport(self):
+        """Optional future kernel-side buffered transport descriptor."""
+
+        return None
+
+
+def _make_batch_feedback(
+    observations: Sequence[PointObservation],
+    result: HostScanRunResult,
+    axes: Sequence[BoundScanAxis],
+    parameters: Sequence[BoundScanParameter],
+    channels: Sequence[BoundResultChannel],
+    online_analyses: dict[str, Any],
+) -> BatchFeedback:
+    return BatchFeedback(
+        observations=tuple(observations),
+        axis_data={
+            axis.source: tuple(result.coordinates[axis.identity]) for axis in axes
+        },
+        parameter_data={
+            parameter.handle: tuple(result.parameters[parameter.identity])
+            for parameter in parameters
+        },
+        result_data={
+            binding.channel: tuple(result.values[binding.channel]) for binding in channels
+        },
+        online_analyses=online_analyses,
+    )
+
+
+def _publish_completed_batch(
+    completed_batch: Sequence[PointObservation],
+    result: HostScanRunResult,
+    *,
+    axes: Sequence[BoundScanAxis],
+    parameters: Sequence[BoundScanParameter],
+    channels: Sequence[BoundResultChannel],
+    point_source: _HostPointBatchSource,
+    analysis: _HostAnalysisAdapter,
+    transport: _HostObservationTransport,
+    preview: PreviewCoordinator | None,
+) -> None:
+    if not completed_batch:
+        return
+
+    started_at = time.perf_counter()
+    transport.append_observations(completed_batch)
+    result.record_batch(completed_batch, axes, parameters, channels)
+    online_analyses = analysis.observe_batch(
+        completed_batch,
+        result,
+        transport.site_writer,
+    )
+    point_source.observe_batch(
+        _make_batch_feedback(
+            completed_batch,
+            result,
+            axes,
+            parameters,
+            channels,
+            online_analyses,
+        )
+    )
+    transport.flush()
+    transport.maybe_write_preview(preview)
+    result.runtime_stats.batch_count += 1
+    result.runtime_stats.point_count += len(completed_batch)
+    result.runtime_stats.total_batch_finalize_elapsed_s += (
+        time.perf_counter() - started_at
+    )
+
+
 @dataclass
 class _ScanAxisBinding:
     """Temporary rebinding of one logical scan axis onto a dedicated store.
@@ -824,6 +1209,22 @@ class _ScanAxisBinding:
     def restore(self) -> None:
         for handle, store in zip(self.handles, self.original_stores, strict=True):
             handle.set_store(store)
+
+
+@dataclass
+class HostScanRuntimeStats:
+    """Lightweight runtime counters/timings for executor bring-up and profiling.
+
+    These stats intentionally live on the in-memory run result rather than in the scan
+    site schema. They are primarily for tests, profiling, and future executor bring-up.
+    """
+
+    batch_count: int = 0
+    point_count: int = 0
+    executor_entry_count: int = 0
+    first_executor_entry_elapsed_s: float | None = None
+    total_executor_elapsed_s: float = 0.0
+    total_batch_finalize_elapsed_s: float = 0.0
 
 
 class _PointResultCollector:
@@ -868,8 +1269,31 @@ class _PointResultCollector:
         self._original_sinks.clear()
 
 
-class _HostPointExecutor:
-    """Execute already-resolved points against a host-only fragment."""
+@dataclass(frozen=True)
+class _BatchExecutionResult:
+    """Result of executing one runtime batch through an execution backend."""
+
+    observations: tuple[PointObservation, ...]
+    restart_host_context: bool = False
+    elapsed_s: float = 0.0
+    executor_entries: int = 1
+
+
+class HostExecutor:
+    """Execute already-resolved points against a fragment from the host runtime.
+
+    This is the current host-side execution backend. The controller still owns batch
+    selection, persistence, analyses, and pause handling; the executor owns:
+
+    - host setup/cleanup for one execution batch,
+    - direct axis installation,
+    - parameter mappings,
+    - point-body invocation,
+    - and point result collection.
+
+    Later kernel-oriented executors should be able to implement the same
+    ``execute_batch()`` contract with a different inner execution strategy.
+    """
 
     def __init__(
         self,
@@ -903,7 +1327,39 @@ class _HostPointExecutor:
     def remove(self) -> None:
         self._collector.remove()
 
-    def execute_point(self, point, site_point_index: int) -> PointObservation | None:
+    def execute_batch(self, points, *, start_point_index: int) -> _BatchExecutionResult:
+        """Execute one runtime batch.
+
+        Returns all successfully completed observations in order. When a point body
+        raises ``RestartKernelTransitoryError``, the executor returns the observations
+        completed so far together with ``restart_host_context=True`` so the controller
+        can re-enter host setup before retrying the remainder of the batch.
+        """
+
+        completed = list[PointObservation]()
+        restart_host_context = False
+        started_at = time.perf_counter()
+
+        self._fragment.host_setup()
+        try:
+            for offset, point in enumerate(points):
+                observation = self._execute_point(
+                    point, start_point_index=start_point_index + offset
+                )
+                if observation is None:
+                    restart_host_context = True
+                    break
+                completed.append(observation)
+        finally:
+            self._fragment.host_cleanup()
+
+        return _BatchExecutionResult(
+            observations=tuple(completed),
+            restart_host_context=restart_host_context,
+            elapsed_s=time.perf_counter() - started_at,
+        )
+
+    def _execute_point(self, point, *, start_point_index: int) -> PointObservation | None:
         """Execute one point.
 
         Returns a completed observation on success. Returns ``None`` when a
@@ -920,52 +1376,325 @@ class _HostPointExecutor:
         hoc request-level mappings feed through the same runtime path.
         """
 
-        axis_map = OrderedDict(
-            (axis.key, value) for axis, value in zip(self._axes, point.axis_values, strict=True)
-        )
-        pseudoparam_map = OrderedDict()
-        for axis, value in zip(self._axes, point.axis_values, strict=True):
-            if axis.param_store is not None:
-                axis.param_store.set_value(value)
-            else:
-                pseudoparam_map[axis.point_key] = value
-
-        dependency_values = {
-            axis.source: value
-            for axis, value in zip(self._axes, point.axis_values, strict=True)
-        }
-        for mapping in self._parameter_mappings:
-            for dependency in mapping.dependencies:
-                if isinstance(dependency, ParamHandle) and dependency not in dependency_values:
-                    dependency_values[dependency] = dependency.get()
-
-            updates = mapping.mapping.compute(dependency_values)
-            for target, value in updates.items():
-                if target._store is None:
-                    raise ValueError(
-                        f"Cannot apply parameter mapping to unbound parameter '{target.name}'"
-                    )
-                target._store.set_value(value)
-                dependency_values[target] = value
-
-        parameter_map = OrderedDict(
-            (parameter.key, parameter.handle.get()) for parameter in self._parameters
+        resolved = _resolve_execution_point(
+            point,
+            self._axes,
+            self._parameters,
+            self._parameter_mappings,
         )
 
-        with _push_scan_context(ActiveScanContext(self._site_path, site_point_index)):
+        with _push_scan_context(ActiveScanContext(self._site_path, start_point_index)):
             if not self._runner.run():
                 return None
 
         channel_values = self._collector.finish_point()
         return PointObservation(
-            point_index=site_point_index,
-            axis_values=axis_map,
-            pseudoparam_values=pseudoparam_map,
-            parameter_values=parameter_map,
+            point_index=start_point_index,
+            axis_values=resolved.axis_values,
+            pseudoparam_values=resolved.pseudoparam_values,
+            parameter_values=resolved.parameter_values,
             channel_values=channel_values,
             point_metadata=OrderedDict(point.metadata.items()),
             acquired_at_unix=time.time(),
         )
+
+
+class KernelStreamingExecutor:
+    """Execute a strict subset of scans through one resident kernel session.
+
+    The first kernel backend intentionally keeps the host-side scan controller in
+    charge of point selection and batch boundaries. The executor owns the resident
+    kernel loop and asks the host for the next already-chosen batch via RPC.
+
+    Supported in v1:
+
+    - direct axes, pseudoparams, and runtime parameter mappings as long as the host can
+      precompute the concrete installed parameter values,
+    - host-selected batches,
+    - existing per-point result channel push path.
+    """
+
+    _STATUS_PROCEED = 0
+    _STATUS_RESTART_HOST_CONTEXT = 1
+    _STATUS_PAUSE = 2
+    _STATUS_COMPLETE = 3
+
+    def __init__(
+        self,
+        fragment: ExpFragment,
+        axes: Sequence[BoundScanAxis],
+        parameters: Sequence[BoundScanParameter],
+        channels: Sequence[BoundResultChannel],
+        parameter_mappings: Sequence[_BoundParameterMapping],
+        site_path: tuple[str, ...],
+        *,
+        max_rtio_underflow_retries: int,
+        max_transitory_error_retries: int,
+    ):
+        self._fragment = fragment
+        self._axes = tuple(axes)
+        self._parameters = tuple(parameters)
+        self._parameter_mappings = tuple(parameter_mappings)
+        self._site_path = site_path
+        self._collector = _PointResultCollector(channels)
+        self._batch_state = _ResidentKernelBatchState(
+            self._axes,
+            self._parameters,
+            self._parameter_mappings,
+            self._collector,
+        )
+        self._runner = _ResidentKernelPointRunner(
+            fragment,
+            fragment,
+            self,
+        )
+        self._runner.configure_runner(
+            self._parameters,
+            max_rtio_underflow_retries=max_rtio_underflow_retries,
+            max_transitory_error_retries=max_transitory_error_retries,
+        )
+
+        self._result: HostScanRunResult | None = None
+        self._next_batch = None
+        self._finish_completed_batch = None
+        self._should_pause_after_batch = None
+        self._pause_after_batch = None
+        self._has_more_work = None
+        self._next_point_index = None
+
+    def install(self) -> None:
+        self._collector.install()
+
+    def remove(self) -> None:
+        self._collector.remove()
+
+    def run_to_completion(
+        self,
+        result: HostScanRunResult,
+        *,
+        next_batch,
+        finish_completed_batch,
+        should_pause_after_batch,
+        pause_after_batch,
+        has_more_work,
+        next_point_index,
+    ) -> None:
+        self._result = result
+        self._next_batch = next_batch
+        self._finish_completed_batch = finish_completed_batch
+        self._should_pause_after_batch = should_pause_after_batch
+        self._pause_after_batch = pause_after_batch
+        self._has_more_work = has_more_work
+        self._next_point_index = next_point_index
+
+        try:
+            while True:
+                self._fragment.recompute_param_defaults()
+
+                started_at = time.perf_counter()
+                self._fragment.host_setup()
+                try:
+                    with _push_kernel_parent_scan_context(
+                        _KernelParentScanContextProvider(
+                            self._site_path,
+                            lambda: self._batch_state.current_next_point_index,
+                        )
+                    ):
+                        status = self._runner.acquire()
+                finally:
+                    self._fragment.host_cleanup()
+
+                result.runtime_stats.executor_entry_count += 1
+                elapsed_s = time.perf_counter() - started_at
+                if result.runtime_stats.first_executor_entry_elapsed_s is None:
+                    result.runtime_stats.first_executor_entry_elapsed_s = elapsed_s
+                result.runtime_stats.total_executor_elapsed_s += elapsed_s
+
+                if status == self._STATUS_COMPLETE:
+                    return
+                if status == self._STATUS_PAUSE:
+                    self._pause_after_batch()
+                    continue
+                if status == self._STATUS_RESTART_HOST_CONTEXT:
+                    continue
+                raise RuntimeError(f"Unexpected kernel streaming executor status: {status}")
+        finally:
+            self._result = None
+            self._next_batch = None
+            self._finish_completed_batch = None
+            self._should_pause_after_batch = None
+            self._pause_after_batch = None
+            self._has_more_work = None
+            self._next_point_index = None
+            self._batch_state.reset()
+
+    @host_only
+    def _get_param_values_chunk(self):
+        return self._batch_state.get_param_values_chunk(
+            next_batch=self._next_batch,
+            next_point_index=self._next_point_index,
+        )
+
+    def _retry_point(self):
+        self._batch_state.retry_point()
+
+    def _point_completed(self):
+        self._batch_state.point_completed()
+
+    def _finish_chunk(self):
+        completed_batch = self._batch_state.take_completed_batch()
+        if completed_batch:
+            self._finish_completed_batch(completed_batch, self._result)
+
+        if self._should_pause_after_batch():
+            return self._STATUS_PAUSE
+        if not self._has_more_work():
+            return self._STATUS_COMPLETE
+        return self._STATUS_PROCEED
+
+    def _finish_chunk_after_restart(self):
+        completed_batch = self._batch_state.take_completed_batch()
+        if completed_batch:
+            self._finish_completed_batch(completed_batch, self._result)
+        return self._STATUS_RESTART_HOST_CONTEXT
+
+
+class _ResidentKernelPointRunner(HasEnvironment):
+    """Configurable resident kernel loop shared by top-level and prepared scans."""
+
+    def build(
+        self,
+        fragment: ExpFragment,
+        owner: Any,
+    ):
+        self.fragment = fragment
+        self.owner = owner
+        self.max_rtio_underflow_retries = 0
+        self.max_transitory_error_retries = 0
+        self.setattr_device("core")
+        self._run_chunk = kernel_from_string(["self"], "return self._STATUS_COMPLETE")
+
+    @kernel
+    def acquire(self) -> np.int32:
+        try:
+            while True:
+                result = self._run_chunk(self)
+                if result != self._STATUS_PROCEED:
+                    return np.int32(result)
+        finally:
+            self.fragment.device_cleanup()
+        assert False, "Execution never reaches here, return is just to pacify compiler."
+        return np.int32(self._STATUS_COMPLETE)
+
+    @portable
+    def _run_point(self) -> np.int32:
+        num_underflows = 0
+        num_transitory_errors = 0
+        while True:
+            try:
+                self.fragment.device_setup()
+                self.fragment.run_once()
+                self._point_completed()
+                return np.int32(self._STATUS_PROCEED)
+            except RTIOUnderflow:
+                num_underflows += 1
+                if num_underflows > self.max_rtio_underflow_retries:
+                    raise
+                logger.warning(
+                    "Ignoring RTIOUnderflow while executing resident kernel point (%s/%s)",
+                    num_underflows,
+                    self.max_rtio_underflow_retries,
+                )
+                self._retry_point()
+            except RestartKernelTransitoryError:
+                num_transitory_errors += 1
+                if num_transitory_errors > self.max_transitory_error_retries:
+                    raise
+                logger.info(
+                    "Restarting host setup after resident-kernel transitory error (%s/%s)",
+                    num_transitory_errors,
+                    self.max_transitory_error_retries,
+                )
+                self._retry_point()
+                return np.int32(self._finish_chunk_after_restart())
+            except TransitoryError:
+                num_transitory_errors += 1
+                if num_transitory_errors > self.max_transitory_error_retries:
+                    raise
+                logger.info(
+                    "Retrying resident kernel point after transitory error (%s/%s)",
+                    num_transitory_errors,
+                    self.max_transitory_error_retries,
+                )
+                self._retry_point()
+        return np.int32(self._STATUS_PROCEED)
+
+    _STATUS_PROCEED = np.int32(KernelStreamingExecutor._STATUS_PROCEED)
+    _STATUS_RESTART_HOST_CONTEXT = np.int32(
+        KernelStreamingExecutor._STATUS_RESTART_HOST_CONTEXT
+    )
+    _STATUS_PAUSE = np.int32(KernelStreamingExecutor._STATUS_PAUSE)
+    _STATUS_COMPLETE = np.int32(KernelStreamingExecutor._STATUS_COMPLETE)
+
+    @host_only
+    def configure_runner(
+        self,
+        parameters: Sequence[BoundScanParameter],
+        *,
+        max_rtio_underflow_retries: int,
+        max_transitory_error_retries: int,
+    ) -> None:
+        self.max_rtio_underflow_retries = max_rtio_underflow_retries
+        self.max_transitory_error_retries = max_transitory_error_retries
+        self._get_param_values_chunk.__func__.__annotations__ = {
+            "return": tuple.__class_getitem__(
+                tuple(
+                    list[parameter.handle._store.RpcType] for parameter in parameters
+                )
+            )
+        }
+        for index, parameter in enumerate(parameters):
+            setattr(
+                self,
+                f"_param_setter_{index}",
+                parameter.handle._store.set_from_rpc,
+            )
+        self._run_chunk = self._build_run_chunk(len(parameters))
+
+    def _build_run_chunk(self, num_parameters):
+        param_decl = " ".join(f"p{idx}," for idx in range(num_parameters))
+        code = ""
+        code += f"({param_decl}) = self._get_param_values_chunk()\n"
+        code += "if not p0:\n"
+        code += "    return self._STATUS_COMPLETE\n"
+        code += "for i in range(len(p0)):\n"
+        for idx in range(num_parameters):
+            code += f"    self._param_setter_{idx}(p{idx}[i])\n"
+        code += "    point_result = self._run_point()\n"
+        code += "    if point_result != self._STATUS_PROCEED:\n"
+        code += "        return point_result\n"
+        code += "return self._finish_chunk()"
+        return kernel_from_string(["self"], code)
+
+    @rpc
+    def _get_param_values_chunk(self):
+        return self.owner._get_param_values_chunk()
+
+    @rpc(flags={"async"})
+    def _retry_point(self):
+        self.owner._retry_point()
+
+    @rpc(flags={"async"})
+    def _point_completed(self):
+        self.owner._point_completed()
+
+    @rpc
+    def _finish_chunk(self) -> np.int32:
+        return np.int32(self.owner._finish_chunk())
+
+    @rpc
+    def _finish_chunk_after_restart(self) -> np.int32:
+        return np.int32(self.owner._finish_chunk_after_restart())
 
 
 class _PointInvocationRunner(HasEnvironment):
@@ -1068,14 +1797,22 @@ class HostScanProgram:
         self.parameters = tuple(parameters)
         self.channels = tuple(channels)
         self.parameter_mappings = tuple(parameter_mappings)
+        self.point_source = _HostPointBatchSource(
+            request.point_policy, request.execution_policy
+        )
+        self.analysis = _HostAnalysisAdapter(analysis_engine)
+        self.transport = _HostObservationTransport(site_writer)
+
+        # Internal compatibility aliases while the runtime migrates toward the
+        # capability seams above.
         self.point_policy = request.point_policy
-        self.site_writer = site_writer
-        self.analysis_engine = analysis_engine
+        self.site_writer = self.transport.site_writer
+        self.analysis_engine = self.analysis.engine
 
     def metadata(self) -> dict[str, Any]:
         metadata = {
             "site.fragment_fqn": self.fragment.fqn,
-            "scan.point_policy": self.point_policy.describe(),
+            "scan.point_policy": self.point_source.describe(),
             "scan.parameters": {
                 parameter.key: parameter.metadata()
                 for parameter in self.parameters
@@ -1108,7 +1845,7 @@ class HostScanProgram:
                 )
                 for index, mapping in enumerate(self.parameter_mappings)
             }
-        metadata.update(self.analysis_engine.metadata())
+        metadata.update(self.analysis.metadata())
         return metadata
 
 
@@ -1375,6 +2112,67 @@ def _order_parameter_mappings(
     return ordered
 
 
+def _fragment_uses_kernel_execution(fragment: ExpFragment) -> bool:
+    return any(
+        is_kernel(method)
+        for method in (
+            fragment.device_setup,
+            fragment.run_once,
+            fragment.device_cleanup,
+        )
+    )
+
+
+def _missing_kernel_core_devices(fragment: ExpFragment) -> tuple[str, ...]:
+    """Return required kernel driver attributes missing from ``fragment``.
+
+    ARTIQ's ``@kernel`` decorator records the attribute name of the core driver it
+    expects to use. For the default form ``@kernel``, this is ``"core"``. Real core
+    execution can compile nested same-device kernel calls without reading that
+    attribute at runtime, but host-side entry paths and DAX sim do still expect the
+    attribute to exist on the object. Failing early here produces a much clearer error
+    than letting execution fall through to ``AttributeError: ... has no attribute
+    'core'`` later.
+    """
+
+    missing = set[str]()
+    for method in (
+        fragment.device_setup,
+        fragment.run_once,
+        fragment.device_cleanup,
+    ):
+        if not is_kernel(method):
+            continue
+        core_name = method.artiq_embedded.core_name
+        if core_name is not None and not hasattr(fragment, core_name):
+            missing.add(core_name)
+    return tuple(sorted(missing))
+
+
+def _can_use_kernel_streaming_executor(
+    fragment: ExpFragment,
+    axes: Sequence[BoundScanAxis],
+    parameters: Sequence[BoundScanParameter],
+) -> bool:
+    """Return whether the strict first kernel-streaming backend can execute this scan.
+
+    The v1 backend is intentionally narrow:
+
+    - the scanned fragment actually uses kernel execution,
+    - the scan has at least one concrete fragment parameter that changes point-to-point.
+
+    Logical scan variables and parameter mappings are now supported as long as the host
+    can precompute concrete parameter values before each batch enters the resident
+    kernel loop.
+    """
+
+    if not _fragment_uses_kernel_execution(fragment):
+        return False
+    if not axes:
+        return False
+    return bool(parameters)
+
+
 class HostScanProgramBuilder:
     """Bind a code-first ``ScanRequest`` to a concrete fragment instance."""
 
@@ -1382,12 +2180,6 @@ class HostScanProgramBuilder:
         self._owner = owner
 
     def build(self, fragment: ExpFragment, request: ScanRequest) -> HostScanProgram:
-        if is_kernel(fragment.device_setup) or is_kernel(fragment.run_once):
-            raise NotImplementedError(
-                "The host runtime currently expects host-side device_setup()/run_once() "
-                "methods. Host methods may still call @kernel helpers internally."
-            )
-
         if request.point_policy.axis_count != len(request.axes):
             raise ValueError(
                 "Point policy dimensionality does not match the number of requested axes"
@@ -1406,6 +2198,23 @@ class HostScanProgramBuilder:
 
         parameter_mappings = _collect_parameter_mappings(fragment, request, axes)
         parameters = _build_bound_parameters(axes, parameter_mappings)
+        missing_kernel_devices = _missing_kernel_core_devices(fragment)
+        if missing_kernel_devices:
+            names = ", ".join(f"'{name}'" for name in missing_kernel_devices)
+            raise ValueError(
+                "Fragments using @kernel in the host runtime must declare the "
+                f"corresponding device attribute(s) {names} during build_fragment(); "
+                "for ordinary kernels this usually means calling "
+                "self.setattr_device('core')"
+            )
+        if _fragment_uses_kernel_execution(fragment) and not _can_use_kernel_streaming_executor(
+            fragment, axes, parameters
+        ):
+            raise NotImplementedError(
+                "Direct @kernel point bodies currently require at least one concrete "
+                "fragment parameter to vary point-to-point; pure pseudoparam scans "
+                "with no mapped parameter targets are not yet supported"
+            )
         site_writer = ScanSiteDatasetWriter(self._owner, request.site)
         analysis_engine = HostScanAnalysisEngine.build(fragment, axes, channels)
         return HostScanProgram(
@@ -1446,36 +2255,49 @@ class HostScanProgramRunner:
         self._program = program
         self._run_context = run_context
         self._fragment = program.fragment
-        self._executor = _HostPointExecutor(
-            program.fragment,
-            program.axes,
-            program.parameters,
-            program.channels,
-            program.parameter_mappings,
-            program.request.site.path,
-            max_rtio_underflow_retries=max_rtio_underflow_retries,
-            max_transitory_error_retries=max_transitory_error_retries,
-        )
+        if _can_use_kernel_streaming_executor(
+            program.fragment, program.axes, program.parameters
+        ):
+            self._executor = KernelStreamingExecutor(
+                program.fragment,
+                program.axes,
+                program.parameters,
+                program.channels,
+                program.parameter_mappings,
+                program.request.site.path,
+                max_rtio_underflow_retries=max_rtio_underflow_retries,
+                max_transitory_error_retries=max_transitory_error_retries,
+            )
+        else:
+            self._executor = HostExecutor(
+                program.fragment,
+                program.axes,
+                program.parameters,
+                program.channels,
+                program.parameter_mappings,
+                program.request.site.path,
+                max_rtio_underflow_retries=max_rtio_underflow_retries,
+                max_transitory_error_retries=max_transitory_error_retries,
+            )
         self._scheduler = owner.get_device("scheduler")
 
     def run(self) -> HostScanRunResult:
         run_context = self._resolved_run_context()
         preview = run_context.preview
-        if preview is not None:
-            preview.register_writer(self._program.site_writer)
+        self._program.transport.register_preview(preview)
 
         try:
             with _push_run_context(run_context):
                 self._fragment.prepare()
                 site_start_unix_time = time.time()
-                self._program.site_writer.publish_metadata(
+                self._program.transport.publish_metadata(
                     self._program.metadata(),
                     extra_metadata=self._program.request.metadata,
                     start_unix_time=site_start_unix_time,
                 )
                 if self._program.request.site.segmented:
-                    parent = current_scan_context()
-                    self._program.site_writer.start_segment(
+                    parent = _current_effective_scan_context()
+                    self._program.transport.start_segment(
                         parent_point_index=None if parent is None else parent.point_index,
                         start_unix_time=time.time(),
                     )
@@ -1484,75 +2306,83 @@ class HostScanProgramRunner:
                     self._program.axes,
                     self._program.parameters,
                     self._program.channels,
-                    self._program.site_writer.prefix,
-                    initial_annotations=self._program.analysis_engine.initial_annotations(),
+                    self._program.transport.prefix,
+                    initial_annotations=self._program.analysis.initial_annotations(),
                 )
 
                 self._executor.install()
-                current_batch = list()
-                batch_offset = 0
-
                 try:
-                    while True:
-                        if batch_offset >= len(current_batch):
-                            if self._program.point_policy.is_finished():
-                                break
-                            current_batch = self._next_batch()
-                            batch_offset = 0
-
-                        self._fragment.recompute_param_defaults()
-
-                        restart_host_context = False
-                        completed_batch: list[PointObservation] = []
-
-                        self._fragment.host_setup()
-                        try:
-                            while batch_offset < len(current_batch):
-                                point_index = (
-                                    self._program.site_writer.next_point_index
-                                    + len(completed_batch)
-                                )
-                                observation = self._executor.execute_point(
-                                    current_batch[batch_offset],
-                                    point_index,
-                                )
-                                if observation is None:
-                                    restart_host_context = True
-                                    break
-
-                                completed_batch.append(observation)
-                                batch_offset += 1
-                        finally:
-                            self._fragment.host_cleanup()
-
-                        self._finish_completed_batch(completed_batch, result)
-
-                        if restart_host_context:
-                            continue
-
-                        current_batch = []
+                    if isinstance(self._executor, KernelStreamingExecutor):
+                        self._executor.run_to_completion(
+                            result,
+                            next_batch=self._next_batch,
+                            finish_completed_batch=self._finish_completed_batch,
+                            should_pause_after_batch=self._should_pause_after_batch,
+                            pause_after_batch=self._pause_after_batch,
+                            has_more_work=self._has_more_work,
+                            next_point_index=lambda: self._program.transport.next_point_index,
+                        )
+                    else:
+                        current_batch = list()
                         batch_offset = 0
-                        if self._should_pause_after_batch():
-                            self._pause_after_batch()
+
+                        while True:
+                            if batch_offset >= len(current_batch):
+                                if not self._program.point_source.has_more_work():
+                                    break
+                                current_batch = self._next_batch()
+                                batch_offset = 0
+
+                            self._fragment.recompute_param_defaults()
+
+                            point_index = self._program.transport.next_point_index
+                            batch_result = self._executor.execute_batch(
+                                current_batch[batch_offset:],
+                                start_point_index=point_index,
+                            )
+                            completed_batch = list(batch_result.observations)
+                            restart_host_context = batch_result.restart_host_context
+                            result.runtime_stats.executor_entry_count += (
+                                batch_result.executor_entries
+                            )
+                            if (
+                                result.runtime_stats.first_executor_entry_elapsed_s is None
+                                and batch_result.executor_entries > 0
+                            ):
+                                result.runtime_stats.first_executor_entry_elapsed_s = (
+                                    batch_result.elapsed_s
+                                )
+                            result.runtime_stats.total_executor_elapsed_s += (
+                                batch_result.elapsed_s
+                            )
+                            batch_offset += len(completed_batch)
+
+                            self._finish_completed_batch(completed_batch, result)
+
+                            if restart_host_context:
+                                continue
+
+                            current_batch = []
+                            batch_offset = 0
+                            if self._should_pause_after_batch():
+                                self._pause_after_batch()
                 finally:
                     self._executor.remove()
 
                 if self._program.request.site.segmented:
-                    self._program.site_writer.finish_segment()
+                    self._program.transport.finish_segment()
                 # Finish the point stream before analyses run; later buffered
                 # implementations should make this flush any still-pending point data.
-                self._program.site_writer.flush()
-                self._program.analysis_engine.execute_final(
-                    result, self._program.site_writer
+                self._program.transport.flush()
+                self._program.analysis.execute_final(
+                    result, self._program.transport.site_writer
                 )
-                self._program.site_writer.set_completed(True)
-                self._program.site_writer.close()
-                if preview is not None:
-                    preview.write_completion_preview()
+                self._program.transport.set_completed(True)
+                self._program.transport.close()
+                self._program.transport.write_completion_preview(preview)
                 return result
         finally:
-            if preview is not None:
-                preview.unregister_writer(self._program.site_writer)
+            self._program.transport.unregister_preview(preview)
 
     def _resolved_run_context(self) -> RunContext:
         if self._run_context is not None:
@@ -1584,15 +2414,7 @@ class HostScanProgramRunner:
         return self._run_context
 
     def _next_batch(self):
-        requested_size = self._effective_batch_size()
-        batch = self._program.point_policy.next_batch(requested_size)
-        if batch:
-            return batch
-        if self._program.point_policy.is_finished():
-            return []
-        raise RuntimeError(
-            f"{type(self._program.point_policy).__name__} returned no points before finishing"
-        )
+        return self._program.point_source.next_batch()
 
     def _effective_batch_size(self) -> int:
         """Return the point count upper bound for the next execution batch.
@@ -1603,14 +2425,7 @@ class HostScanProgramRunner:
         batch.
         """
 
-        request_limit = self._program.request.execution_policy.max_points_per_batch
-        if request_limit is None:
-            request_limit = 1
-
-        preferred = self._program.point_policy.preferred_batch_size(request_limit)
-        if preferred <= 0:
-            raise ValueError("preferred_batch_size() must return a positive integer")
-        return min(request_limit, preferred)
+        return self._program.point_source.effective_batch_size()
 
     def _finish_completed_batch(
         self,
@@ -1636,40 +2451,22 @@ class HostScanProgramRunner:
         if not completed_batch:
             return
 
-        self._program.site_writer.append_observations(completed_batch)
-        result.record_batch(
+        _publish_completed_batch(
             completed_batch,
-            self._program.axes,
-            self._program.parameters,
-            self._program.channels,
+            result,
+            axes=self._program.axes,
+            parameters=self._program.parameters,
+            channels=self._program.channels,
+            point_source=self._program.point_source,
+            analysis=self._program.analysis,
+            transport=self._program.transport,
+            preview=(
+                None if self._run_context is None else self._run_context.preview
+            ),
         )
-        online_analyses = self._program.analysis_engine.observe_batch(
-            completed_batch, result, self._program.site_writer
-        )
-        self._program.point_policy.observe_batch(
-            BatchFeedback(
-                observations=tuple(completed_batch),
-                axis_data={
-                    axis.source: tuple(result.coordinates[axis.identity])
-                    for axis in self._program.axes
-                },
-                parameter_data={
-                    parameter.handle: tuple(result.parameters[parameter.identity])
-                    for parameter in self._program.parameters
-                },
-                result_data={
-                    binding.channel: tuple(result.values[binding.channel])
-                    for binding in self._program.channels
-                },
-                online_analyses=online_analyses,
-            )
-        )
-        self._program.site_writer.flush()
-        if self._run_context is not None and self._run_context.preview is not None:
-            self._run_context.preview.maybe_write_preview()
 
     def _has_more_work(self) -> bool:
-        return not self._program.point_policy.is_finished()
+        return self._program.point_source.has_more_work()
 
     def _should_pause_after_batch(self) -> bool:
         """Return whether the scheduler wants to pause after the current batch.
@@ -1756,6 +2553,827 @@ def run_host_scan(
     return session.run()
 
 
+def _prepare_child_scan_request(
+    request: ScanRequest,
+    *,
+    name: str,
+    segmented: bool,
+    extra_metadata: Mapping[str, Any] | None,
+) -> ScanRequest:
+    """Return ``request`` with a structural child scan site nested under the parent."""
+
+    base_site = request.site
+    child_site = make_child_scan_site(
+        name,
+        segmented=segmented,
+        extra_metadata={
+            **dict(base_site.extra_metadata),
+            **({} if extra_metadata is None else dict(extra_metadata)),
+        },
+    )
+    if base_site.dataset_prefix is not None:
+        child_site = ScanSite(
+            path=child_site.path,
+            parent_path=child_site.parent_path,
+            dataset_prefix=base_site.dataset_prefix,
+            segmented=child_site.segmented,
+            extra_metadata=child_site.extra_metadata,
+    )
+    return request.with_site(child_site)
+
+
+def _clone_scan_request_for_execution(request: ScanRequest) -> ScanRequest:
+    """Return a fresh executable copy of ``request``.
+
+    `ScanRequest` structure is immutable enough to reuse directly, but the point policy
+    it contains is stateful. Prepared scans should therefore execute against a fresh
+    point-policy instance each time while keeping the same fragment handles and
+    mappings.
+    """
+
+    return ScanRequest(
+        axes=request.axes,
+        point_policy=deepcopy(request.point_policy),
+        parameter_mappings=request.parameter_mappings,
+        site=request.site,
+        metadata=deepcopy(request.metadata),
+        execution_policy=request.execution_policy,
+    )
+
+
+def _auto_detach_prepared_child_fragment(
+    owner: HasEnvironment, fragment: ExpFragment
+) -> None:
+    """Detach ``fragment`` when it is a direct child being prepared as a scan target.
+
+    Prepared child scans own the execution lifecycle of their scanned fragment. If the
+    fragment remained attached to the parent's normal traversal, setup/cleanup would
+    happen through two different paths. When ``prepare_child_scan()`` is called during
+    ``build_fragment()``, detach the direct child automatically. Outside build time we
+    can no longer change that relationship, so raise a clear error instead.
+    """
+
+    if not isinstance(owner, Fragment):
+        return
+    if fragment not in owner._subfragments:
+        return
+    if fragment in owner._detached_subfragments:
+        return
+    if owner._building:
+        owner.detach_fragment(fragment)
+        return
+    raise ValueError(
+        "Prepared child scan targets that are direct subfragments must be detached "
+        "during build_fragment(); use detached=True on setattr_fragment() or "
+        "setattr_prepared_child_scan()"
+    )
+
+def _collect_default_analysis_result_channels(
+    fragment: ExpFragment,
+) -> dict[str, ResultChannel]:
+    """Return all declared default-analysis result channels for ``fragment``."""
+
+    return reduce(
+        lambda x, y: merge_no_duplicates(x, y, kind="analysis result"),
+        (analysis.get_analysis_results() for analysis in fragment.get_default_analyses()),
+        {},
+    )
+
+
+def _prepared_child_fixed_output_rpc_type(channel: ResultChannel):
+    if isinstance(channel, FloatChannel):
+        return float
+    if isinstance(channel, IntChannel):
+        return np.int32
+    raise NotImplementedError(
+        "Prepared child fixed outputs currently support only FloatChannel and "
+        f"IntChannel analysis results, not {type(channel).__name__}"
+    )
+
+
+def _prepared_child_fixed_output_coercer(channel: ResultChannel):
+    if isinstance(channel, FloatChannel):
+        return float
+    if isinstance(channel, IntChannel):
+        return np.int32
+    raise NotImplementedError(
+        "Prepared child fixed outputs currently support only FloatChannel and "
+        f"IntChannel analysis results, not {type(channel).__name__}"
+    )
+
+
+def _resolve_prepared_child_output_channels(
+    fragment: ExpFragment,
+    *,
+    expose_analysis_results: bool,
+    expose_outputs: Sequence[str] | None,
+) -> tuple[dict[str, ResultChannel], dict[str, ResultChannel]]:
+    """Resolve named fixed outputs for a prepared child scan.
+
+    Returns ``(analysis_result_accessors, tuple_output_accessors)``.
+    """
+
+    all_channels = _collect_default_analysis_result_channels(fragment)
+
+    if expose_outputs is None:
+        if expose_analysis_results:
+            return all_channels, {}
+        return {}, {}
+
+    if not expose_outputs:
+        raise ValueError("expose_outputs must contain at least one output name")
+
+    selected = dict[str, ResultChannel]()
+    seen = set[str]()
+    for result_name in expose_outputs:
+        if result_name in seen:
+            raise ValueError(
+                f"Prepared child fixed output {result_name!r} was requested more than once"
+            )
+        seen.add(result_name)
+        try:
+            channel = all_channels[result_name]
+        except KeyError as exc:
+            raise ValueError(
+                f"Prepared child fixed output {result_name!r} is not declared by any "
+                f"default analysis on {type(fragment).__name__}"
+            ) from exc
+        _prepared_child_fixed_output_rpc_type(channel)
+        selected[result_name] = channel
+    return selected, selected
+
+
+class _PreparedChildAnalysisResultAccessorBase:
+    """Compiler-friendly fixed-output accessor for prepared child scans."""
+
+    def __init__(self, owner: "PreparedChildScan", result_name: str):
+        self._owner = owner
+        self._result_name = result_name
+
+    def __repr__(self) -> str:
+        return (
+            f"<{type(self).__name__}@{hex(id(self))}: "
+            f"{self._owner._name}.{self._result_name}>"
+        )
+
+
+class _PreparedChildFloatAnalysisResultAccessor(_PreparedChildAnalysisResultAccessorBase):
+    @rpc
+    def _get_value(self) -> float:
+        return float(self._owner._get_exposed_analysis_result(self._result_name))
+
+    @portable
+    def get(self) -> float:
+        return self._get_value()
+
+
+class _PreparedChildIntAnalysisResultAccessor(_PreparedChildAnalysisResultAccessorBase):
+    @rpc
+    def _get_value(self) -> np.int32:
+        return np.int32(self._owner._get_exposed_analysis_result(self._result_name))
+
+    @portable
+    def get(self) -> np.int32:
+        return self._get_value()
+
+
+def _make_prepared_child_analysis_result_accessor(
+    owner: "PreparedChildScan",
+    result_name: str,
+    channel: ResultChannel,
+):
+    """Return a typed fixed-output accessor for one prepared child analysis result."""
+
+    if isinstance(channel, FloatChannel):
+        accessor_class = type(
+            f"_PreparedChildFloatAnalysisResult_{id(owner)}_{result_name}",
+            (_PreparedChildFloatAnalysisResultAccessor,),
+            {},
+        )
+        return accessor_class(owner, result_name)
+    if isinstance(channel, IntChannel):
+        accessor_class = type(
+            f"_PreparedChildIntAnalysisResult_{id(owner)}_{result_name}",
+            (_PreparedChildIntAnalysisResultAccessor,),
+            {},
+        )
+        return accessor_class(owner, result_name)
+    _prepared_child_fixed_output_rpc_type(channel)
+    raise AssertionError("unreachable")
+
+
+def _make_prepared_child_get_outputs_methods(
+    output_channels: Mapping[str, ResultChannel],
+):
+    if not output_channels:
+        return {}
+
+    output_items = tuple(output_channels.items())
+    return_type = tuple.__class_getitem__(
+        tuple(
+            _prepared_child_fixed_output_rpc_type(channel)
+            for _, channel in output_items
+        )
+    )
+    coercers = tuple(
+        _prepared_child_fixed_output_coercer(channel) for _, channel in output_items
+    )
+
+    def _get_outputs_value(self):
+        return tuple(
+            coercer(self._get_exposed_analysis_result(result_name))
+            for (result_name, _), coercer in zip(output_items, coercers, strict=True)
+        )
+
+    _get_outputs_value.__annotations__ = {"return": return_type}
+    _get_outputs_value = rpc(_get_outputs_value)
+
+    def get_outputs(self):
+        return self._get_outputs_value()
+
+    get_outputs.__annotations__ = {"return": return_type}
+    get_outputs = portable(get_outputs)
+
+    return {
+        "_get_outputs_value": _get_outputs_value,
+        "get_outputs": get_outputs,
+    }
+
+
+class PreparedChildScan:
+    """Prepared child-scan handle for the newer host runtime.
+
+    This fixes the structural part of a nested scan up front:
+
+    - which fragment is the child target,
+    - what child-site name it uses,
+    - and the default site-shaping options for that child.
+
+    Concrete `ScanRequest` instances are still configured later.
+
+    Two execution entry points exist:
+
+    - ``run()`` keeps the rich host-only return value.
+    - ``acquire()`` is a compiler-friendly execution entry that returns ``None`` and
+      can therefore be called from kernels.
+    - ``prime()`` explicitly primes the detached child subtree from host code before an
+      outer kernel is first compiled.
+
+    `acquire()` now supports two execution shapes:
+
+    - host-executed child scans still run through a blocking host RPC
+    - kernel-executed child scans use a dedicated prepared nested kernel runner that
+      keeps the child scan loop inside the compiled call graph while still fetching
+      point batches from the host
+
+    The kernel path is still intentionally strict and currently shares the same
+    executor eligibility rules as the top-level `KernelStreamingExecutor`.
+    """
+
+    def __init__(
+        self,
+        owner: HasEnvironment,
+        fragment: ExpFragment,
+        *,
+        name: str,
+        segmented: bool = True,
+        extra_metadata: Mapping[str, Any] | None = None,
+        max_rtio_underflow_retries: int = 3,
+        max_transitory_error_retries: int = 10,
+        expose_analysis_results: bool = False,
+        expose_outputs: Sequence[str] | None = None,
+    ):
+        self._owner = owner
+        self._fragment = fragment
+        self._name = name
+        self._segmented = segmented
+        self._extra_metadata = {} if extra_metadata is None else dict(extra_metadata)
+        self._max_rtio_underflow_retries = max_rtio_underflow_retries
+        self._max_transitory_error_retries = max_transitory_error_retries
+        self._expose_analysis_results = expose_analysis_results
+        self._expose_outputs = None if expose_outputs is None else tuple(expose_outputs)
+
+        self._request: ScanRequest | None = None
+        self._overrides: dict[str, list[tuple[str, ParamStore]]] | None = None
+        self._last_result: HostScanRunResult | None = None
+        self._kernel_runner = None
+        self._kernel_runner_ready = False
+        self._kernel_support_error: str | None = None
+        self._kernel_axis_bindings: list[_ScanAxisBinding] = []
+        self._kernel_program: HostScanProgram | None = None
+        self._kernel_result: HostScanRunResult | None = None
+        self._kernel_run_context: RunContext | None = None
+        self._kernel_preview = None
+        self._kernel_collector: _PointResultCollector | None = None
+        self._kernel_batch_state: _ResidentKernelBatchState | None = None
+        self._kernel_parent_provider: _KernelParentScanContextProvider | None = None
+        self._kernel_host_setup_active = False
+        (
+            self._exposed_analysis_channel_specs,
+            self._exposed_output_channel_specs,
+        ) = _resolve_prepared_child_output_channels(
+            self._fragment,
+            expose_analysis_results=expose_analysis_results,
+            expose_outputs=expose_outputs,
+        )
+
+        analysis_results_class = type(
+            f"_PreparedChildAnalysisResults_{id(self)}",
+            (),
+            {},
+        )
+        self.analysis_results = analysis_results_class()
+        for result_name, channel in self._exposed_analysis_channel_specs.items():
+            accessor = _make_prepared_child_analysis_result_accessor(
+                self, result_name, channel
+            )
+            setattr(self.analysis_results, result_name, accessor)
+
+        if _fragment_uses_kernel_execution(fragment):
+            runner_class = type(
+                f"_PreparedChildKernelRunner_{id(self)}",
+                (_ResidentKernelPointRunner,),
+                {},
+            )
+            self._kernel_runner = runner_class(self._fragment, self._fragment, self)
+        else:
+            self.acquire = self._acquire_host
+
+    @host_only
+    def configure(
+        self,
+        request: ScanRequest,
+        *,
+        overrides: dict[str, list[tuple[str, ParamStore]]] | None = None,
+    ) -> None:
+        self._request = request
+        self._overrides = overrides
+        self._refresh_kernel_acquire_runner()
+
+    @host_only
+    def prime(self) -> None:
+        """Prime the detached child subtree from host code.
+
+        This is the ergonomic entry point for the standard ndscan pattern where nested
+        kernel-visible state is prepared in ``host_setup()`` before the outer kernel is
+        first compiled. For detached child fragments, calling ``child_scan.prime()`` is
+        equivalent to explicitly forwarding to ``child.host_setup()`` without exposing
+        the detach detail at the call site.
+        """
+
+        self._fragment.host_setup()
+
+    @host_only
+    def run(self) -> HostScanRunResult:
+        if self._request is None:
+            raise RuntimeError(
+                f"Prepared child scan '{self._name}' has not been configured yet"
+            )
+
+        self._last_result = run_host_scan(
+            self._owner,
+            self._fragment,
+            _prepare_child_scan_request(
+                _clone_scan_request_for_execution(self._request),
+                name=self._name,
+                segmented=self._segmented,
+                extra_metadata=self._extra_metadata,
+            ),
+            overrides=self._overrides,
+            max_rtio_underflow_retries=self._max_rtio_underflow_retries,
+            max_transitory_error_retries=self._max_transitory_error_retries,
+        )
+        return self._last_result
+
+    @portable
+    def acquire(self) -> None:
+        """Execute the prepared child scan without returning a rich Python result.
+
+        This is the compiler-facing entry point. Host-executed child scans continue to
+        bridge out to the host directly. Kernel-executed child scans use a dedicated
+        prepared nested runner so the child loop stays inside the compiled call graph
+        while point batches still come from the host.
+        """
+        self._acquire_kernel()
+
+    @portable
+    def get_outputs(self):
+        raise AttributeError(
+            f"Prepared child scan '{self._name}' does not declare fixed tuple outputs"
+        )
+
+    @rpc
+    def _acquire_host(self) -> None:
+        if _fragment_uses_kernel_execution(self._fragment):
+            raise NotImplementedError(
+                "PreparedChildScan.acquire() should use the dedicated prepared kernel "
+                "backend for child fragments using @kernel"
+            )
+        self.run()
+
+    @portable
+    def _acquire_kernel(self) -> None:
+        self._begin_kernel_acquire()
+        try:
+            while True:
+                self._record_kernel_executor_entry()
+                status = self._kernel_runner.acquire()
+                if status == _ResidentKernelPointRunner._STATUS_COMPLETE:
+                    self._complete_kernel_acquire()
+                    return
+                if status == _ResidentKernelPointRunner._STATUS_RESTART_HOST_CONTEXT:
+                    self._restart_kernel_host_context()
+                    continue
+                if status == _ResidentKernelPointRunner._STATUS_PAUSE:
+                    self._pause_kernel_after_batch()
+                    continue
+                raise RuntimeError("Unexpected prepared child kernel runner status")
+        except Exception:
+            self._abort_kernel_acquire()
+            raise
+
+    @host_only
+    def _refresh_kernel_acquire_runner(self) -> None:
+        if self._kernel_axis_bindings:
+            for binding in self._kernel_axis_bindings:
+                binding.restore()
+            self._kernel_axis_bindings.clear()
+
+        self._kernel_runner_ready = False
+        self._kernel_support_error = None
+
+        if self._request is None or not _fragment_uses_kernel_execution(self._fragment):
+            return
+
+        if _fragment_tree_needs_param_initialisation(self._fragment):
+            self._fragment.init_params(
+                overrides={} if self._overrides is None else self._overrides
+            )
+
+        axis_handles = [
+            axis for axis in self._request.axes if isinstance(axis, ParamHandle)
+        ]
+        axis_bindings = _install_scan_axis_stores(axis_handles)
+        try:
+            axes = _build_bound_axes(self._request.axes)
+            parameter_mappings = _collect_parameter_mappings(
+                self._fragment, self._request, axes
+            )
+            parameters = _build_bound_parameters(axes, parameter_mappings)
+            if not _can_use_kernel_streaming_executor(
+                self._fragment, axes, parameters
+            ):
+                self._kernel_support_error = (
+                    "PreparedChildScan.acquire() for child fragments using @kernel "
+                    "currently requires at least one concrete fragment parameter to "
+                    "vary point-to-point; pure pseudoparam scans with no mapped "
+                    "parameter targets are not yet supported"
+                )
+                for binding in axis_bindings:
+                    binding.restore()
+                return
+
+            self._kernel_runner.configure_runner(
+                parameters,
+                max_rtio_underflow_retries=self._max_rtio_underflow_retries,
+                max_transitory_error_retries=self._max_transitory_error_retries,
+            )
+            self._kernel_runner_ready = True
+            self._kernel_axis_bindings = axis_bindings
+        except BaseException:
+            for binding in axis_bindings:
+                binding.restore()
+            raise
+
+    @rpc
+    def _begin_kernel_acquire(self) -> None:
+        if self._request is None:
+            raise RuntimeError(
+                f"Prepared child scan '{self._name}' has not been configured yet"
+            )
+        if not self._kernel_runner_ready or self._kernel_runner is None:
+            raise NotImplementedError(
+                self._kernel_support_error
+                or "PreparedChildScan.acquire() does not have a kernel-capable "
+                "prepared runner for this child scan"
+            )
+        if self._kernel_program is not None:
+            raise RuntimeError("Prepared child scan kernel acquire is already active")
+
+        request = _prepare_child_scan_request(
+            _clone_scan_request_for_execution(self._request),
+            name=self._name,
+            segmented=self._segmented,
+            extra_metadata=self._extra_metadata,
+        )
+
+        builder = HostScanProgramBuilder(self._owner)
+        self._kernel_program = builder.build(self._fragment, request)
+        self._kernel_run_context = current_run_context()
+        if self._kernel_run_context is None:
+            raise RuntimeError(
+                "PreparedChildScan.acquire() can only be used while a parent scan run "
+                "context is active"
+            )
+        self._kernel_preview = self._kernel_run_context.preview
+        self._kernel_program.transport.register_preview(self._kernel_preview)
+
+        try:
+            self._fragment.prepare()
+            site_start_unix_time = time.time()
+            self._kernel_program.transport.publish_metadata(
+                self._kernel_program.metadata(),
+                extra_metadata=self._kernel_program.request.metadata,
+                start_unix_time=site_start_unix_time,
+            )
+            if self._kernel_program.request.site.segmented:
+                parent = _current_effective_scan_context()
+                self._kernel_program.transport.start_segment(
+                    parent_point_index=None if parent is None else parent.point_index,
+                    start_unix_time=time.time(),
+                )
+
+            self._kernel_result = HostScanRunResult.empty(
+                self._kernel_program.axes,
+                self._kernel_program.parameters,
+                self._kernel_program.channels,
+                self._kernel_program.transport.prefix,
+                initial_annotations=self._kernel_program.analysis.initial_annotations(),
+            )
+            self._kernel_collector = _PointResultCollector(self._kernel_program.channels)
+            self._kernel_collector.install()
+            self._kernel_batch_state = _ResidentKernelBatchState(
+                self._kernel_program.axes,
+                self._kernel_program.parameters,
+                self._kernel_program.parameter_mappings,
+                self._kernel_collector,
+            )
+
+            self._fragment.recompute_param_defaults()
+            self._fragment.host_setup()
+            self._kernel_host_setup_active = True
+
+            self._kernel_parent_provider = _KernelParentScanContextProvider(
+                self._kernel_program.request.site.path,
+                lambda: self._kernel_batch_state.current_next_point_index,
+            )
+            _persistent_kernel_parent_scan_context.append(self._kernel_parent_provider)
+        except BaseException:
+            self._cleanup_kernel_acquire_state(completed=False)
+            raise
+
+    @rpc(flags={"async"})
+    def _record_kernel_executor_entry(self) -> None:
+        if self._kernel_result is not None:
+            self._kernel_result.runtime_stats.executor_entry_count += 1
+
+    @rpc
+    def _restart_kernel_host_context(self) -> None:
+        if self._kernel_host_setup_active:
+            self._fragment.host_cleanup()
+        self._fragment.recompute_param_defaults()
+        self._fragment.host_setup()
+        self._kernel_host_setup_active = True
+
+    @rpc
+    def _pause_kernel_after_batch(self) -> None:
+        scheduler = self._owner.get_device("scheduler")
+        scheduler.pause()
+
+    @rpc
+    def _complete_kernel_acquire(self) -> None:
+        self._cleanup_kernel_acquire_state(completed=True)
+
+    @rpc
+    def _abort_kernel_acquire(self) -> None:
+        self._cleanup_kernel_acquire_state(completed=False)
+
+    @host_only
+    def _cleanup_kernel_acquire_state(self, *, completed: bool) -> None:
+        program = self._kernel_program
+        result = self._kernel_result
+
+        provider = self._kernel_parent_provider
+        if provider is not None:
+            if (
+                not _persistent_kernel_parent_scan_context
+                or _persistent_kernel_parent_scan_context[-1] is not provider
+            ):
+                raise RuntimeError(
+                    "Prepared child scan kernel parent context stack is out of sync"
+                )
+            _persistent_kernel_parent_scan_context.pop()
+            self._kernel_parent_provider = None
+
+        if self._kernel_host_setup_active:
+            self._fragment.host_cleanup()
+            self._kernel_host_setup_active = False
+
+        if self._kernel_collector is not None:
+            self._kernel_collector.remove()
+            self._kernel_collector = None
+
+        try:
+            if program is not None:
+                if completed and result is not None:
+                    if program.request.site.segmented:
+                        program.transport.finish_segment()
+                    program.transport.flush()
+                    program.analysis.execute_final(result, program.transport.site_writer)
+                    program.transport.set_completed(True)
+                    self._last_result = result
+                program.transport.close()
+        finally:
+            if program is not None:
+                program.transport.unregister_preview(self._kernel_preview)
+            self._kernel_program = None
+            self._kernel_result = None
+            self._kernel_run_context = None
+            self._kernel_preview = None
+            if self._kernel_batch_state is not None:
+                self._kernel_batch_state.reset()
+            self._kernel_batch_state = None
+
+    @host_only
+    def _effective_kernel_batch_size(self) -> int:
+        assert self._kernel_program is not None
+        return self._kernel_program.point_source.effective_batch_size()
+
+    @host_only
+    def _next_kernel_batch(self):
+        assert self._kernel_program is not None
+        return self._kernel_program.point_source.next_batch()
+
+    @host_only
+    def _get_param_values_chunk(self):
+        assert self._kernel_program is not None
+        assert self._kernel_batch_state is not None
+        return self._kernel_batch_state.get_param_values_chunk(
+            next_batch=self._next_kernel_batch,
+            next_point_index=lambda: self._kernel_program.site_writer.next_point_index,
+        )
+
+    def _retry_point(self):
+        if self._kernel_batch_state is not None:
+            self._kernel_batch_state.retry_point()
+
+    def _point_completed(self):
+        assert self._kernel_program is not None
+        assert self._kernel_result is not None
+        if self._kernel_batch_state is None:
+            raise RuntimeError("Prepared child kernel batch state is not installed")
+        self._kernel_batch_state.point_completed()
+
+    @host_only
+    def _finish_kernel_completed_batch(self):
+        assert self._kernel_program is not None
+        assert self._kernel_result is not None
+        if self._kernel_batch_state is None:
+            return
+
+        completed_batch = self._kernel_batch_state.take_completed_batch()
+        _publish_completed_batch(
+            completed_batch,
+            self._kernel_result,
+            axes=self._kernel_program.axes,
+            parameters=self._kernel_program.parameters,
+            channels=self._kernel_program.channels,
+            point_source=self._kernel_program.point_source,
+            analysis=self._kernel_program.analysis,
+            transport=self._kernel_program.transport,
+            preview=self._kernel_preview,
+        )
+
+    @host_only
+    def _finish_chunk(self):
+        assert self._kernel_program is not None
+        self._finish_kernel_completed_batch()
+        if not self._kernel_program.point_source.has_more_work():
+            return KernelStreamingExecutor._STATUS_COMPLETE
+        scheduler = self._owner.get_device("scheduler")
+        if scheduler.check_pause():
+            return KernelStreamingExecutor._STATUS_PAUSE
+        return KernelStreamingExecutor._STATUS_PROCEED
+
+    @host_only
+    def _finish_chunk_after_restart(self):
+        self._finish_kernel_completed_batch()
+        return KernelStreamingExecutor._STATUS_RESTART_HOST_CONTEXT
+
+    @host_only
+    def last_result(self) -> HostScanRunResult | None:
+        """Return the most recent host-side result object, if any."""
+
+        return self._last_result
+
+    @host_only
+    def _get_exposed_analysis_result(self, result_name: str) -> Any:
+        """Return one declared fixed output from the most recent child-scan run."""
+
+        if result_name not in self._exposed_analysis_channel_specs:
+            raise AttributeError(
+                f"Prepared child scan '{self._name}' does not expose analysis result "
+                f"{result_name!r}"
+            )
+        if self._last_result is None:
+            raise RuntimeError(
+                f"Prepared child scan '{self._name}' has not been run yet"
+            )
+        try:
+            return self._last_result.analysis_results[result_name]
+        except KeyError as exc:
+            raise RuntimeError(
+                f"Prepared child scan '{self._name}' did not produce analysis result "
+                f"{result_name!r} in its most recent run"
+            ) from exc
+
+
+def prepare_child_scan(
+    owner: HasEnvironment,
+    fragment: ExpFragment,
+    *,
+    name: str,
+    segmented: bool = True,
+    extra_metadata: Mapping[str, Any] | None = None,
+    max_rtio_underflow_retries: int = 3,
+    max_transitory_error_retries: int = 10,
+    expose_analysis_results: bool = False,
+    expose_outputs: Sequence[str] | None = None,
+) -> PreparedChildScan:
+    """Return a prepared child-scan handle with fixed structural scan identity.
+
+    When called during ``build_fragment()`` for a direct child fragment, the child is
+    detached automatically so its lifecycle is owned exclusively by the prepared scan
+    handle.
+    """
+
+    _auto_detach_prepared_child_fragment(owner, fragment)
+    prepared_class_namespace = _make_prepared_child_get_outputs_methods(
+        _resolve_prepared_child_output_channels(
+            fragment,
+            expose_analysis_results=expose_analysis_results,
+            expose_outputs=expose_outputs,
+        )[1]
+    )
+    prepared_class = type(
+        f"_PreparedChildScan_{id(owner)}_{name.replace('/', '_')}",
+        (PreparedChildScan,),
+        prepared_class_namespace,
+    )
+    return prepared_class(
+        owner,
+        fragment,
+        name=name,
+        segmented=segmented,
+        extra_metadata=extra_metadata,
+        max_rtio_underflow_retries=max_rtio_underflow_retries,
+        max_transitory_error_retries=max_transitory_error_retries,
+        expose_analysis_results=expose_analysis_results,
+        expose_outputs=expose_outputs,
+    )
+
+
+def setattr_prepared_child_scan(
+    owner: Fragment,
+    name: str,
+    fragment_class: type[ExpFragment],
+    *args,
+    scan_name: str | None = None,
+    segmented: bool = True,
+    extra_metadata: Mapping[str, Any] | None = None,
+    max_rtio_underflow_retries: int = 3,
+    max_transitory_error_retries: int = 10,
+    expose_analysis_results: bool = False,
+    expose_outputs: Sequence[str] | None = None,
+    **kwargs,
+) -> PreparedChildScan:
+    """Create, detach, and prepare a child fragment as a prepared child scan.
+
+    This is the ergonomic companion to legacy ``setattr_subscan()``:
+
+    - the child fragment becomes available as ``owner.<name>``
+    - it is detached from ordinary traversal immediately
+    - the returned handle owns the prepared child-scan lifecycle
+
+    The structural setup belongs in ``build_fragment()``. Concrete scan requests and
+    any compiler priming still belong in ``host_setup()`` or other host-side setup
+    helpers invoked before the outer kernel is first compiled.
+    """
+
+    fragment = owner.setattr_fragment(name, fragment_class, *args, detached=True, **kwargs)
+    return prepare_child_scan(
+        owner,
+        fragment,
+        name=name if scan_name is None else scan_name,
+        segmented=segmented,
+        extra_metadata=extra_metadata,
+        max_rtio_underflow_retries=max_rtio_underflow_retries,
+        max_transitory_error_retries=max_transitory_error_retries,
+        expose_analysis_results=expose_analysis_results,
+        expose_outputs=expose_outputs,
+    )
+
+
 def run_subscan(
     owner: HasEnvironment,
     fragment: ExpFragment,
@@ -1783,33 +3401,17 @@ def run_subscan(
     Any ``extra_metadata`` passed here is merged on top of the request site's own
     extra metadata before the child site is created.
     """
-
-    base_site = request.site
-    child_site = make_child_scan_site(
-        name,
-        segmented=segmented,
-        extra_metadata={
-            **dict(base_site.extra_metadata),
-            **({} if extra_metadata is None else dict(extra_metadata)),
-        },
-    )
-    if base_site.dataset_prefix is not None:
-        child_site = ScanSite(
-            path=child_site.path,
-            parent_path=child_site.parent_path,
-            dataset_prefix=base_site.dataset_prefix,
-            segmented=child_site.segmented,
-            extra_metadata=child_site.extra_metadata,
-        )
-
-    return run_host_scan(
+    prepared = prepare_child_scan(
         owner,
         fragment,
-        request.with_site(child_site),
-        overrides=overrides,
+        name=name,
+        segmented=segmented,
+        extra_metadata=extra_metadata,
         max_rtio_underflow_retries=max_rtio_underflow_retries,
         max_transitory_error_retries=max_transitory_error_retries,
     )
+    prepared.configure(request, overrides=overrides)
+    return prepared.run()
 
 
 def _fragment_tree_needs_param_initialisation(fragment: ExpFragment) -> bool:
@@ -1866,6 +3468,94 @@ def _install_scan_axis_stores(
 
         bindings.append(_ScanAxisBinding(affected_handles, original_stores))
     return bindings
+
+
+def _resolve_execution_point(
+    point: BasePoint,
+    axes: Sequence[BoundScanAxis],
+    parameters: Sequence[BoundScanParameter],
+    parameter_mappings: Sequence[_BoundParameterMapping],
+) -> _ResolvedExecutionPoint:
+    """Resolve one logical point into concrete installed parameter values.
+
+    This mirrors the host-runtime execution order exactly:
+
+    1. install any directly scanned fragment-parameter axes,
+    2. evaluate parameter mappings against the resulting logical/current state,
+    3. snapshot the concrete varying fragment parameters for execution/recording.
+
+    The function intentionally mutates the live host-side parameter stores while it
+    resolves the point. That preserves the legacy/host-runtime semantics where mapping
+    functions may observe current parameter handles directly, and where the next point
+    begins from the stores left behind by the previous one.
+    """
+
+    axis_map = OrderedDict(
+        (axis.key, value) for axis, value in zip(axes, point.axis_values, strict=True)
+    )
+    pseudoparam_map = OrderedDict()
+
+    dependency_values = {}
+    for axis, value in zip(axes, point.axis_values, strict=True):
+        if axis.param_store is not None:
+            axis.param_store.set_value(value)
+            dependency_values[axis.source] = axis.param_store.get_value()
+        else:
+            pseudoparam_map[axis.point_key] = value
+            dependency_values[axis.source] = value
+
+    for mapping in parameter_mappings:
+        for dependency in mapping.dependencies:
+            if isinstance(dependency, ParamHandle) and dependency not in dependency_values:
+                dependency_values[dependency] = dependency.get()
+
+        updates = mapping.mapping.compute(dependency_values)
+        for target, value in updates.items():
+            if target._store is None:
+                raise ValueError(
+                    f"Cannot apply parameter mapping to unbound parameter '{target.name}'"
+                )
+            target._store.set_value(value)
+            dependency_values[target] = target.get()
+
+    parameter_values = OrderedDict(
+        (parameter.key, parameter.handle.get()) for parameter in parameters
+    )
+    rpc_parameter_values = tuple(
+        parameter.handle._store.to_rpc_type(parameter_values[parameter.key])
+        for parameter in parameters
+    )
+    return _ResolvedExecutionPoint(
+        point=point,
+        axis_values=axis_map,
+        pseudoparam_values=pseudoparam_map,
+        parameter_values=parameter_values,
+        rpc_parameter_values=rpc_parameter_values,
+    )
+
+
+def _resolve_execution_batch(
+    points: Sequence[BasePoint],
+    axes: Sequence[BoundScanAxis],
+    parameters: Sequence[BoundScanParameter],
+    parameter_mappings: Sequence[_BoundParameterMapping],
+) -> list[_ResolvedExecutionPoint]:
+    """Resolve a whole host-chosen batch into concrete parameter payloads."""
+
+    return [
+        _resolve_execution_point(point, axes, parameters, parameter_mappings)
+        for point in points
+    ]
+
+
+def _apply_resolved_parameter_values(
+    parameters: Sequence[BoundScanParameter],
+    point: _ResolvedExecutionPoint,
+) -> None:
+    """Install one already-resolved point's concrete parameter values on the host."""
+
+    for parameter in parameters:
+        parameter.handle._store.set_value(point.parameter_values[parameter.key])
 
 
 class HostScanExperiment(EnvExperiment):

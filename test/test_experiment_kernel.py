@@ -6,6 +6,8 @@ could also keep them inline with the other test_experiment_* unit test modules.
 """
 
 import math
+import json
+import unittest
 from collections import Counter
 from dataclasses import dataclass
 from enum import Enum, unique
@@ -14,6 +16,24 @@ import numpy as np
 from artiq.language import kernel, portable, rpc
 from emulator_environment import KernelEmulatorCase
 from fixtures import TrivialKernelFragment
+from examples.host_runtime_prepared_kernel_nested import (
+    PreparedKernelNestedVariationFragment,
+)
+from examples.host_runtime_prepared_kernel_nested_ttl import (
+    PreparedKernelNestedTtlFragment,
+)
+from examples.host_runtime_prepared_kernel_online_fit import (
+    PreparedKernelOnlineFitFragment,
+)
+try:
+    from examples.host_runtime_kernel_bayesian_optimisation import (
+        KernelBayesianOptimisationFragment,
+        make_request as make_kernel_bo_request,
+    )
+
+    _KERNEL_BO_DEPS_AVAILABLE = True
+except ImportError:
+    _KERNEL_BO_DEPS_AVAILABLE = False
 
 from ndscan.experiment.entry_point import make_fragment_scan_exp, run_fragment_once
 from ndscan.experiment.fragment import (
@@ -21,6 +41,15 @@ from ndscan.experiment.fragment import (
     ExpFragment,
     RestartKernelTransitoryError,
     TransitoryError,
+)
+from ndscan.experiment.host_runtime import (
+    ExecutionPolicy,
+    HostScanSession,
+    ParameterMapping,
+    ScanRequest,
+    ScanVariable,
+    prepare_child_scan,
+    setattr_prepared_child_scan,
 )
 from ndscan.experiment.parameters import (
     BoolParam,
@@ -39,6 +68,670 @@ class RunOneKernelCase(KernelEmulatorCase):
     def test_run_once_kernel(self):
         fragment = self.create(TrivialKernelFragment, [])
         run_fragment_once(fragment)
+
+
+class KernelStreamingLeafFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_device("core")
+        self.setattr_param("x", FloatParam, "x", default=0.0)
+        self.setattr_result("y", FloatChannel)
+
+    @kernel
+    def run_once(self):
+        self.y.push(self.x.get() + 1.0)
+
+
+class KernelMappedDriveFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_device("core")
+        self.setattr_param("drive", FloatParam, "drive", default=0.0)
+        self.setattr_result("result", FloatChannel)
+
+    @kernel
+    def run_once(self):
+        self.result.push(2.0 * self.drive.get())
+
+
+class KernelAdHocMappedParamFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_device("core")
+        self.setattr_param("logical_drive", FloatParam, "logical drive", default=0.0)
+        self.setattr_param("drive", FloatParam, "drive", default=0.0)
+        self.setattr_result("result", FloatChannel)
+
+    @kernel
+    def run_once(self):
+        self.result.push(2.0 * self.drive.get())
+
+
+class KernelRebindDriveWrapperFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_device("core")
+        self.setattr_fragment("child", KernelMappedDriveFragment)
+        self.setattr_param("logical_drive", FloatParam, "logical drive", default=0.0)
+        self.rebind_param(
+            self.child.drive,
+            [self.logical_drive],
+            lambda values: values[self.logical_drive] + 0.5,
+            description="Offset the child drive from the wrapper logical axis",
+        )
+
+    @kernel
+    def run_once(self):
+        self.child.run_once()
+
+
+class HostOnlyPreparedChildLeaf(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("x", FloatParam, "x", default=0.0)
+        self.setattr_result("y", FloatChannel)
+
+    def run_once(self):
+        self.y.push(self.x.get() + 1.0)
+
+
+class KernelPreparedChildLeaf(ExpFragment):
+    def build_fragment(self):
+        self.setattr_device("core")
+        self.setattr_param("x", FloatParam, "x", default=0.0)
+        self.setattr_result("y", FloatChannel)
+
+    @kernel
+    def run_once(self):
+        self.y.push(self.x.get() + 1.0)
+
+
+class KernelPreparedGrandchildLeaf(ExpFragment):
+    def build_fragment(self):
+        self.setattr_device("core")
+        self.setattr_param("z", FloatParam, "z", default=0.0)
+        self.setattr_result("value", FloatChannel)
+
+    @kernel
+    def run_once(self):
+        self.value.push(self.z.get() + 2.0)
+
+
+class KernelPreparedChildScanParent(ExpFragment):
+    def build_fragment(self):
+        self.setattr_device("core")
+        self.setattr_param("outer", FloatParam, "outer", default=0.0)
+        self.child_scan = setattr_prepared_child_scan(
+            self,
+            "child",
+            HostOnlyPreparedChildLeaf,
+            scan_name="child_scan",
+        )
+        self.setattr_result("result", FloatChannel)
+
+    def host_setup(self):
+        self.child_scan.configure(
+            ScanRequest.explicit([self.child.x], [[2.0], [3.0]])
+        )
+        super().host_setup()
+
+    @kernel
+    def run_once(self):
+        self.child_scan.acquire()
+        self.result.push(self.outer.get() + 10.0)
+
+
+class KernelPreparedKernelChildScanParent(ExpFragment):
+    def build_fragment(self):
+        self.setattr_device("core")
+        self.setattr_param("outer", FloatParam, "outer", default=0.0)
+        self.child_scan = setattr_prepared_child_scan(
+            self,
+            "child",
+            KernelPreparedChildLeaf,
+            scan_name="child_scan",
+        )
+        self.setattr_result("result", FloatChannel)
+
+    def host_setup(self):
+        self.child_scan.configure(
+            ScanRequest.explicit([self.child.x], [[2.0], [3.0]])
+        )
+        super().host_setup()
+
+    @kernel
+    def run_once(self):
+        self.child_scan.acquire()
+        self.result.push(self.outer.get() + 20.0)
+
+
+class KernelPreparedNestedChild(ExpFragment):
+    def build_fragment(self):
+        self.setattr_device("core")
+        self.setattr_param("x", FloatParam, "x", default=0.0)
+        self.grandchild_scan = setattr_prepared_child_scan(
+            self,
+            "grandchild",
+            KernelPreparedGrandchildLeaf,
+            scan_name="grandchild_scan",
+        )
+        self.setattr_result("y", FloatChannel)
+
+    def host_setup(self):
+        self.grandchild_scan.configure(
+            ScanRequest.explicit([self.grandchild.z], [[5.0], [6.0]])
+        )
+        super().host_setup()
+
+    @kernel
+    def run_once(self):
+        self.grandchild_scan.acquire()
+        self.y.push(self.x.get() + 10.0)
+
+
+class KernelPreparedNestedParent(ExpFragment):
+    def build_fragment(self):
+        self.setattr_device("core")
+        self.setattr_param("outer", FloatParam, "outer", default=0.0)
+        self.child_scan = setattr_prepared_child_scan(
+            self,
+            "child",
+            KernelPreparedNestedChild,
+            scan_name="child_scan",
+        )
+        self.setattr_result("result", FloatChannel)
+
+    def host_setup(self):
+        # Prime the detached child before the outer kernel is first compiled so the
+        # grandchild prepared scan has already fixed its compiler-visible shape.
+        self.child_scan.prime()
+        self.child_scan.configure(
+            ScanRequest.explicit([self.child.x], [[1.0], [2.0]])
+        )
+        super().host_setup()
+
+    @kernel
+    def run_once(self):
+        self.child_scan.acquire()
+        self.result.push(self.outer.get() + 100.0)
+
+
+class KernelPreparedMappedChildParent(ExpFragment):
+    def build_fragment(self):
+        self.setattr_device("core")
+        self.setattr_param("outer", FloatParam, "outer", default=0.0)
+        self.child_scan = setattr_prepared_child_scan(
+            self,
+            "child",
+            KernelMappedDriveFragment,
+            scan_name="child_scan",
+        )
+        self.setattr_result("result", FloatChannel)
+
+    def host_setup(self):
+        logical_drive = ScanVariable("logical_drive")
+        self.child_scan.configure(
+            ScanRequest.cartesian(
+                [(logical_drive, [0.0, 1.0, 2.0])],
+                execution_policy=ExecutionPolicy(max_points_per_batch=2),
+            ).with_parameter_mappings(
+                [
+                    ParameterMapping.single_target(
+                        self.child.drive,
+                        [logical_drive],
+                        lambda values: values[logical_drive] + 0.5,
+                        description="Offset the physical drive from the logical axis",
+                    )
+                ]
+            )
+        )
+        super().host_setup()
+
+    @kernel
+    def run_once(self):
+        self.child_scan.acquire()
+        self.result.push(self.outer.get() + 1.0)
+
+
+class KernelStreamingHostRuntimeCase(KernelEmulatorCase):
+    def test_kernel_streaming_host_runtime_reuses_one_kernel_entry(self):
+        fragment = self.create(KernelStreamingLeafFragment, [])
+        request = ScanRequest.linear(
+            fragment.x,
+            start=-10.0,
+            stop=10.0,
+            num_points=101,
+            execution_policy=ExecutionPolicy(max_points_per_batch=10),
+        )
+
+        session = HostScanSession(fragment, fragment, request)
+        result = session.run()
+
+        self.assertEqual(result.runtime_stats.executor_entry_count, 1)
+        self.assertEqual(result.runtime_stats.batch_count, 11)
+        self.assertEqual(result.runtime_stats.point_count, 101)
+        values = result.values[fragment.y]
+        self.assertEqual(len(values), 101)
+        self.assertAlmostEqual(values[0], -9.0)
+        self.assertAlmostEqual(values[50], 1.0)
+        self.assertAlmostEqual(values[-1], 11.0)
+
+    def test_kernel_streaming_host_runtime_supports_pseudoparam_mappings(self):
+        fragment = self.create(KernelMappedDriveFragment, [])
+        logical_drive = ScanVariable(
+            "logical_drive",
+            description="Logical axis mapped onto the physical drive",
+        )
+        request = ScanRequest.cartesian(
+            [(logical_drive, [0.0, 1.0, 2.0])],
+            execution_policy=ExecutionPolicy(max_points_per_batch=2),
+        ).with_parameter_mappings(
+            [
+                ParameterMapping.single_target(
+                    fragment.drive,
+                    [logical_drive],
+                    lambda values: values[logical_drive] + 0.5,
+                    description="Offset the physical drive from the logical axis",
+                )
+            ]
+        )
+
+        session = HostScanSession(fragment, fragment, request)
+        result = session.run()
+
+        self.assertEqual(result.runtime_stats.executor_entry_count, 1)
+        self.assertEqual(result.runtime_stats.batch_count, 2)
+        self.assertEqual(result.values[fragment.result], [1.0, 3.0, 5.0])
+
+        scheduler = fragment.get_device("scheduler")
+        rid = getattr(scheduler, "rid", 0)
+        prefix = f"ndscan.rid_{rid}.site.root."
+        self.assertEqual(fragment.get_dataset(prefix + "points.pseudoparam_0"), [0.0, 1.0, 2.0])
+        self.assertEqual(fragment.get_dataset(prefix + "points.param_0"), [0.5, 1.5, 2.5])
+        self.assertEqual(fragment.get_dataset(prefix + "points.channel_0"), [1.0, 3.0, 5.0])
+
+    def test_kernel_streaming_host_runtime_supports_ad_hoc_param_to_param_mappings(
+        self,
+    ):
+        fragment = self.create(KernelAdHocMappedParamFragment, [])
+        request = ScanRequest.cartesian(
+            [(fragment.logical_drive, [0.0, 1.0, 2.0])],
+            execution_policy=ExecutionPolicy(max_points_per_batch=2),
+        ).with_parameter_mappings(
+            [
+                ParameterMapping.single_target(
+                    fragment.drive,
+                    [fragment.logical_drive],
+                    lambda values: values[fragment.logical_drive] + 0.5,
+                    description="Offset the physical drive from the logical parameter",
+                )
+            ]
+        )
+
+        session = HostScanSession(fragment, fragment, request)
+        result = session.run()
+
+        self.assertEqual(result.runtime_stats.executor_entry_count, 1)
+        self.assertEqual(result.runtime_stats.batch_count, 2)
+        self.assertEqual(result.values[fragment.result], [1.0, 3.0, 5.0])
+
+        scheduler = fragment.get_device("scheduler")
+        rid = getattr(scheduler, "rid", 0)
+        prefix = f"ndscan.rid_{rid}.site.root."
+        self.assertEqual(fragment.get_dataset(prefix + "points.param_0"), [0.0, 1.0, 2.0])
+        self.assertEqual(fragment.get_dataset(prefix + "points.param_1"), [0.5, 1.5, 2.5])
+        self.assertEqual(fragment.get_dataset(prefix + "points.channel_0"), [1.0, 3.0, 5.0])
+
+    def test_kernel_streaming_host_runtime_supports_wrapper_rebinds(self):
+        fragment = self.create(KernelRebindDriveWrapperFragment, [])
+        request = ScanRequest.cartesian(
+            [(fragment.logical_drive, [0.0, 1.0, 2.0])],
+            execution_policy=ExecutionPolicy(max_points_per_batch=2),
+        )
+
+        session = HostScanSession(fragment, fragment, request)
+        result = session.run()
+
+        self.assertEqual(result.runtime_stats.executor_entry_count, 1)
+        self.assertEqual(result.runtime_stats.batch_count, 2)
+        self.assertEqual(
+            result.values[fragment.child.result],
+            [1.0, 3.0, 5.0],
+        )
+
+        scheduler = fragment.get_device("scheduler")
+        rid = getattr(scheduler, "rid", 0)
+        prefix = f"ndscan.rid_{rid}.site.root."
+        self.assertEqual(fragment.get_dataset(prefix + "points.param_0"), [0.0, 1.0, 2.0])
+        self.assertEqual(fragment.get_dataset(prefix + "points.param_1"), [0.5, 1.5, 2.5])
+        self.assertEqual(fragment.get_dataset(prefix + "points.channel_0"), [1.0, 3.0, 5.0])
+
+    def test_kernel_parent_can_acquire_prepared_host_child_scan(self):
+        fragment = self.create(KernelPreparedChildScanParent, [])
+        request = ScanRequest.explicit(
+            [fragment.outer],
+            [[1.0], [4.0]],
+            execution_policy=ExecutionPolicy(max_points_per_batch=2),
+        )
+
+        session = HostScanSession(fragment, fragment, request)
+        result = session.run()
+
+        self.assertEqual(result.runtime_stats.executor_entry_count, 1)
+        self.assertEqual(result.runtime_stats.batch_count, 1)
+        self.assertEqual(result.values[fragment.result], [11.0, 14.0])
+
+        scheduler = fragment.get_device("scheduler")
+        rid = getattr(scheduler, "rid", 0)
+        prefix = f"ndscan.rid_{rid}.site.root.child_scan."
+
+        self.assertEqual(fragment.get_dataset(prefix + "segments.start_index"), [0, 2])
+        self.assertEqual(
+            fragment.get_dataset(prefix + "segments.parent_point_index"), [0, 1]
+        )
+        self.assertEqual(
+            fragment.get_dataset(prefix + "points.param_0"), [2.0, 3.0, 2.0, 3.0]
+        )
+        self.assertEqual(
+            fragment.get_dataset(prefix + "points.channel_0"), [3.0, 4.0, 3.0, 4.0]
+        )
+
+    def test_kernel_parent_can_acquire_prepared_kernel_child_scan(self):
+        fragment = self.create(KernelPreparedKernelChildScanParent, [])
+        request = ScanRequest.explicit(
+            [fragment.outer],
+            [[1.0], [4.0]],
+            execution_policy=ExecutionPolicy(max_points_per_batch=2),
+        )
+
+        session = HostScanSession(fragment, fragment, request)
+        result = session.run()
+
+        self.assertEqual(result.runtime_stats.executor_entry_count, 1)
+        self.assertEqual(result.runtime_stats.batch_count, 1)
+        self.assertEqual(result.values[fragment.result], [21.0, 24.0])
+        self.assertIsNotNone(fragment.child_scan.last_result())
+        self.assertEqual(fragment.child_scan.last_result().runtime_stats.batch_count, 2)
+        self.assertEqual(
+            fragment.child_scan.last_result().runtime_stats.executor_entry_count, 1
+        )
+
+        scheduler = fragment.get_device("scheduler")
+        rid = getattr(scheduler, "rid", 0)
+        prefix = f"ndscan.rid_{rid}.site.root.child_scan."
+
+        self.assertEqual(fragment.get_dataset(prefix + "segments.start_index"), [0, 2])
+        self.assertEqual(
+            fragment.get_dataset(prefix + "segments.parent_point_index"), [0, 1]
+        )
+        self.assertEqual(
+            fragment.get_dataset(prefix + "points.param_0"), [2.0, 3.0, 2.0, 3.0]
+        )
+        self.assertEqual(
+            fragment.get_dataset(prefix + "points.channel_0"), [3.0, 4.0, 3.0, 4.0]
+        )
+
+    def test_kernel_parent_can_acquire_prepared_kernel_subscan_of_subscan(self):
+        fragment = self.create(KernelPreparedNestedParent, [])
+        request = ScanRequest.explicit(
+            [fragment.outer],
+            [[1.0], [4.0]],
+            execution_policy=ExecutionPolicy(max_points_per_batch=2),
+        )
+
+        session = HostScanSession(fragment, fragment, request)
+        result = session.run()
+
+        self.assertEqual(result.runtime_stats.executor_entry_count, 1)
+        self.assertEqual(result.runtime_stats.batch_count, 1)
+        self.assertEqual(result.values[fragment.result], [101.0, 104.0])
+        self.assertIsNotNone(fragment.child_scan.last_result())
+        self.assertEqual(fragment.child_scan.last_result().runtime_stats.batch_count, 2)
+        self.assertEqual(
+            fragment.child_scan.last_result().runtime_stats.executor_entry_count, 1
+        )
+        self.assertIsNotNone(fragment.child.grandchild_scan.last_result())
+
+        scheduler = fragment.get_device("scheduler")
+        rid = getattr(scheduler, "rid", 0)
+        child_prefix = f"ndscan.rid_{rid}.site.root.child_scan."
+        grandchild_prefix = f"ndscan.rid_{rid}.site.root.child_scan.grandchild_scan."
+
+        self.assertEqual(
+            fragment.get_dataset(child_prefix + "segments.parent_point_index"), [0, 1]
+        )
+        self.assertEqual(
+            fragment.get_dataset(child_prefix + "points.param_0"), [1.0, 2.0, 1.0, 2.0]
+        )
+        self.assertEqual(
+            fragment.get_dataset(child_prefix + "points.channel_0"),
+            [11.0, 12.0, 11.0, 12.0],
+        )
+
+        self.assertEqual(
+            fragment.get_dataset(grandchild_prefix + "segments.parent_point_index"),
+            [0, 1, 2, 3],
+        )
+        self.assertEqual(
+            fragment.get_dataset(grandchild_prefix + "points.param_0"),
+            [5.0, 6.0, 5.0, 6.0, 5.0, 6.0, 5.0, 6.0],
+        )
+        self.assertEqual(
+            fragment.get_dataset(grandchild_prefix + "points.channel_0"),
+            [7.0, 8.0, 7.0, 8.0, 7.0, 8.0, 7.0, 8.0],
+        )
+
+    def test_kernel_parent_can_acquire_prepared_kernel_child_with_pseudoparam_mapping(
+        self,
+    ):
+        fragment = self.create(KernelPreparedMappedChildParent, [])
+        request = ScanRequest.explicit([fragment.outer], [[1.0]])
+
+        session = HostScanSession(fragment, fragment, request)
+        result = session.run()
+
+        self.assertEqual(result.runtime_stats.executor_entry_count, 1)
+        self.assertEqual(result.values[fragment.result], [2.0])
+        child_result = fragment.child_scan.last_result()
+        self.assertIsNotNone(child_result)
+        assert child_result is not None
+        self.assertEqual(child_result.runtime_stats.executor_entry_count, 1)
+        self.assertEqual(child_result.runtime_stats.batch_count, 2)
+        self.assertEqual(child_result.values[fragment.child.result], [1.0, 3.0, 5.0])
+
+        prefix = child_result.site_prefix
+        self.assertEqual(fragment.get_dataset(prefix + "points.pseudoparam_0"), [0.0, 1.0, 2.0])
+        self.assertEqual(fragment.get_dataset(prefix + "points.param_0"), [0.5, 1.5, 2.5])
+        self.assertEqual(fragment.get_dataset(prefix + "points.channel_0"), [1.0, 3.0, 5.0])
+
+    def test_prepared_kernel_nested_example_runs(self):
+        fragment = self.create(PreparedKernelNestedVariationFragment, [])
+        request = ScanRequest.explicit([fragment.outer], [[1.0]])
+
+        session = HostScanSession(fragment, fragment, request)
+        result = session.run()
+
+        self.assertEqual(result.values[fragment.completed], [1.0])
+
+        scheduler = fragment.get_device("scheduler")
+        rid = getattr(scheduler, "rid", 0)
+        child_prefix = f"ndscan.rid_{rid}.site.root.scan_p."
+        grandchild_prefix = f"ndscan.rid_{rid}.site.root.scan_p.scan_x."
+
+        self.assertEqual(
+            fragment.get_dataset(child_prefix + "points.param_0"),
+            [1.0, 2.0, 3.0, 4.0, 5.0],
+        )
+        self.assertEqual(
+            fragment.get_dataset(child_prefix + "points.channel_0"),
+            [1.0, 2.0, 3.0, 4.0, 5.0],
+        )
+        self.assertEqual(
+            fragment.get_dataset(grandchild_prefix + "segments.parent_point_index"),
+            [0, 1, 2, 3, 4],
+        )
+        self.assertEqual(
+            fragment.get_dataset(grandchild_prefix + "points.param_0"),
+            [0.0, 1.0, 2.0, 3.0, 4.0, 5.0] * 5,
+        )
+        self.assertEqual(
+            fragment.get_dataset(grandchild_prefix + "points.channel_0"),
+            [
+                0.5,
+                1.5,
+                2.5,
+                3.5,
+                4.5,
+                5.5,
+                0.5,
+                2.5,
+                4.5,
+                6.5,
+                8.5,
+                10.5,
+                0.5,
+                3.5,
+                6.5,
+                9.5,
+                12.5,
+                15.5,
+                0.5,
+                4.5,
+                8.5,
+                12.5,
+                16.5,
+                20.5,
+                0.5,
+                5.5,
+                10.5,
+                15.5,
+                20.5,
+                25.5,
+            ],
+        )
+
+    def test_prepared_kernel_online_fit_example_runs(self):
+        fragment = self.create(PreparedKernelOnlineFitFragment, [])
+        request = ScanRequest.explicit([fragment.outer], [[1.0]])
+
+        session = HostScanSession(fragment, fragment, request)
+        result = session.run()
+
+        self.assertEqual(result.values[fragment.completed], [1.0])
+        self.assertAlmostEqual(result.values[fragment.fit_slope][0], 2.0, places=6)
+        self.assertAlmostEqual(result.values[fragment.fit_intercept][0], 0.5, places=6)
+
+        child_result = fragment.line_scan.last_result()
+        self.assertIsNotNone(child_result)
+        assert child_result is not None
+        self.assertEqual(child_result.runtime_stats.executor_entry_count, 1)
+        self.assertEqual(child_result.runtime_stats.batch_count, 2)
+        fit_slope, fit_intercept = fragment.line_scan.get_outputs()
+        self.assertAlmostEqual(fit_slope, 2.0, places=6)
+        self.assertAlmostEqual(fit_intercept, 0.5, places=6)
+        self.assertAlmostEqual(child_result.analysis_results["fit_slope"], 2.0, places=6)
+        self.assertAlmostEqual(
+            child_result.analysis_results["fit_intercept"], 0.5, places=6
+        )
+        self.assertIn("running_line_fit", child_result.online_analysis_results)
+
+        prefix = child_result.site_prefix
+        online_result = json.loads(
+            fragment.get_dataset(prefix + "analysis.online_result.running_line_fit")
+        )
+        online_annotations = json.loads(
+            fragment.get_dataset(prefix + "analysis.online_annotation.running_line_fit")
+        )
+
+        self.assertAlmostEqual(online_result["fit_slope"], 2.0, places=6)
+        self.assertAlmostEqual(online_result["fit_intercept"], 0.5, places=6)
+        self.assertEqual(
+            child_result.online_analysis_results["running_line_fit"],
+            online_result,
+        )
+
+    def test_prepared_kernel_nested_ttl_example_runs(self):
+        fragment = self.create(PreparedKernelNestedTtlFragment, [])
+        request = ScanRequest.explicit([fragment.outer], [[1.0]])
+
+        session = HostScanSession(fragment, fragment, request)
+        result = session.run()
+
+        self.assertEqual(result.values[fragment.completed], [1.0])
+        self.assertEqual(result.runtime_stats.executor_entry_count, 1)
+
+        child_result = fragment.scan_p.last_result()
+        self.assertIsNotNone(child_result)
+        assert child_result is not None
+        self.assertEqual(child_result.runtime_stats.executor_entry_count, 1)
+        self.assertEqual(child_result.values[fragment.scan_x.current_p], [1.0, 2.0, 3.0])
+
+        inner_result = fragment.scan_x.scan_x.last_result()
+        self.assertIsNotNone(inner_result)
+        assert inner_result is not None
+        self.assertEqual(inner_result.runtime_stats.executor_entry_count, 1)
+
+        scheduler = fragment.get_device("scheduler")
+        rid = getattr(scheduler, "rid", 0)
+        child_prefix = f"ndscan.rid_{rid}.site.root.scan_p."
+        inner_prefix = f"ndscan.rid_{rid}.site.root.scan_p.scan_x."
+
+        self.assertEqual(
+            fragment.get_dataset(child_prefix + "points.channel_0"),
+            [1.0, 2.0, 3.0],
+        )
+        self.assertEqual(
+            fragment.get_dataset(inner_prefix + "segments.parent_point_index"),
+            [0, 1, 2],
+        )
+        self.assertEqual(
+            fragment.get_dataset(inner_prefix + "points.channel_0"),
+            [
+                1.5,
+                2.5,
+                3.5,
+                4.5,
+                5.5,
+                2.5,
+                3.5,
+                4.5,
+                5.5,
+                6.5,
+                3.5,
+                4.5,
+                5.5,
+                6.5,
+                7.5,
+            ],
+        )
+
+    @unittest.skipUnless(
+        _KERNEL_BO_DEPS_AVAILABLE,
+        "Optional Bayesian optimisation dependencies are not installed",
+    )
+    def test_kernel_bayesian_optimisation_example_reuses_one_kernel_entry(self):
+        fragment = self.create(KernelBayesianOptimisationFragment, [])
+        request = make_kernel_bo_request(
+            fragment,
+            fit_steps=4,
+            fit_lr=0.08,
+            acquisition_num_starts=1,
+            surrogate_num_starts=1,
+            batch_mc_samples=8,
+            batch_acq_lr=0.08,
+            batch_acq_steps=4,
+            max_batches=3,
+        )
+
+        session = HostScanSession(fragment, fragment, request)
+        result = session.run()
+
+        self.assertEqual(result.runtime_stats.executor_entry_count, 1)
+        self.assertEqual(result.runtime_stats.batch_count, 5)
+        self.assertEqual(len(result.values[fragment.cost]), 5)
+
+        scheduler = fragment.get_device("scheduler")
+        rid = getattr(scheduler, "rid", 0)
+        prefix = f"ndscan.rid_{rid}.site.root."
+
+        self.assertEqual(fragment.get_dataset(prefix + "state.num_points"), 5)
+        self.assertEqual(len(fragment.get_dataset(prefix + "points.param_0")), 5)
+        self.assertEqual(len(fragment.get_dataset(prefix + "points.channel_0")), 5)
 
 
 @unique

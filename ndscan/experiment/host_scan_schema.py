@@ -123,6 +123,15 @@ def _finite_real(value: Any, name: str) -> float:
     return result
 
 
+def _optional_positive_float(value: Any, name: str) -> float | None:
+    if value is None:
+        return None
+    result = _finite_real(value, name)
+    if result <= 0.0:
+        raise HostScanSchemaError(f"{name} must be positive")
+    return result
+
+
 @dataclass(slots=True)
 class HostScanExecutionSpec:
     """Submission-time execution settings independent of any fragment tree."""
@@ -275,6 +284,8 @@ class HostScanNuboBackendSpec:
     max_batches: int | None = None
     acquisition: str = "ucb"
     minimise: bool = True
+    fit_steps: int | None = None
+    fit_lr: float | None = None
     kind: ClassVar[str] = "nubo"
 
     @classmethod
@@ -289,6 +300,8 @@ class HostScanNuboBackendSpec:
                 "max_batches",
                 "acquisition",
                 "minimise",
+                "fit_steps",
+                "fit_lr",
             },
             name=name,
         )
@@ -314,6 +327,8 @@ class HostScanNuboBackendSpec:
             max_batches=_optional_positive_int(mapping.get("max_batches", None), f"{name}.max_batches"),
             acquisition=acquisition,
             minimise=minimise,
+            fit_steps=_optional_positive_int(mapping.get("fit_steps", None), f"{name}.fit_steps"),
+            fit_lr=_optional_positive_float(mapping.get("fit_lr", None), f"{name}.fit_lr"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -327,6 +342,10 @@ class HostScanNuboBackendSpec:
             data["batch_size"] = self.batch_size
         if self.max_batches is not None:
             data["max_batches"] = self.max_batches
+        if self.fit_steps is not None:
+            data["fit_steps"] = self.fit_steps
+        if self.fit_lr is not None:
+            data["fit_lr"] = self.fit_lr
         return data
 
     def validate(self, *, name: str) -> None:
@@ -338,6 +357,10 @@ class HostScanNuboBackendSpec:
             raise HostScanSchemaError(f"{name}.max_batches must be positive")
         if not self.acquisition:
             raise HostScanSchemaError(f"{name}.acquisition must not be empty")
+        if self.fit_steps is not None and self.fit_steps <= 0:
+            raise HostScanSchemaError(f"{name}.fit_steps must be positive")
+        if self.fit_lr is not None and self.fit_lr <= 0.0:
+            raise HostScanSchemaError(f"{name}.fit_lr must be positive")
 
 
 @dataclass(slots=True)
@@ -1172,6 +1195,16 @@ def _compile_gpo_schema_request(
         max_batches=mode.backend.max_batches,
         acquisition_name=mode.backend.acquisition,
         minimise=mode.backend.minimise,
+        **(
+            {"fit_steps": mode.backend.fit_steps}
+            if mode.backend.fit_steps is not None
+            else {}
+        ),
+        **(
+            {"fit_lr": mode.backend.fit_lr}
+            if mode.backend.fit_lr is not None
+            else {}
+        ),
     )
     point_policy = AskTellOptimiserPointPolicy(
         backend_instance,

@@ -120,6 +120,7 @@ def _fit_exact_gp_model(
     y_train_score: torch.Tensor,
     y_train_err: torch.Tensor,
     *,
+    lr: float,
     steps: int,
 ) -> tuple[GaussianProcess, FixedNoiseGaussianLikelihood]:
     likelihood = FixedNoiseGaussianLikelihood(
@@ -132,7 +133,7 @@ def _fit_exact_gp_model(
         y_train_score,
         gp=gp,
         likelihood=likelihood,
-        lr=0.1,
+        lr=lr,
         steps=steps,
     )
     gp.eval()
@@ -242,6 +243,7 @@ def _plot_gp_corner(
     decision_source: np.ndarray,
     x_labels: Sequence[str],
     minimise: bool,
+    argmax_num_starts: int,
     n_points: int = 60,
     figsize: float = 3.0,
 ) -> tuple[plt.Figure, np.ndarray]:
@@ -249,7 +251,7 @@ def _plot_gp_corner(
     center_x = _surrogate_argmax(
         gp,
         bounds,
-        num_starts=int(site.metadata["scan.point_policy"]["backend"].get("surrogate_num_starts", 8)),
+        num_starts=argmax_num_starts,
     )
     center_score, _ = _posterior_mean_std(gp, center_x)
     center_objective = -float(center_score.item()) if minimise else float(center_score.item())
@@ -417,7 +419,36 @@ def main() -> None:
         default="",
         help="Slash-separated site path, e.g. optimiser/subscan. Defaults to the root site.",
     )
-    parser.add_argument("--grid-points", type=int, default=60)
+    parser.add_argument(
+        "--grid-points",
+        type=int,
+        default=100,
+        help="Grid resolution per plotted axis. Defaults to 100 for a denser offline refit.",
+    )
+    parser.add_argument(
+        "--fit-steps",
+        type=int,
+        default=None,
+        help="Override the offline GP refit optimisation steps.",
+    )
+    parser.add_argument(
+        "--fit-lr",
+        type=float,
+        default=None,
+        help="Override the offline GP refit learning rate.",
+    )
+    parser.add_argument(
+        "--argmax-num-starts",
+        type=int,
+        default=None,
+        help="Override the number of optimisation restarts used to locate the plotted surrogate optimum.",
+    )
+    parser.add_argument(
+        "--noise-floor",
+        type=float,
+        default=None,
+        help="Override the minimum observation noise floor used in the offline GP refit.",
+    )
     args = parser.parse_args()
 
     snapshot = read_host_runtime_snapshot(args.snapshot)
@@ -425,6 +456,18 @@ def main() -> None:
     bo_site = _decode_bo_site(site)
 
     backend = bo_site["backend"]
+    fit_steps = int(args.fit_steps if args.fit_steps is not None else max(int(backend.get("fit_steps", 400)), 800))
+    fit_lr = float(args.fit_lr if args.fit_lr is not None else backend.get("fit_lr", 0.05))
+    noise_floor = float(
+        args.noise_floor
+        if args.noise_floor is not None
+        else backend.get("observation_noise_floor", 1e-6)
+    )
+    argmax_num_starts = int(
+        args.argmax_num_starts
+        if args.argmax_num_starts is not None
+        else max(int(backend.get("surrogate_num_starts", 20)), 24)
+    )
     bounds = torch.as_tensor(backend["bounds"], dtype=torch.float64)
     x_obs = torch.as_tensor(bo_site["x_obs"], dtype=torch.float64)
     objective_score = torch.as_tensor(bo_site["objective_score"], dtype=torch.float64)
@@ -433,8 +476,9 @@ def main() -> None:
     gp, _ = _fit_exact_gp_model(
         x_obs,
         objective_score,
-        objective_err.clamp_min(float(backend.get("observation_noise_floor", 1e-6))),
-        steps=int(backend.get("fit_steps", 200)),
+        objective_err.clamp_min(noise_floor),
+        lr=fit_lr,
+        steps=fit_steps,
     )
 
     _plot_gp_corner(
@@ -447,6 +491,7 @@ def main() -> None:
         decision_source=np.asarray(bo_site["decision_source"]),
         x_labels=bo_site["x_labels"],
         minimise=bool(backend.get("minimise", True)),
+        argmax_num_starts=argmax_num_starts,
         n_points=args.grid_points,
     )
     plt.show()

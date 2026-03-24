@@ -129,7 +129,7 @@ class BayesianOptimisationBackendTest(unittest.TestCase):
         )
 
         seed_points = backend.suggest(3)
-        self.assertEqual(seed_points, [(-1.0,), (1.0,)])
+        self.assertEqual([suggestion.point for suggestion in seed_points], [(-1.0,), (1.0,)])
 
         backend.observe(
             (
@@ -141,10 +141,10 @@ class BayesianOptimisationBackendTest(unittest.TestCase):
         next_batch = backend.suggest(3)
         self.assertGreaterEqual(len(next_batch), 1)
         self.assertLessEqual(len(next_batch), 3)
-        self.assertEqual(next_batch[0], (0.25,))
-        for point in next_batch:
-            self.assertGreaterEqual(point[0], -1.0)
-            self.assertLessEqual(point[0], 1.0)
+        self.assertEqual(next_batch[0].point, (0.25,))
+        for suggestion in next_batch:
+            self.assertGreaterEqual(suggestion.point[0], -1.0)
+            self.assertLessEqual(suggestion.point[0], 1.0)
 
     def test_backend_supports_local_exploration_strategy(self):
         backend = NuboBatchBayesianOptimisationBackend(
@@ -179,9 +179,9 @@ class BayesianOptimisationBackendTest(unittest.TestCase):
 
         next_batch = backend.suggest(2)
         self.assertGreaterEqual(len(next_batch), 1)
-        for point in next_batch:
-            self.assertGreaterEqual(point[0], -1.0)
-            self.assertLessEqual(point[0], 1.0)
+        for suggestion in next_batch:
+            self.assertGreaterEqual(suggestion.point[0], -1.0)
+            self.assertLessEqual(suggestion.point[0], 1.0)
 
 
 if _OPTIMISATION_DEPS_AVAILABLE:
@@ -248,6 +248,8 @@ if _OPTIMISATION_DEPS_AVAILABLE:
                             "initial_design_size": 2,
                             "max_batches": 1,
                             "acquisition": "ucb",
+                            "fit_steps": 7,
+                            "fit_lr": 0.04,
                         },
                     },
                     "entries": [
@@ -268,6 +270,9 @@ if _OPTIMISATION_DEPS_AVAILABLE:
 
             self.assertEqual(overrides, {})
             self.assertEqual(request.point_policy.describe()["kind"], "ask_tell_optimiser")
+            backend_description = request.point_policy.describe()["backend"]
+            self.assertEqual(backend_description["fit_steps"], 7)
+            self.assertEqual(backend_description["fit_lr"], 0.04)
 
             result = HostScanSession(fragment, fragment, request).run()
             prefix = result.site_prefix

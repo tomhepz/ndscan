@@ -148,6 +148,28 @@ mostly correct, but should be stated more precisely:
 - you **may not** dynamically change the executable scan structure from inside the
   already-compiled kernel region
 
+### What The ARTIQ Compiler Cares About In Practice
+
+The compiler documentation reinforces a few practical rules that matter directly for
+ndscan runtime design:
+
+- kernel-visible return types and RPC return types must be explicit ARTIQ-friendly
+  types
+  - for example, status values should be `numpy.int32`/`numpy.int64`, not plain Python
+    `int`
+- lists, arrays, and strings in kernels must have fixed size
+  - this strongly favors host-fed chunking/RPC over variable-length kernel-side data
+    structures
+- user-defined objects referenced from kernels need stable, compatible attribute types
+  - this is one of the main reasons prepared scan objects should stay structurally
+    simple
+- RPC is the intended escape hatch for host-side dynamism
+  - kernels can ask the host for the next batch or report status/results, but the
+    compiled kernel body itself should stay structurally fixed
+
+So the prepared/dynamic split is not only an API preference. It is a direct
+consequence of what the ARTIQ compiler can type-check and compile predictably.
+
 
 ## Dynamic Scans
 
@@ -330,6 +352,109 @@ The first kernel backend should be the simple one:
 - kernel stays resident
 - host still chooses batches by RPC
 - main goal is avoiding repeated compilation
+
+#### First `KernelStreamingExecutor` Contract
+
+The first version should be intentionally strict and boring.
+
+It should support only:
+
+- a kernel-capable leaf or contiguous subtree with fixed executable structure
+- host-chosen batches delivered by synchronous RPC
+- one resident kernel execution region per active execution region
+- the existing host-side controller for:
+  - point-policy decisions
+  - mappings
+  - persistence
+  - analyses
+  - pause boundaries
+
+It should explicitly *not* try to support yet:
+
+- kernel-side point generation
+- kernel-side analysis
+- variable-length result payloads
+- rich Python return values crossing into compiled code
+- arbitrary dynamic nested scan construction from inside kernel code
+
+The first implementation is successful if it achieves the following:
+
+- a kernel-capable leaf point body is compiled once per execution region rather than
+  once per point or once per tiny nested scan
+- host-side batch selection remains unchanged semantically
+- nested scans can still share the same host-side controller structure
+- the executor boundary is clean enough that a later `KernelAutonomousExecutor` could
+  reuse the same controller
+
+In other words, the first goal is:
+
+- **kernel residency**
+
+not:
+
+- **kernel autonomy**
+
+#### What The First Implementation Already Taught Us
+
+Implementing the first resident-kernel executor confirmed that the broad plan is
+correct, but also sharpened a few details:
+
+- the first kernel subset should stay very strict
+  - the compiled kernel loop itself should stay fixed-shape
+  - richer logical scan features can still work if the host resolves them into
+    concrete parameter values before each batch crosses the RPC boundary
+- status and control values crossing the kernel boundary should be represented with
+  explicit NumPy integer types
+  - e.g. `numpy.int32` rather than plain `int`
+- even helper methods that are logically "just status plumbing" must still satisfy the
+  compiler's explicit type/control-flow rules
+- the host should remain the owner of:
+  - batch selection
+  - batch-finalization decisions
+  - persistence
+  - analyses
+- a resident kernel executor is therefore best treated as a narrow execution backend,
+  not as a second scan runtime
+
+That in turn clarifies the right support boundary:
+
+- pseudoparams do not need a special kernel implementation if they only influence
+  host-side mapping logic and recorded metadata
+- runtime parameter mappings and wrapper-fragment `rebind_param(...)` also do not need
+  to be compiled into the kernel if the host precomputes the concrete installed
+  parameter values ahead of the resident kernel loop
+- this preserves the key property we care about:
+  - compile once
+  - stream batches many times
+
+That is a refinement of the plan, not a reversal of it. The architecture is still:
+
+- one semantic scan/controller model
+- one strict kernel-streaming backend first
+- broader prepared nested scans later
+
+#### Acceptance Target For V1
+
+A good first acceptance target is:
+
+- one leaf fragment with `@kernel run_once()`
+- one scanned parameter
+- many points
+- host still choosing batches
+
+The expected behavior is:
+
+- one kernel entry for the whole scan region
+- many host-fed batches
+- no repeated compilation per point
+
+After that works, the next acceptance target is:
+
+- nested host-side scan structure
+- but with the same kernel-capable leaf reused across many nested invocations
+
+That is the smallest convincing proof that the newer runtime can match the important
+kernel-performance property of the legacy path without inheriting its full structure.
 
 ### 3a. Optional Kernel-Capable Implementations Of The Same Concepts
 
@@ -668,6 +793,127 @@ If naming is revisited, the following principles should help:
    - "I am running a scan"
    and only secondarily:
    - "this scan is executing through a kernel-streaming backend"
+
+
+## Current Implemented Subset
+
+The codebase now has the first concrete pieces of this split:
+
+- `PreparedChildScan.run()`
+  - host-only
+  - returns the full `HostScanRunResult`
+- `PreparedChildScan.acquire()`
+  - compiler-friendly entry point returning `None`
+  - callable from `@kernel`
+  - host-executed child scans still bridge to the host directly
+  - kernel-executed child scans now use a dedicated prepared nested kernel runner
+    driven by host-fed batches
+- `PreparedChildScan` can now also expose selected fixed analysis outputs through a
+  compiler-friendly accessor surface:
+  - `child_scan.analysis_results.fit_slope.get()`
+  - `child_scan.analysis_results.fit_intercept.get()`
+
+Those fixed outputs are intentionally narrower than `HostScanRunResult`:
+
+- they are declared structurally up front,
+- they currently support numeric default-analysis outputs,
+- they can be read from compiled parent code after `acquire()`,
+- and they leave room for the underlying implementation to stay host-driven today or
+  become kernel-reduced later without changing the public concept.
+
+In other words, the current prepared child-scan path already proves the API split:
+
+- dynamic/rich nested scans use `run_subscan(...)`
+- prepared nested scans use `PreparedChildScan`
+
+The current kernel-capable prepared path is still intentionally strict:
+
+- parent scan may already be kernel-streaming
+- child prepared scan can be invoked from kernel
+- child scan execution can also stay on-kernel without launching a fresh child session
+- host still generates point batches and owns persistence/analysis
+
+One important practical rule now comes directly from the compiler:
+
+- if a prepared kernel child scan itself contains deeper prepared kernel child scans,
+  those deeper scans must also have fixed their compiler-visible shape before the
+  outer kernel is first compiled
+
+In practice, that means:
+
+- nested prepared kernel scans should be configured at least once from host-side code
+  before the outer kernel entry
+- for detached child fragments, this may require the parent to explicitly prime the
+  child's host-side configuration path during `host_setup()`
+
+This is the same core rule as the legacy subscan path, just expressed through the
+newer `ScanRequest` / executor architecture rather than `SubscanExpFragment`.
+
+### Where Setup Belongs
+
+The clean split is:
+
+- `build_fragment()`
+  - define the structural prepared-scan shape
+  - create the child fragment
+  - detach it from ordinary traversal if the prepared scan will own its lifecycle
+  - create the prepared child-scan handle
+- `host_setup()`
+  - configure concrete `ScanRequest` values
+  - perform any host-side priming needed before the outer kernel is first compiled
+
+This matches the legacy intent more closely than it may first appear. The important
+rule is not "old subscans were special", but rather:
+
+- structural/compiler-visible setup must happen before kernel compilation
+- runtime choices still belong in host-side setup
+
+The ergonomic helper `setattr_prepared_child_scan(...)` exists to make the build-time
+part obvious. It combines:
+
+- `setattr_fragment(..., detached=True)`
+- `prepare_child_scan(...)`
+
+into one operation, so the user does not need to remember to detach a child manually
+just because it will be driven by a prepared scan handle.
+
+For deeper prepared kernel nesting there is one extra wrinkle: detached fragments do
+not participate in the parent's default recursive `host_setup()` traversal. In that
+case the parent should explicitly call:
+
+- `child_scan.prime()`
+
+from `host_setup()` before the outer kernel is first entered. That is just an
+ergonomic wrapper around forwarding to the detached child's own `host_setup()` path;
+it avoids leaking the detach detail at the call site while preserving standard ndscan
+lifecycle semantics.
+
+### Important Current Boundary
+
+One specific implementation route has now been tested and ruled out:
+
+- parent running inside a resident kernel executor
+- parent calls `PreparedChildScan.acquire()`
+- `acquire()` RPCs to the host
+- the host tries to launch a second kernel-backed child scan session before returning
+
+That is not a sound model. In practice it breaks the core-device communication path,
+which is a much stronger signal than a mere missing feature flag.
+
+This is useful because it clarifies what the next clean implementation must look like:
+
+- true kernel child scans need their own dedicated prepared nested runner
+- that runner must remain within a compiler-visible prepared execution shape
+- it cannot just be the current host bridge launching a fresh kernel session inside a
+  parent kernel RPC
+
+This is also the key lesson to keep from the legacy subscan implementation:
+
+- `Subscan.acquire()` works because the nested execution path is already part of the
+  prepared/compiler-visible structure
+- the host may still provide configuration or batches by RPC
+- but nested kernel execution itself is not created ad hoc by a host helper in the
+  middle of servicing another kernel RPC
 
 
 ## Final Summary

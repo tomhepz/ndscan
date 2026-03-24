@@ -128,6 +128,7 @@ def _fit_exact_gp_model(
     y_train_score: torch.Tensor,
     y_train_err: torch.Tensor,
     *,
+    lr: float,
     steps: int,
 ) -> tuple[GaussianProcess, FixedNoiseGaussianLikelihood]:
     likelihood = FixedNoiseGaussianLikelihood(
@@ -140,7 +141,7 @@ def _fit_exact_gp_model(
         y_train_score,
         gp=gp,
         likelihood=likelihood,
-        lr=0.1,
+        lr=lr,
         steps=steps,
     )
     gp.eval()
@@ -808,7 +809,8 @@ class NuboBatchBayesianOptimisationBackend:
         initial_design_size: int = 0,
         random_seed: int | None = None,
         acquisition_name: str = "ucb",
-        fit_steps: int = 200,
+        fit_steps: int = 400,
+        fit_lr: float = 0.05,
         acquisition_num_starts: int = 5,
         surrogate_num_starts: int = 20,
         batch_mc_samples: int = 128,
@@ -832,6 +834,10 @@ class NuboBatchBayesianOptimisationBackend:
             raise ValueError("batch_size must be positive")
         if max_batches is not None and max_batches < 1:
             raise ValueError("max_batches must be positive when specified")
+        if fit_steps <= 0:
+            raise ValueError("fit_steps must be positive")
+        if fit_lr <= 0.0:
+            raise ValueError("fit_lr must be positive")
         if observation_noise_floor <= 0.0:
             raise ValueError("observation_noise_floor must be positive")
 
@@ -840,6 +846,7 @@ class NuboBatchBayesianOptimisationBackend:
         self._batch_size = int(batch_size)
         self._acquisition_name = acquisition_name.lower()
         self._fit_steps = int(fit_steps)
+        self._fit_lr = float(fit_lr)
         self._acquisition_num_starts = int(acquisition_num_starts)
         self._surrogate_num_starts = int(surrogate_num_starts)
         self._batch_mc_samples = int(batch_mc_samples)
@@ -925,6 +932,7 @@ class NuboBatchBayesianOptimisationBackend:
             self._x_obs,
             self._y_obs_score,
             self._y_obs_err.clamp_min(self._observation_noise_floor),
+            lr=self._fit_lr,
             steps=self._fit_steps,
         )
 
@@ -1042,6 +1050,7 @@ class NuboBatchBayesianOptimisationBackend:
             "batch_size": self._batch_size,
             "acquisition": self._acquisition_name,
             "fit_steps": self._fit_steps,
+            "fit_lr": self._fit_lr,
             "acquisition_num_starts": self._acquisition_num_starts,
             "surrogate_num_starts": self._surrogate_num_starts,
             "batch_mc_samples": self._batch_mc_samples,

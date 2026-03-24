@@ -51,6 +51,8 @@ from ndscan.experiment import (
     make_child_scan_site,
     make_fragment_host_scan_exp,
     make_fragment_host_dashboard_scan_exp,
+    prepare_child_scan,
+    setattr_prepared_child_scan,
     run_subscan,
 )
 from ndscan.dashboard.submission import HostSubmissionBackend, select_submission_backend
@@ -796,6 +798,18 @@ class HostCallsKernelHelperFragment(ExpFragment):
         self.result.push(self.value.get() + 1.0)
 
 
+class MissingCoreKernelFragment(ExpFragment):
+    """Kernel fragment used to pin the required ``self.core`` declaration."""
+
+    def build_fragment(self):
+        self.setattr_param("value", FloatParam, "Value", 0.0)
+        self.setattr_result("result", FloatChannel)
+
+    @kernel
+    def run_once(self):
+        self.result.push(self.value.get() + 1.0)
+
+
 class OnlineGaussianFragment(ExpFragment):
     """Leaf fragment with a built-in online fit and a known exact model."""
 
@@ -896,6 +910,146 @@ class NestedChildScanParent(ExpFragment):
             name="child_scan",
         )
         self.child_total.push(sum(child_result.values[self.child.result]))
+
+
+class PreparedChildScanParent(ExpFragment):
+    """Parent fragment that uses the prepared child-scan API."""
+
+    def build_fragment(self):
+        self.setattr_param("outer", FloatParam, "outer", 0.0)
+        self.setattr_fragment("child", PlainAddOneFragment, detached=True)
+        self.child_scan = prepare_child_scan(self, self.child, name="child_scan")
+        self.setattr_result("child_total", FloatChannel)
+
+    def run_once(self):
+        self.child_scan.configure(
+            ScanRequest.cartesian(
+                [(self.child.value, [self.outer.get(), self.outer.get() + 1.0])],
+                execution_policy=ExecutionPolicy(max_points_per_batch=2),
+            )
+        )
+        child_result = self.child_scan.run()
+        self.child_total.push(sum(child_result.values[self.child.result]))
+
+
+class UnconfiguredPreparedChildScanParent(ExpFragment):
+    def build_fragment(self):
+        self.setattr_fragment("child", PlainAddOneFragment, detached=True)
+        self.child_scan = prepare_child_scan(self, self.child, name="child_scan")
+
+    def run_once(self):
+        self.child_scan.run()
+
+
+class ReusedPreparedChildScanParent(ExpFragment):
+    """Parent fragment that reuses one prepared child-scan request twice."""
+
+    def build_fragment(self):
+        self.setattr_fragment("child", PlainAddOneFragment, detached=True)
+        self.child_scan = prepare_child_scan(self, self.child, name="child_scan")
+        self.setattr_result("child_total", FloatChannel)
+
+    def run_once(self):
+        self.child_scan.configure(
+            ScanRequest.explicit([self.child.value], [[2.0], [3.0]])
+        )
+        first = self.child_scan.run()
+        second = self.child_scan.run()
+        self.child_total.push(
+            sum(first.values[self.child.result]) + sum(second.values[self.child.result])
+        )
+
+
+class AutoDetachedPreparedChildScanParent(ExpFragment):
+    """Parent that relies on prepare_child_scan() to detach a direct child."""
+
+    def build_fragment(self):
+        self.setattr_fragment("child", CountingLifecycleFragment)
+        self.child_scan = prepare_child_scan(self, self.child, name="child_scan")
+        self.setattr_param("outer", FloatParam, "outer", 0.0)
+        self.setattr_result("child_total", FloatChannel)
+
+    def run_once(self):
+        self.child_scan.configure(
+            ScanRequest.cartesian(
+                [(self.child.value, [self.outer.get(), self.outer.get() + 1.0])],
+                execution_policy=ExecutionPolicy(max_points_per_batch=2),
+            )
+        )
+        child_result = self.child_scan.run()
+        self.child_total.push(sum(child_result.values[self.child.result]))
+
+
+class SetattrPreparedChildScanParent(ExpFragment):
+    """Parent using the ergonomic helper that creates and detaches the child."""
+
+    def build_fragment(self):
+        self.child_scan = setattr_prepared_child_scan(
+            self,
+            "child",
+            PlainAddOneFragment,
+            scan_name="child_scan",
+        )
+        self.setattr_param("outer", FloatParam, "outer", 0.0)
+        self.setattr_result("child_total", FloatChannel)
+
+    def run_once(self):
+        self.child_scan.configure(
+            ScanRequest.cartesian(
+                [(self.child.value, [self.outer.get(), self.outer.get() + 1.0])]
+            )
+        )
+        child_result = self.child_scan.run()
+        self.child_total.push(sum(child_result.values[self.child.result]))
+
+
+class PreparedChildAnalysisResultParent(ExpFragment):
+    """Parent that consumes one fixed analysis output from a prepared child scan."""
+
+    def build_fragment(self):
+        self.child_scan = setattr_prepared_child_scan(
+            self,
+            "child",
+            AnalysedLineFragment,
+            scan_name="child_scan",
+            expose_analysis_results=True,
+        )
+        self.setattr_result("child_slope", FloatChannel)
+
+    def run_once(self):
+        self.child_scan.configure(
+            ScanRequest.explicit(
+                [self.child.x],
+                [[0.0], [1.0], [2.0], [3.0], [4.0], [5.0]],
+            )
+        )
+        self.child_scan.run()
+        self.child_slope.push(self.child_scan.analysis_results.m.get())
+
+
+class PreparedChildTupleOutputParent(ExpFragment):
+    """Parent that consumes fixed child outputs via one tuple fetch."""
+
+    def build_fragment(self):
+        self.child_scan = setattr_prepared_child_scan(
+            self,
+            "child",
+            AnalysedLineFragment,
+            scan_name="child_scan",
+            expose_outputs=["m"],
+        )
+        self.setattr_result("child_slope", FloatChannel)
+
+    def run_once(self):
+        self.child_scan.configure(
+            ScanRequest.explicit(
+                [self.child.x],
+                [[0.0], [1.0], [2.0], [3.0], [4.0], [5.0]],
+            )
+        )
+        self.child_scan.run()
+        (child_slope,) = self.child_scan.get_outputs()
+        self.child_slope.push(child_slope)
 
 
 class RecursiveLeafScanFragment(ExpFragment):
@@ -1584,7 +1738,7 @@ class HostRuntimeCase(HasEnvironmentCase):
         )
 
         session = HostScanSession(fragment, fragment, request)
-        session.run()
+        result = session.run()
 
         prefix = "ndscan.rid_0.site.root."
         self.assertEqual(point_policy.requested_batch_limits, [2, 2, 2])
@@ -1604,6 +1758,12 @@ class HostRuntimeCase(HasEnvironmentCase):
         self.assertEqual(fragment.host_setup_calls, 3)
         self.assertEqual(fragment.host_cleanup_calls, 3)
         self.assertEqual(self.scheduler.num_check_pause_calls, 2)
+        self.assertEqual(result.runtime_stats.batch_count, 3)
+        self.assertEqual(result.runtime_stats.point_count, 5)
+        self.assertEqual(result.runtime_stats.executor_entry_count, 3)
+        self.assertIsNotNone(result.runtime_stats.first_executor_entry_elapsed_s)
+        self.assertGreaterEqual(result.runtime_stats.total_executor_elapsed_s, 0.0)
+        self.assertGreaterEqual(result.runtime_stats.total_batch_finalize_elapsed_s, 0.0)
         self.assertEqual(self.d(prefix, "points.param_0"), [0.0, 1.0, 2.0, 3.0, 4.0])
         self.assertEqual(self.d(prefix, "points.channel_0"), [1.0, 2.0, 3.0, 4.0, 5.0])
 
@@ -1624,7 +1784,7 @@ class HostRuntimeCase(HasEnvironmentCase):
         )
 
         session = HostScanSession(fragment, fragment, request)
-        session.run()
+        result = session.run()
 
         prefix = "ndscan.rid_0.site.root."
         self.assertEqual(
@@ -1672,13 +1832,17 @@ class HostRuntimeCase(HasEnvironmentCase):
         )
 
         session = HostScanSession(fragment, fragment, request)
-        session.run()
+        result = session.run()
 
         prefix = "ndscan.rid_0.site.root."
         self.assertEqual(point_policy.requested_batch_limits, [3, 3])
         self.assertEqual(point_policy.observed_batches, [[0.0, 1.0], [2.0], [3.0]])
         self.assertEqual(fragment.host_setup_calls, 3)
         self.assertEqual(fragment.host_cleanup_calls, 3)
+        self.assertEqual(result.runtime_stats.batch_count, 3)
+        self.assertEqual(result.runtime_stats.point_count, 4)
+        self.assertEqual(result.runtime_stats.executor_entry_count, 3)
+        self.assertIsNotNone(result.runtime_stats.first_executor_entry_elapsed_s)
         self.assertEqual(self.d(prefix, "points.param_0"), [0.0, 1.0, 2.0, 3.0])
         self.assertEqual(self.d(prefix, "points.channel_0"), [1.0, 2.0, 3.0, 4.0])
 
@@ -2215,6 +2379,15 @@ class HostRuntimeCase(HasEnvironmentCase):
         self.assertEqual(self.d(prefix, "points.param_0"), [4.0, 5.0])
         self.assertEqual(self.d(prefix, "points.channel_0"), [5.0, 6.0])
 
+    def test_host_scan_session_requires_kernel_fragments_to_declare_core(self):
+        fragment = self.create(MissingCoreKernelFragment, [])
+        request = ScanRequest.single()
+
+        with self.assertRaisesRegex(
+            ValueError, r"must declare.*self\.setattr_device\('core'\)"
+        ):
+            HostScanSession(fragment, fragment, request)
+
     def test_make_child_scan_site_requires_active_parent_point(self):
         with self.assertRaises(RuntimeError):
             make_child_scan_site("not_inside_a_scan")
@@ -2253,6 +2426,111 @@ class HostRuntimeCase(HasEnvironmentCase):
             self.d(child_prefix, "points.channel_0"),
             [11.0, 12.0, 21.0, 22.0],
         )
+
+    def test_prepared_child_scan_uses_same_runtime_core(self):
+        parent = self.create(PreparedChildScanParent, [])
+        request = ScanRequest.explicit([parent.outer], [[10.0], [20.0]])
+
+        session = HostScanSession(parent, parent, request)
+        session.run()
+
+        root_prefix = "ndscan.rid_0.site.root."
+        child_prefix = "ndscan.rid_0.site.root.child_scan."
+
+        self.assertEqual(self.d(root_prefix, "points.param_0"), [10.0, 20.0])
+        self.assertEqual(
+            self.d(root_prefix, "points.channel_0"),
+            [23.0, 43.0],
+        )
+        self.assertEqual(self.j(child_prefix, "site.path"), ["child_scan"])
+        self.assertEqual(self.d(child_prefix, "segments.start_index"), [0, 2])
+        self.assertEqual(
+            self.d(child_prefix, "segments.parent_point_index"),
+            [0, 1],
+        )
+        self.assertEqual(
+            self.d(child_prefix, "points.param_0"),
+            [10.0, 11.0, 20.0, 21.0],
+        )
+        self.assertEqual(
+            self.d(child_prefix, "points.channel_0"),
+            [11.0, 12.0, 21.0, 22.0],
+        )
+
+    def test_prepared_child_scan_requires_configuration(self):
+        parent = self.create(UnconfiguredPreparedChildScanParent, [])
+        request = ScanRequest.single()
+
+        session = HostScanSession(parent, parent, request)
+        with self.assertRaisesRegex(RuntimeError, "has not been configured yet"):
+            session.run()
+
+    def test_prepared_child_scan_reuses_request_with_fresh_point_policy(self):
+        parent = self.create(ReusedPreparedChildScanParent, [])
+        request = ScanRequest.single()
+
+        session = HostScanSession(parent, parent, request)
+        session.run()
+
+        root_prefix = "ndscan.rid_0.site.root."
+        child_prefix = "ndscan.rid_0.site.root.child_scan."
+
+        self.assertEqual(self.d(root_prefix, "points.channel_0"), [14.0])
+        self.assertEqual(self.d(child_prefix, "segments.start_index"), [0, 2])
+        self.assertEqual(self.d(child_prefix, "segments.parent_point_index"), [0, 0])
+        self.assertEqual(self.d(child_prefix, "points.param_0"), [2.0, 3.0, 2.0, 3.0])
+        self.assertEqual(
+            self.d(child_prefix, "points.channel_0"), [3.0, 4.0, 3.0, 4.0]
+        )
+
+    def test_prepare_child_scan_auto_detaches_direct_child_during_build(self):
+        parent = self.create(AutoDetachedPreparedChildScanParent, [])
+        request = ScanRequest.explicit([parent.outer], [[10.0], [20.0]])
+
+        session = HostScanSession(parent, parent, request)
+        session.run()
+
+        self.assertIn(parent.child, parent._detached_subfragments)
+        self.assertEqual(parent.child.host_setup_calls, 2)
+        self.assertEqual(parent.child.host_cleanup_calls, 2)
+
+    def test_setattr_prepared_child_scan_creates_detached_child_and_scan_handle(self):
+        parent = self.create(SetattrPreparedChildScanParent, [])
+        request = ScanRequest.explicit([parent.outer], [[10.0], [20.0]])
+
+        session = HostScanSession(parent, parent, request)
+        session.run()
+
+        self.assertTrue(hasattr(parent, "child"))
+        self.assertIn(parent.child, parent._detached_subfragments)
+
+        child_prefix = "ndscan.rid_0.site.root.child_scan."
+        self.assertEqual(self.j(child_prefix, "site.path"), ["child_scan"])
+        self.assertEqual(
+            self.d(child_prefix, "points.param_0"),
+            [10.0, 11.0, 20.0, 21.0],
+        )
+
+    def test_prepared_child_scan_can_expose_fixed_analysis_results(self):
+        parent = self.create(PreparedChildAnalysisResultParent, [])
+        request = ScanRequest.single()
+
+        session = HostScanSession(parent, parent, request)
+        result = session.run()
+
+        self.assertAlmostEqual(result.values[parent.child_slope][0], 4.0, places=6)
+        self.assertAlmostEqual(parent.child_scan.analysis_results.m.get(), 4.0, places=6)
+
+    def test_prepared_child_scan_can_fetch_fixed_outputs_as_tuple(self):
+        parent = self.create(PreparedChildTupleOutputParent, [])
+        request = ScanRequest.single()
+
+        session = HostScanSession(parent, parent, request)
+        result = session.run()
+
+        self.assertAlmostEqual(result.values[parent.child_slope][0], 4.0, places=6)
+        self.assertEqual(parent.child_scan.get_outputs(), (4.0,))
+        self.assertAlmostEqual(parent.child_scan.analysis_results.m.get(), 4.0, places=6)
 
     def test_nested_child_scan_uses_true_parent_point_indices_with_batched_parent(self):
         parent = self.create(NestedChildScanParent, [])
