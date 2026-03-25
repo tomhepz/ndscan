@@ -24,7 +24,7 @@ from ndscan.experiment import (
     ExpFragment,
     FloatChannel,
     FloatParam,
-    make_fragment_host_dashboard_scan_exp,
+    make_fragment_prepared_dashboard_scan_exp,
     make_fragment_scan_exp,
 )
 
@@ -86,6 +86,6 @@ LegacyAmbiguousParameterNames = make_fragment_scan_exp(
     AmbiguousParameterNamesFragment
 )
 
-HostAmbiguousParameterNamesDashboard = make_fragment_host_dashboard_scan_exp(
+HostAmbiguousParameterNamesDashboard = make_fragment_prepared_dashboard_scan_exp(
     AmbiguousParameterNamesFragment
 )

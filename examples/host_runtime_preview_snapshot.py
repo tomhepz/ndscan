@@ -41,7 +41,7 @@ from ndscan.experiment import (
     FloatParam,
     PreviewPolicy,
     ScanRequest,
-    make_fragment_host_scan_exp,
+    make_fragment_prepared_scan_exp,
 )
 
 
@@ -59,7 +59,7 @@ class SlowPreviewFragment(ExpFragment):
         self.y.push(self.x.get() ** 2)
 
 
-HostRuntimePreviewSnapshot = make_fragment_host_scan_exp(
+HostRuntimePreviewSnapshot = make_fragment_prepared_scan_exp(
     SlowPreviewFragment,
     lambda fragment: ScanRequest.cartesian(
         [(fragment.x, [0.5 * i for i in range(24)])],

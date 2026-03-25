@@ -32,8 +32,8 @@ from ndscan.experiment import (
     ScanRequest,
     SinglePointPolicy,
     annotations,
-    make_fragment_host_scan_exp,
-    run_subscan,
+    make_fragment_prepared_scan_exp,
+    prepare_child_scan,
 )
 
 
@@ -151,6 +151,14 @@ class ProbabilityAtTimeViaAnalysisFragment(ExpFragment):
 
     def build_fragment(self):
         self.setattr_fragment("detector", YesNoAtTimeWithAnalysisFragment, detached=True)
+        self.repeat_scan = prepare_child_scan(
+            self,
+            self.detector,
+            name="repeat_scan",
+            extra_metadata={
+                "analysis_note": "leaf CustomAnalysis publishes repeat statistics online"
+            },
+        )
         self.setattr_result("probability", FloatChannel)
         self.setattr_result("probability_error", FloatChannel)
         self.setattr_result("num_shots", IntChannel)
@@ -173,18 +181,11 @@ class ProbabilityAtTimeViaAnalysisFragment(ExpFragment):
             ),
             execution_policy=ExecutionPolicy(max_points_per_batch=16),
         )
-        repeat_result = run_subscan(
-            self,
-            self.detector,
-            repeat_request,
-            name="repeat_scan",
-            extra_metadata={
-                "analysis_note": "leaf CustomAnalysis publishes repeat statistics online"
-            },
-        )
-        self.probability.push(repeat_result.analysis_results["probability"])
-        self.probability_error.push(repeat_result.analysis_results["probability_error"])
-        self.num_shots.push(repeat_result.analysis_results["num_shots"])
+        self.repeat_scan.configure(repeat_request)
+        repeat_outputs = self.repeat_scan.execute()
+        self.probability.push(repeat_outputs["probability"])
+        self.probability_error.push(repeat_outputs["probability_error"])
+        self.num_shots.push(repeat_outputs["num_shots"])
 
     def get_default_analyses(self):
         return [
@@ -224,6 +225,14 @@ class FrequencyFromProbabilityViaAnalysisFragment(ExpFragment):
         self.setattr_fragment(
             "probability_scan", ProbabilityAtTimeViaAnalysisFragment, detached=True
         )
+        self.probability_trace = prepare_child_scan(
+            self,
+            self.probability_scan,
+            name="probability_scan",
+            extra_metadata={
+                "analysis_note": "outer sine fit over probability(t), with repeat statistics on the leaf fragment"
+            },
+        )
         self.setattr_result("fit_frequency", FloatChannel)
 
     def run_once(self):
@@ -232,19 +241,11 @@ class FrequencyFromProbabilityViaAnalysisFragment(ExpFragment):
             [(self.probability_scan.detector.t, t_points)],
             execution_policy=ExecutionPolicy(max_points_per_batch=5),
         )
-        probability_result = run_subscan(
-            self,
-            self.probability_scan,
-            probability_request,
-            name="probability_scan",
-            extra_metadata={
-                "analysis_note": "outer sine fit over probability(t), with repeat statistics on the leaf fragment"
-            },
-        )
-        self.fit_frequency.push(probability_result.analysis_results["fit_frequency"])
+        self.probability_trace.configure(probability_request)
+        self.fit_frequency.push(self.probability_trace.execute()["fit_frequency"])
 
 
-HostRuntimeProbabilityFrequencyViaAnalysis = make_fragment_host_scan_exp(
+HostRuntimeProbabilityFrequencyViaAnalysis = make_fragment_prepared_scan_exp(
     FrequencyFromProbabilityViaAnalysisFragment,
     lambda fragment: ScanRequest.single(
         metadata={"demo_name": "host_runtime_probability_frequency_via_analysis"}

@@ -11,7 +11,7 @@ from ndscan.experiment import (
     FloatChannel,
     FloatParam,
     ScanRequest,
-    make_fragment_host_scan_exp,
+    make_fragment_prepared_scan_exp,
 )
 
 
@@ -31,7 +31,7 @@ class TandemResponseFragment(ExpFragment):
         self.difference.push(left - right)
 
 
-HostRuntimeZipScan = make_fragment_host_scan_exp(
+HostRuntimeZipScan = make_fragment_prepared_scan_exp(
     TandemResponseFragment,
     lambda fragment: ScanRequest.zipped(
         [

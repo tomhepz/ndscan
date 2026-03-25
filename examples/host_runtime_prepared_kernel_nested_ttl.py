@@ -41,7 +41,7 @@ from ndscan.experiment import (
     FloatParam,
     ScanRequest,
     kernel,
-    make_fragment_host_scan_exp,
+    make_fragment_prepared_scan_exp,
     setattr_prepared_child_scan,
 )
 
@@ -144,7 +144,7 @@ class PreparedKernelNestedTtlFragment(ExpFragment):
         self.completed.push(self.outer.get())
 
 
-HostRuntimePreparedKernelNestedTtl = make_fragment_host_scan_exp(
+HostRuntimePreparedKernelNestedTtl = make_fragment_prepared_scan_exp(
     PreparedKernelNestedTtlFragment,
     lambda fragment: ScanRequest.explicit(
         [fragment.outer],

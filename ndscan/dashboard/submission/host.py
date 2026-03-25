@@ -10,7 +10,7 @@ It implements the first useful dashboard-editable subset:
 - GPO row modes ``fixed`` and ``gpo_scan`` for pseudoparams.
 
 That is enough to give the host runtime a clean "dashboard submission path" distinct
-from the code-first ``make_fragment_host_scan_exp()`` path, without pretending that the
+from the code-first ``make_fragment_prepared_scan_exp()`` path, without pretending that the
 full host schema already has a matching dashboard UI. Specs outside this subset are
 still rejected up front so the editor does not silently drop information it cannot
 display.

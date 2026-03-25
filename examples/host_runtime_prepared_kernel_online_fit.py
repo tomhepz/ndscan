@@ -38,7 +38,7 @@ from ndscan.experiment import (
     ScanRequest,
     annotations,
     kernel,
-    make_fragment_host_scan_exp,
+    make_fragment_prepared_scan_exp,
     setattr_prepared_child_scan,
 )
 
@@ -136,7 +136,7 @@ class PreparedKernelOnlineFitFragment(ExpFragment):
         self.completed.push(self.outer.get())
 
 
-HostRuntimePreparedKernelOnlineFit = make_fragment_host_scan_exp(
+HostRuntimePreparedKernelOnlineFit = make_fragment_prepared_scan_exp(
     PreparedKernelOnlineFitFragment,
     lambda fragment: ScanRequest.explicit(
         [fragment.outer],

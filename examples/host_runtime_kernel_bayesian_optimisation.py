@@ -26,7 +26,7 @@ from ndscan.experiment import (
     FloatParam,
     ScanRequest,
     kernel,
-    make_fragment_host_scan_exp,
+    make_fragment_prepared_scan_exp,
 )
 
 try:
@@ -113,7 +113,7 @@ def make_request(
     )
 
 
-HostRuntimeKernelBayesianOptimisation = make_fragment_host_scan_exp(
+HostRuntimeKernelBayesianOptimisation = make_fragment_prepared_scan_exp(
     KernelBayesianOptimisationFragment,
     make_request,
 )

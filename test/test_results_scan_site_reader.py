@@ -9,18 +9,24 @@ import h5py
 from mock_environment import ExpFragmentCase
 
 from ndscan.experiment import (
+    BasePoint,
     compile_host_scan_schema,
     ExpFragment,
     ExplicitPointPolicy,
     FloatChannel,
     FloatParam,
     ParameterMapping,
+    prepare_child_scan,
     ScanRequest,
     ScanVariable,
-    HostScanSession,
-    run_subscan,
+    PreparedScan,
 )
 from ndscan.results.scan_site_reader import read_host_runtime_snapshot
+
+
+def _execute_and_inspect(scan):
+    scan.execute()
+    return scan.inspect()
 
 
 class PlainAddOneFragment(ExpFragment):
@@ -41,6 +47,23 @@ class MetadataPolicyFragment(ExpFragment):
         self.result.push(self.value.get())
 
 
+class MetadataRecordingPointPolicy(ExplicitPointPolicy):
+    def __init__(self, labels):
+        super().__init__(1, [(float(index),) for index in range(len(labels))])
+        self._labels = tuple(labels)
+
+    def next_batch(self, max_points: int):
+        batch = super().next_batch(max_points)
+        return [
+            BasePoint(
+                index=point.index,
+                axis_values=point.axis_values,
+                metadata={"decision_source": self._labels[point.index]},
+            )
+            for point in batch
+        ]
+
+
 class PhysicalDriveFragment(ExpFragment):
     def build_fragment(self):
         self.setattr_param("drive", FloatParam, "drive", 0.0)
@@ -54,18 +77,18 @@ class NestedChildScanParent(ExpFragment):
     def build_fragment(self):
         self.setattr_param("outer", FloatParam, "outer", 0.0)
         self.setattr_fragment("child", PlainAddOneFragment, detached=True)
+        self.child_scan = prepare_child_scan(self, self.child, name="child_scan")
         self.setattr_result("child_total", FloatChannel)
 
     def run_once(self):
-        child_result = run_subscan(
-            self,
-            self.child,
+        self.child_scan.configure(
             ScanRequest.explicit(
                 [self.child.value],
                 [[self.outer.get()], [self.outer.get() + 1.0]],
-            ),
-            name="child_scan",
+            )
         )
+        self.child_scan.execute()
+        child_result = self.child_scan.inspect()
         self.child_total.push(sum(child_result.values[self.child.result]))
 
 
@@ -82,36 +105,38 @@ class DeepNestedChild(ExpFragment):
     def build_fragment(self):
         self.setattr_param("outer", FloatParam, "outer", 0.0)
         self.setattr_fragment("grandchild", DeepNestedGrandchild, detached=True)
+        self.grandchild_scan = prepare_child_scan(
+            self, self.grandchild, name="grandchild_scan"
+        )
         self.setattr_result("child_total", FloatChannel)
 
     def run_once(self):
-        grandchild_result = run_subscan(
-            self,
-            self.grandchild,
+        self.grandchild_scan.configure(
             ScanRequest.explicit(
                 [self.grandchild.value],
                 [[self.outer.get()], [self.outer.get() + 1.0]],
-            ),
-            name="grandchild_scan",
+            )
         )
+        self.grandchild_scan.execute()
+        grandchild_result = self.grandchild_scan.inspect()
         self.child_total.push(sum(grandchild_result.values[self.grandchild.result]))
 
 
 class DeepNestedParent(ExpFragment):
     def build_fragment(self):
         self.setattr_fragment("child", DeepNestedChild, detached=True)
+        self.child_scan = prepare_child_scan(self, self.child, name="child_scan")
         self.setattr_result("root_total", FloatChannel)
 
     def run_once(self):
-        child_result = run_subscan(
-            self,
-            self.child,
+        self.child_scan.configure(
             ScanRequest.explicit(
                 [self.child.outer],
                 [[10.0], [20.0]],
-            ),
-            name="child_scan",
+            )
         )
+        self.child_scan.execute()
+        child_result = self.child_scan.inspect()
         self.root_total.push(sum(child_result.values[self.child.child_total]))
 
 
@@ -134,12 +159,12 @@ class ScanSiteReaderCase(ExpFragmentCase):
 
     def test_reads_root_site_from_hdf5_snapshot(self):
         fragment = self.create(PlainAddOneFragment)
-        session = HostScanSession(
+        session = PreparedScan(
             fragment,
             fragment,
             ScanRequest.cartesian([(fragment.value, [0.0, 1.0, 2.0])]),
         )
-        session.run()
+        session.execute()
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self._write_snapshot(fragment, tmp.name, preview_complete=False)
@@ -165,8 +190,8 @@ class ScanSiteReaderCase(ExpFragmentCase):
                 )
             ]
         )
-        session = HostScanSession(fragment, fragment, request)
-        session.run()
+        session = PreparedScan(fragment, fragment, request)
+        session.execute()
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self._write_snapshot(fragment, tmp.name)
@@ -219,8 +244,8 @@ class ScanSiteReaderCase(ExpFragmentCase):
                 ],
             },
         )
-        session = HostScanSession(fragment, fragment, request, overrides=overrides)
-        session.run()
+        session = PreparedScan(fragment, fragment, request, overrides=overrides)
+        session.execute()
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self._write_snapshot(fragment, tmp.name)
@@ -244,12 +269,12 @@ class ScanSiteReaderCase(ExpFragmentCase):
 
     def test_reads_nested_child_sites(self):
         parent = self.create(NestedChildScanParent)
-        session = HostScanSession(
+        session = PreparedScan(
             parent,
             parent,
             ScanRequest.explicit([parent.outer], [[10.0]]),
         )
-        session.run()
+        session.execute()
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self._write_snapshot(parent, tmp.name)
@@ -268,25 +293,10 @@ class ScanSiteReaderCase(ExpFragmentCase):
         fragment = self.create(MetadataPolicyFragment)
         request = ScanRequest(
             axes=(fragment.value,),
-            point_policy=ExplicitPointPolicy(1, [(0.0,), (1.0,), (2.0,)]),
+            point_policy=MetadataRecordingPointPolicy(["seed", "bo", "explore"]),
         )
-        session = HostScanSession(fragment, fragment, request)
-        original_next_batch = request.point_policy.next_batch
-
-        def next_batch(max_points):
-            batch = original_next_batch(max_points)
-            labels = ["seed", "bo", "explore"]
-            return [
-                type(point)(
-                    index=point.index,
-                    axis_values=point.axis_values,
-                    metadata={"decision_source": labels[point.index]},
-                )
-                for point in batch
-            ]
-
-        request.point_policy.next_batch = next_batch
-        session.run()
+        session = PreparedScan(fragment, fragment, request)
+        session.execute()
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self._write_snapshot(fragment, tmp.name)
@@ -300,12 +310,12 @@ class ScanSiteReaderCase(ExpFragmentCase):
 
     def test_exposes_child_site_segments_for_parent_points(self):
         parent = self.create(NestedChildScanParent)
-        session = HostScanSession(
+        session = PreparedScan(
             parent,
             parent,
             ScanRequest.explicit([parent.outer], [[10.0], [20.0]]),
         )
-        session.run()
+        session.execute()
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self._write_snapshot(parent, tmp.name)
@@ -331,8 +341,8 @@ class ScanSiteReaderCase(ExpFragmentCase):
 
     def test_plot_helper_builds_recursive_detail_panels(self):
         root = self.create(DeepNestedParent)
-        session = HostScanSession(root, root, ScanRequest.single())
-        session.run()
+        session = PreparedScan(root, root, ScanRequest.single())
+        session.execute()
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self._write_snapshot(root, tmp.name)

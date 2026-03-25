@@ -44,8 +44,8 @@ from ndscan.experiment.fragment import (
 )
 from ndscan.experiment.host_runtime import (
     ExecutionPolicy,
-    HostScanSession,
     ParameterMapping,
+    PreparedScan,
     ScanRequest,
     ScanVariable,
     prepare_child_scan,
@@ -62,6 +62,11 @@ from ndscan.experiment.result_channels import FloatChannel, IntChannel, OpaqueCh
 from ndscan.experiment.scan_generator import LinearGenerator, ListGenerator
 from ndscan.experiment.subscan import SubscanExpFragment, setattr_subscan
 from ndscan.utils import SCHEMA_REVISION, SCHEMA_REVISION_KEY
+
+
+def _execute_and_inspect(scan):
+    scan.execute()
+    return scan.inspect()
 
 
 class RunOneKernelCase(KernelEmulatorCase):
@@ -299,8 +304,8 @@ class KernelStreamingHostRuntimeCase(KernelEmulatorCase):
             execution_policy=ExecutionPolicy(max_points_per_batch=10),
         )
 
-        session = HostScanSession(fragment, fragment, request)
-        result = session.run()
+        session = PreparedScan(fragment, fragment, request)
+        result = _execute_and_inspect(session)
 
         self.assertEqual(result.runtime_stats.executor_entry_count, 1)
         self.assertEqual(result.runtime_stats.batch_count, 11)
@@ -331,8 +336,8 @@ class KernelStreamingHostRuntimeCase(KernelEmulatorCase):
             ]
         )
 
-        session = HostScanSession(fragment, fragment, request)
-        result = session.run()
+        session = PreparedScan(fragment, fragment, request)
+        result = _execute_and_inspect(session)
 
         self.assertEqual(result.runtime_stats.executor_entry_count, 1)
         self.assertEqual(result.runtime_stats.batch_count, 2)
@@ -363,8 +368,8 @@ class KernelStreamingHostRuntimeCase(KernelEmulatorCase):
             ]
         )
 
-        session = HostScanSession(fragment, fragment, request)
-        result = session.run()
+        session = PreparedScan(fragment, fragment, request)
+        result = _execute_and_inspect(session)
 
         self.assertEqual(result.runtime_stats.executor_entry_count, 1)
         self.assertEqual(result.runtime_stats.batch_count, 2)
@@ -384,8 +389,8 @@ class KernelStreamingHostRuntimeCase(KernelEmulatorCase):
             execution_policy=ExecutionPolicy(max_points_per_batch=2),
         )
 
-        session = HostScanSession(fragment, fragment, request)
-        result = session.run()
+        session = PreparedScan(fragment, fragment, request)
+        result = _execute_and_inspect(session)
 
         self.assertEqual(result.runtime_stats.executor_entry_count, 1)
         self.assertEqual(result.runtime_stats.batch_count, 2)
@@ -409,8 +414,8 @@ class KernelStreamingHostRuntimeCase(KernelEmulatorCase):
             execution_policy=ExecutionPolicy(max_points_per_batch=2),
         )
 
-        session = HostScanSession(fragment, fragment, request)
-        result = session.run()
+        session = PreparedScan(fragment, fragment, request)
+        result = _execute_and_inspect(session)
 
         self.assertEqual(result.runtime_stats.executor_entry_count, 1)
         self.assertEqual(result.runtime_stats.batch_count, 1)
@@ -439,16 +444,16 @@ class KernelStreamingHostRuntimeCase(KernelEmulatorCase):
             execution_policy=ExecutionPolicy(max_points_per_batch=2),
         )
 
-        session = HostScanSession(fragment, fragment, request)
-        result = session.run()
+        session = PreparedScan(fragment, fragment, request)
+        result = _execute_and_inspect(session)
 
         self.assertEqual(result.runtime_stats.executor_entry_count, 1)
         self.assertEqual(result.runtime_stats.batch_count, 1)
         self.assertEqual(result.values[fragment.result], [21.0, 24.0])
-        self.assertIsNotNone(fragment.child_scan.last_result())
-        self.assertEqual(fragment.child_scan.last_result().runtime_stats.batch_count, 2)
+        self.assertIsNotNone(fragment.child_scan.inspect())
+        self.assertEqual(fragment.child_scan.inspect().runtime_stats.batch_count, 2)
         self.assertEqual(
-            fragment.child_scan.last_result().runtime_stats.executor_entry_count, 1
+            fragment.child_scan.inspect().runtime_stats.executor_entry_count, 1
         )
 
         scheduler = fragment.get_device("scheduler")
@@ -474,18 +479,18 @@ class KernelStreamingHostRuntimeCase(KernelEmulatorCase):
             execution_policy=ExecutionPolicy(max_points_per_batch=2),
         )
 
-        session = HostScanSession(fragment, fragment, request)
-        result = session.run()
+        session = PreparedScan(fragment, fragment, request)
+        result = _execute_and_inspect(session)
 
         self.assertEqual(result.runtime_stats.executor_entry_count, 1)
         self.assertEqual(result.runtime_stats.batch_count, 1)
         self.assertEqual(result.values[fragment.result], [101.0, 104.0])
-        self.assertIsNotNone(fragment.child_scan.last_result())
-        self.assertEqual(fragment.child_scan.last_result().runtime_stats.batch_count, 2)
+        self.assertIsNotNone(fragment.child_scan.inspect())
+        self.assertEqual(fragment.child_scan.inspect().runtime_stats.batch_count, 2)
         self.assertEqual(
-            fragment.child_scan.last_result().runtime_stats.executor_entry_count, 1
+            fragment.child_scan.inspect().runtime_stats.executor_entry_count, 1
         )
-        self.assertIsNotNone(fragment.child.grandchild_scan.last_result())
+        self.assertIsNotNone(fragment.child.grandchild_scan.inspect())
 
         scheduler = fragment.get_device("scheduler")
         rid = getattr(scheduler, "rid", 0)
@@ -522,12 +527,12 @@ class KernelStreamingHostRuntimeCase(KernelEmulatorCase):
         fragment = self.create(KernelPreparedMappedChildParent, [])
         request = ScanRequest.explicit([fragment.outer], [[1.0]])
 
-        session = HostScanSession(fragment, fragment, request)
-        result = session.run()
+        session = PreparedScan(fragment, fragment, request)
+        result = _execute_and_inspect(session)
 
         self.assertEqual(result.runtime_stats.executor_entry_count, 1)
         self.assertEqual(result.values[fragment.result], [2.0])
-        child_result = fragment.child_scan.last_result()
+        child_result = fragment.child_scan.inspect()
         self.assertIsNotNone(child_result)
         assert child_result is not None
         self.assertEqual(child_result.runtime_stats.executor_entry_count, 1)
@@ -543,8 +548,8 @@ class KernelStreamingHostRuntimeCase(KernelEmulatorCase):
         fragment = self.create(PreparedKernelNestedVariationFragment, [])
         request = ScanRequest.explicit([fragment.outer], [[1.0]])
 
-        session = HostScanSession(fragment, fragment, request)
-        result = session.run()
+        session = PreparedScan(fragment, fragment, request)
+        result = _execute_and_inspect(session)
 
         self.assertEqual(result.values[fragment.completed], [1.0])
 
@@ -609,16 +614,14 @@ class KernelStreamingHostRuntimeCase(KernelEmulatorCase):
         fragment = self.create(PreparedKernelOnlineFitFragment, [])
         request = ScanRequest.explicit([fragment.outer], [[1.0]])
 
-        session = HostScanSession(fragment, fragment, request)
-        result = session.run()
+        session = PreparedScan(fragment, fragment, request)
+        result = _execute_and_inspect(session)
 
         self.assertEqual(result.values[fragment.completed], [1.0])
         self.assertAlmostEqual(result.values[fragment.fit_slope][0], 2.0, places=6)
         self.assertAlmostEqual(result.values[fragment.fit_intercept][0], 0.5, places=6)
 
-        child_result = fragment.line_scan.last_result()
-        self.assertIsNotNone(child_result)
-        assert child_result is not None
+        child_result = fragment.line_scan.inspect()
         self.assertEqual(child_result.runtime_stats.executor_entry_count, 1)
         self.assertEqual(child_result.runtime_stats.batch_count, 2)
         fit_slope, fit_intercept = fragment.line_scan.get_outputs()
@@ -649,21 +652,17 @@ class KernelStreamingHostRuntimeCase(KernelEmulatorCase):
         fragment = self.create(PreparedKernelNestedTtlFragment, [])
         request = ScanRequest.explicit([fragment.outer], [[1.0]])
 
-        session = HostScanSession(fragment, fragment, request)
-        result = session.run()
+        session = PreparedScan(fragment, fragment, request)
+        result = _execute_and_inspect(session)
 
         self.assertEqual(result.values[fragment.completed], [1.0])
         self.assertEqual(result.runtime_stats.executor_entry_count, 1)
 
-        child_result = fragment.scan_p.last_result()
-        self.assertIsNotNone(child_result)
-        assert child_result is not None
+        child_result = fragment.scan_p.inspect()
         self.assertEqual(child_result.runtime_stats.executor_entry_count, 1)
         self.assertEqual(child_result.values[fragment.scan_x.current_p], [1.0, 2.0, 3.0])
 
-        inner_result = fragment.scan_x.scan_x.last_result()
-        self.assertIsNotNone(inner_result)
-        assert inner_result is not None
+        inner_result = fragment.scan_x.scan_x.inspect()
         self.assertEqual(inner_result.runtime_stats.executor_entry_count, 1)
 
         scheduler = fragment.get_device("scheduler")
@@ -718,8 +717,8 @@ class KernelStreamingHostRuntimeCase(KernelEmulatorCase):
             max_batches=3,
         )
 
-        session = HostScanSession(fragment, fragment, request)
-        result = session.run()
+        session = PreparedScan(fragment, fragment, request)
+        result = _execute_and_inspect(session)
 
         self.assertEqual(result.runtime_stats.executor_entry_count, 1)
         self.assertEqual(result.runtime_stats.batch_count, 5)

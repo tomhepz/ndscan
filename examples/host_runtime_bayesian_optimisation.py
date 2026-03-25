@@ -31,8 +31,8 @@ from ndscan.experiment import (
     FloatChannel,
     FloatParam,
     ScanRequest,
-    make_fragment_host_scan_exp,
-    make_fragment_host_dashboard_scan_exp
+    make_fragment_prepared_scan_exp,
+    make_fragment_prepared_dashboard_scan_exp
 )
 
 try:
@@ -131,9 +131,9 @@ def _make_request(fragment: MultiWellSurfaceFragment) -> ScanRequest:
     )
 
 
-HostRuntimeBayesianOptimisation = make_fragment_host_scan_exp(
+HostRuntimeBayesianOptimisation = make_fragment_prepared_scan_exp(
     MultiWellSurfaceFragment,
     _make_request,
 )
 
-HostRuntimeBayesianOptimisationDashboard = make_fragment_host_dashboard_scan_exp(MultiWellSurfaceFragment)
+HostRuntimeBayesianOptimisationDashboard = make_fragment_prepared_dashboard_scan_exp(MultiWellSurfaceFragment)

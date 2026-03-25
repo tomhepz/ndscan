@@ -40,8 +40,8 @@ from ndscan.experiment import (
     ParameterMapping,
     ScanRequest,
     ScanVariable,
-    make_fragment_host_dashboard_scan_exp,
-    make_fragment_host_scan_exp,
+    make_fragment_prepared_dashboard_scan_exp,
+    make_fragment_prepared_scan_exp,
     make_fragment_scan_exp,
 )
 
@@ -129,7 +129,7 @@ laser_detuning_axis = ScanVariable(
     description="Optical detuning from the transition after the double-passed AOM",
 )
 
-HostRuntimeAomMappedLogicalAxes = make_fragment_host_scan_exp(
+HostRuntimeAomMappedLogicalAxes = make_fragment_prepared_scan_exp(
     AomHardwareFragment,
     lambda fragment: ScanRequest.linear(
         laser_detuning_axis,
@@ -191,7 +191,7 @@ class AomLogicalWrapperFragment(ExpFragment):
         self.hardware.run_once()
 
 
-HostRuntimeAomWrapperRebind = make_fragment_host_scan_exp(
+HostRuntimeAomWrapperRebind = make_fragment_prepared_scan_exp(
     AomLogicalWrapperFragment,
     lambda fragment: ScanRequest.linear(
         fragment.laser_detuning,
@@ -267,6 +267,6 @@ To reproduce the logical scan from the dashboard:
 
 Those expressions match the helper functions used by the code-first examples above.
 """
-HostRuntimeAomDashboardRebind = make_fragment_host_dashboard_scan_exp(
+HostRuntimeAomDashboardRebind = make_fragment_prepared_dashboard_scan_exp(
     AomHardwareFragment
 )

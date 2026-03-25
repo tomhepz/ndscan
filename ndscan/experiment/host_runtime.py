@@ -81,21 +81,21 @@ __all__ = [
     "ScanVariable",
     "ParameterMapping",
     "ScanRequest",
+    "PreparedScan",
     "ActiveScanContext",
     "current_scan_context",
     "make_child_scan_site",
     "BoundScanAxis",
     "BoundResultChannel",
     "PointObservation",
-    "HostScanRunResult",
-    "HostScanSession",
+    "ScanOutputs",
+    "ScanInspection",
     "PreparedChildScan",
+    "prepare_scan",
     "prepare_child_scan",
     "setattr_prepared_child_scan",
-    "run_host_scan",
-    "run_subscan",
-    "make_fragment_host_scan_exp",
-    "make_fragment_host_dashboard_scan_exp",
+    "make_fragment_prepared_scan_exp",
+    "make_fragment_prepared_dashboard_scan_exp",
 ]
 
 # Hack: Only export the internal base experiment classes for Sphinx/autodoc.
@@ -103,10 +103,53 @@ __all__ = [
 # ``from ndscan.experiment import *``, which fails because the base classes expect
 # adapter-provided build arguments.
 if "sphinx" in sys.modules:
-    __all__.append("HostScanExperiment")
-    __all__.append("HostDashboardScanExperiment")
+    __all__.append("PreparedScanExperiment")
+    __all__.append("PreparedDashboardScanExperiment")
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ScanOutputs:
+    """Stable named output surface for completed scans.
+
+    ``ScanOutputs`` is the intended portable result contract for ``v2``-style scan
+    execution. It deliberately contains only fixed summary outputs, not the richer
+    host-only inspection data such as raw point series or annotations.
+    """
+
+    values: OrderedDict[str, Any]
+
+    @classmethod
+    def empty(cls) -> "ScanOutputs":
+        return cls(OrderedDict())
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, Any]) -> "ScanOutputs":
+        return cls(OrderedDict(mapping.items()))
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return tuple(self.values.keys())
+
+    def __len__(self) -> int:
+        return len(self.values)
+
+    def __contains__(self, name: str) -> bool:
+        return name in self.values
+
+    def __getitem__(self, name: str) -> Any:
+        return self.values[name]
+
+    def get(self, name: str, default: Any = None) -> Any:
+        return self.values.get(name, default)
+
+    def as_tuple(self, *names: str) -> tuple[Any, ...]:
+        selected = self.names if not names else names
+        return tuple(self.values[name] for name in selected)
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self.values)
 
 
 @dataclass(frozen=True)
@@ -381,7 +424,7 @@ class HostArgumentInterface(HasEnvironment):
         elif default_request_spec is None:
             raise ValueError(
                 "No host_scan submission was provided for this dashboard-driven "
-                "host scan experiment"
+                "prepared dashboard scan experiment"
             )
         else:
             request, compiled_overrides = _resolve_host_scan_request_spec(
@@ -464,7 +507,7 @@ def make_child_scan_site(
     recursive shape explicit:
 
     - the parent point currently being executed determines where the child site lives,
-    - the child scan still runs through the same ``HostScanSession`` code path as a
+    - the child scan still runs through the same ``PreparedScan`` code path as a
       root scan,
     - the resulting child site records both its own path and its parent-site metadata.
 
@@ -892,12 +935,14 @@ class _ResidentKernelBatchState:
 
 
 @dataclass
-class HostScanRunResult:
-    """In-memory copy of the data produced by a host-runtime scan.
+class ScanInspection:
+    """Host-only inspection artifact for a completed host-runtime scan.
 
     Keeping a small in-memory mirror of the flat site is useful for tests and for the
     first analysis hooks. The canonical on-disk/broadcast representation remains the
-    scan-site datasets written by ``ScanSiteDatasetWriter``.
+    scan-site datasets written by ``ScanSiteDatasetWriter``. The stable public result
+    contract is ``ScanOutputs`` returned by ``PreparedScan.execute()`` and
+    ``PreparedChildScan.execute()``.
     """
 
     coordinates: OrderedDict[tuple[str, str], list[Any]]
@@ -918,7 +963,7 @@ class HostScanRunResult:
         channels: Sequence[BoundResultChannel],
         site_prefix: str,
         initial_annotations: Sequence[dict[str, Any]] = (),
-    ) -> "HostScanRunResult":
+    ) -> "ScanInspection":
         return cls(
             coordinates=OrderedDict(
                 (axis.identity, []) for axis in axes
@@ -957,6 +1002,45 @@ class HostScanRunResult:
         """Record a completed batch of observations into the in-memory mirror."""
         for observation in observations:
             self.record(observation, axes, parameters, channels)
+
+    def outputs(self) -> ScanOutputs:
+        """Return the stable summary outputs for this completed scan.
+
+        Today this is just the final analysis-result mapping in insertion order.
+        """
+
+        return ScanOutputs.from_mapping(self.analysis_results)
+
+
+def _execute_scan_request_inspection(
+    owner: HasEnvironment,
+    fragment: ExpFragment,
+    request: ScanRequest,
+    *,
+    overrides: dict[str, list[tuple[str, ParamStore]]] | None,
+    run_context: RunContext | None,
+    max_rtio_underflow_retries: int,
+    max_transitory_error_retries: int,
+) -> ScanInspection:
+    if _fragment_tree_needs_param_initialisation(fragment):
+        fragment.init_params(overrides={} if overrides is None else overrides)
+    axis_bindings = _install_scan_axis_stores(
+        [axis for axis in request.axes if isinstance(axis, ParamHandle)]
+    )
+    try:
+        builder = HostScanProgramBuilder(owner)
+        program = builder.build(fragment, request)
+        runner = HostScanProgramRunner(
+            owner,
+            program,
+            run_context=run_context,
+            max_rtio_underflow_retries=max_rtio_underflow_retries,
+            max_transitory_error_retries=max_transitory_error_retries,
+        )
+        return runner.run()
+    finally:
+        for binding in axis_bindings:
+            binding.restore()
 
 
 class _HostPointBatchSource:
@@ -1035,13 +1119,13 @@ class _HostAnalysisAdapter:
     def observe_batch(
         self,
         completed_batch: Sequence[PointObservation],
-        result: HostScanRunResult,
+        result: ScanInspection,
         site_writer: ScanSiteDatasetWriter,
     ):
         return self._engine.observe_batch(completed_batch, result, site_writer)
 
     def execute_final(
-        self, result: HostScanRunResult, site_writer: ScanSiteDatasetWriter
+        self, result: ScanInspection, site_writer: ScanSiteDatasetWriter
     ) -> None:
         self._engine.execute_final(result, site_writer)
 
@@ -1129,7 +1213,7 @@ class _HostObservationTransport:
 
 def _make_batch_feedback(
     observations: Sequence[PointObservation],
-    result: HostScanRunResult,
+    result: ScanInspection,
     axes: Sequence[BoundScanAxis],
     parameters: Sequence[BoundScanParameter],
     channels: Sequence[BoundResultChannel],
@@ -1153,7 +1237,7 @@ def _make_batch_feedback(
 
 def _publish_completed_batch(
     completed_batch: Sequence[PointObservation],
-    result: HostScanRunResult,
+    result: ScanInspection,
     *,
     axes: Sequence[BoundScanAxis],
     parameters: Sequence[BoundScanParameter],
@@ -1454,7 +1538,7 @@ class KernelStreamingExecutor:
             max_transitory_error_retries=max_transitory_error_retries,
         )
 
-        self._result: HostScanRunResult | None = None
+        self._result: ScanInspection | None = None
         self._next_batch = None
         self._finish_completed_batch = None
         self._should_pause_after_batch = None
@@ -1470,7 +1554,7 @@ class KernelStreamingExecutor:
 
     def run_to_completion(
         self,
-        result: HostScanRunResult,
+        result: ScanInspection,
         *,
         next_batch,
         finish_completed_batch,
@@ -2281,7 +2365,7 @@ class HostScanProgramRunner:
             )
         self._scheduler = owner.get_device("scheduler")
 
-    def run(self) -> HostScanRunResult:
+    def run(self) -> ScanInspection:
         run_context = self._resolved_run_context()
         preview = run_context.preview
         self._program.transport.register_preview(preview)
@@ -2302,7 +2386,7 @@ class HostScanProgramRunner:
                         start_unix_time=time.time(),
                     )
 
-                result = HostScanRunResult.empty(
+                result = ScanInspection.empty(
                     self._program.axes,
                     self._program.parameters,
                     self._program.channels,
@@ -2430,7 +2514,7 @@ class HostScanProgramRunner:
     def _finish_completed_batch(
         self,
         completed_batch: Sequence[PointObservation],
-        result: HostScanRunResult,
+        result: ScanInspection,
     ) -> None:
         """Publish one completed batch at the runtime boundary.
 
@@ -2489,69 +2573,181 @@ class HostScanProgramRunner:
 
         self._scheduler.pause()
 
+class _PreparedScanHandleBase:
+    """Shared host-side prepared-scan behavior."""
 
-class HostScanSession:
-    """Prepared host-only scan execution.
+    def __init__(
+        self,
+        owner: HasEnvironment,
+        fragment: ExpFragment,
+        *,
+        expose_outputs: Sequence[str] | None = None,
+    ):
+        self._owner = owner
+        self._fragment = fragment
+        self._request: ScanRequest | None = None
+        self._overrides: dict[str, list[tuple[str, ParamStore]]] | None = None
+        self._last_result: ScanInspection | None = None
+        self._last_request: ScanRequest | None = None
+        self._exposed_output_channel_specs = _resolve_declared_scan_output_channels(
+            fragment,
+            expose_outputs=expose_outputs,
+        )
 
-    This is the main entry point for direct code use and for thin ``EnvExperiment``
-    adapters.
+    @host_only
+    def configure(
+        self,
+        request: ScanRequest,
+        *,
+        overrides: dict[str, list[tuple[str, ParamStore]]] | None = None,
+    ) -> None:
+        self._request = request
+        self._overrides = overrides
+        self._after_configure()
+
+    @host_only
+    def _after_configure(self) -> None:
+        pass
+
+    @host_only
+    def _prepare_execution_request(self, request: ScanRequest) -> ScanRequest:
+        return request
+
+    @host_only
+    def _execute_inspection_request(self, request: ScanRequest) -> ScanInspection:
+        raise NotImplementedError
+
+    @host_only
+    def _not_configured_message(self) -> str:
+        return "Prepared scan has not been configured yet"
+
+    @host_only
+    def _not_executed_message(self) -> str:
+        return "Prepared scan has not been executed yet"
+
+    @host_only
+    def execute(self) -> ScanOutputs:
+        """Run the prepared scan and return its stable summary outputs."""
+
+        if self._request is None:
+            raise RuntimeError(self._not_configured_message())
+        self._last_request = self._prepare_execution_request(
+            _clone_scan_request_for_execution(self._request)
+        )
+        self._last_result = self._execute_inspection_request(self._last_request)
+        return self.outputs()
+
+    @host_only
+    def inspect(self) -> ScanInspection:
+        """Return the most recent host-only inspection artifact."""
+
+        if self._last_result is None:
+            raise RuntimeError(self._not_executed_message())
+        return self._last_result
+
+    @host_only
+    def outputs(self) -> ScanOutputs:
+        """Return the most recent stable summary outputs."""
+
+        return _scan_outputs_from_inspection(
+            self.inspect(),
+            explicit_output_channels=self._exposed_output_channel_specs,
+        )
+
+    @host_only
+    def get_outputs(self) -> tuple[Any, ...]:
+        """Return declared fixed outputs as a positional tuple.
+
+        This is the host-side counterpart to the compiler-facing prepared-child
+        ``get_outputs()`` surface. It keeps root and child prepared scans aligned on
+        the same declared tuple-output concept.
+        """
+
+        if not self._exposed_output_channel_specs:
+            raise AttributeError(
+                f"{type(self).__name__} does not declare fixed tuple outputs"
+            )
+        return self.outputs().as_tuple()
+
+
+class PreparedScan(_PreparedScanHandleBase):
+    """Prepared root scan execution.
+
+    This is the root-scan counterpart to ``PreparedChildScan``. It exposes the same
+    host-side contract:
+
+    - ``configure(request)``
+    - ``execute()``
+    - ``outputs()``
+    - ``get_outputs()``
+    - ``inspect()``
+
+    while selecting the host or resident-kernel executor internally as appropriate for
+    the configured request/fragment pair.
     """
 
     def __init__(
         self,
         owner: HasEnvironment,
         fragment: ExpFragment,
-        request: ScanRequest,
+        request: ScanRequest | None = None,
         *,
         overrides: dict[str, list[tuple[str, ParamStore]]] | None = None,
         run_context: RunContext | None = None,
         max_rtio_underflow_retries: int = 3,
         max_transitory_error_retries: int = 10,
+        expose_outputs: Sequence[str] | None = None,
     ):
-        if _fragment_tree_needs_param_initialisation(fragment):
-            fragment.init_params(overrides={} if overrides is None else overrides)
-        self._axis_bindings = _install_scan_axis_stores(
-            [axis for axis in request.axes if isinstance(axis, ParamHandle)]
-        )
-        builder = HostScanProgramBuilder(owner)
-        self.program = builder.build(fragment, request)
-        self._runner = HostScanProgramRunner(
+        super().__init__(
             owner,
-            self.program,
-            run_context=run_context,
-            max_rtio_underflow_retries=max_rtio_underflow_retries,
-            max_transitory_error_retries=max_transitory_error_retries,
+            fragment,
+            expose_outputs=expose_outputs,
         )
+        self._run_context = run_context
+        self._max_rtio_underflow_retries = max_rtio_underflow_retries
+        self._max_transitory_error_retries = max_transitory_error_retries
+        if request is not None:
+            self.configure(request, overrides=overrides)
 
-    def run(self) -> HostScanRunResult:
-        try:
-            return self._runner.run()
-        finally:
-            for binding in self._axis_bindings:
-                binding.restore()
-
-
-def run_host_scan(
+    @host_only
+    def _execute_inspection_request(self, request: ScanRequest) -> ScanInspection:
+        return _execute_scan_request_inspection(
+            self._owner,
+            self._fragment,
+            request,
+            overrides=self._overrides,
+            run_context=self._run_context,
+            max_rtio_underflow_retries=self._max_rtio_underflow_retries,
+            max_transitory_error_retries=self._max_transitory_error_retries,
+        )
+def prepare_scan(
     owner: HasEnvironment,
     fragment: ExpFragment,
-    request: ScanRequest,
     *,
+    request: ScanRequest | None = None,
     overrides: dict[str, list[tuple[str, ParamStore]]] | None = None,
+    run_context: RunContext | None = None,
     max_rtio_underflow_retries: int = 3,
     max_transitory_error_retries: int = 10,
-) -> HostScanRunResult:
-    """Convenience helper to prepare and run a host-only scan in one call."""
+    expose_outputs: Sequence[str] | None = None,
+) -> PreparedScan:
+    """Return a prepared root scan handle.
 
-    session = HostScanSession(
+    This is the root-scan analogue of ``prepare_child_scan(...)``. The handle can be
+    configured and executed later using the same host-side contract as prepared child
+    scans.
+    """
+
+    return PreparedScan(
         owner,
         fragment,
         request,
         overrides=overrides,
+        run_context=run_context,
         max_rtio_underflow_retries=max_rtio_underflow_retries,
         max_transitory_error_retries=max_transitory_error_retries,
+        expose_outputs=expose_outputs,
     )
-    return session.run()
-
 
 def _prepare_child_scan_request(
     request: ScanRequest,
@@ -2595,6 +2791,7 @@ def _clone_scan_request_for_execution(request: ScanRequest) -> ScanRequest:
         axes=request.axes,
         point_policy=deepcopy(request.point_policy),
         parameter_mappings=request.parameter_mappings,
+        fixed_pseudoparams=request.fixed_pseudoparams,
         site=request.site,
         metadata=deepcopy(request.metadata),
         execution_policy=request.execution_policy,
@@ -2662,23 +2859,21 @@ def _prepared_child_fixed_output_coercer(channel: ResultChannel):
     )
 
 
-def _resolve_prepared_child_output_channels(
+def _resolve_declared_scan_output_channels(
     fragment: ExpFragment,
     *,
-    expose_analysis_results: bool,
     expose_outputs: Sequence[str] | None,
-) -> tuple[dict[str, ResultChannel], dict[str, ResultChannel]]:
-    """Resolve named fixed outputs for a prepared child scan.
+) -> dict[str, ResultChannel]:
+    """Resolve named fixed outputs for a prepared scan handle.
 
-    Returns ``(analysis_result_accessors, tuple_output_accessors)``.
+    ``None`` means "no declared fixed outputs"; the host-side ``outputs()`` surface
+    then falls back to all final analysis results from the inspection artifact.
     """
 
     all_channels = _collect_default_analysis_result_channels(fragment)
 
     if expose_outputs is None:
-        if expose_analysis_results:
-            return all_channels, {}
-        return {}, {}
+        return {}
 
     if not expose_outputs:
         raise ValueError("expose_outputs must contain at least one output name")
@@ -2700,66 +2895,20 @@ def _resolve_prepared_child_output_channels(
             ) from exc
         _prepared_child_fixed_output_rpc_type(channel)
         selected[result_name] = channel
-    return selected, selected
+    return selected
 
 
-class _PreparedChildAnalysisResultAccessorBase:
-    """Compiler-friendly fixed-output accessor for prepared child scans."""
-
-    def __init__(self, owner: "PreparedChildScan", result_name: str):
-        self._owner = owner
-        self._result_name = result_name
-
-    def __repr__(self) -> str:
-        return (
-            f"<{type(self).__name__}@{hex(id(self))}: "
-            f"{self._owner._name}.{self._result_name}>"
+def _scan_outputs_from_inspection(
+    inspection: ScanInspection,
+    *,
+    explicit_output_channels: Mapping[str, ResultChannel],
+) -> ScanOutputs:
+    if explicit_output_channels:
+        names = tuple(explicit_output_channels.keys())
+        return ScanOutputs(
+            OrderedDict((name, inspection.analysis_results[name]) for name in names)
         )
-
-
-class _PreparedChildFloatAnalysisResultAccessor(_PreparedChildAnalysisResultAccessorBase):
-    @rpc
-    def _get_value(self) -> float:
-        return float(self._owner._get_exposed_analysis_result(self._result_name))
-
-    @portable
-    def get(self) -> float:
-        return self._get_value()
-
-
-class _PreparedChildIntAnalysisResultAccessor(_PreparedChildAnalysisResultAccessorBase):
-    @rpc
-    def _get_value(self) -> np.int32:
-        return np.int32(self._owner._get_exposed_analysis_result(self._result_name))
-
-    @portable
-    def get(self) -> np.int32:
-        return self._get_value()
-
-
-def _make_prepared_child_analysis_result_accessor(
-    owner: "PreparedChildScan",
-    result_name: str,
-    channel: ResultChannel,
-):
-    """Return a typed fixed-output accessor for one prepared child analysis result."""
-
-    if isinstance(channel, FloatChannel):
-        accessor_class = type(
-            f"_PreparedChildFloatAnalysisResult_{id(owner)}_{result_name}",
-            (_PreparedChildFloatAnalysisResultAccessor,),
-            {},
-        )
-        return accessor_class(owner, result_name)
-    if isinstance(channel, IntChannel):
-        accessor_class = type(
-            f"_PreparedChildIntAnalysisResult_{id(owner)}_{result_name}",
-            (_PreparedChildIntAnalysisResultAccessor,),
-            {},
-        )
-        return accessor_class(owner, result_name)
-    _prepared_child_fixed_output_rpc_type(channel)
-    raise AssertionError("unreachable")
+    return inspection.outputs()
 
 
 def _make_prepared_child_get_outputs_methods(
@@ -2781,7 +2930,7 @@ def _make_prepared_child_get_outputs_methods(
 
     def _get_outputs_value(self):
         return tuple(
-            coercer(self._get_exposed_analysis_result(result_name))
+            coercer(self._get_exposed_output_value(result_name))
             for (result_name, _), coercer in zip(output_items, coercers, strict=True)
         )
 
@@ -2800,7 +2949,7 @@ def _make_prepared_child_get_outputs_methods(
     }
 
 
-class PreparedChildScan:
+class PreparedChildScan(_PreparedScanHandleBase):
     """Prepared child-scan handle for the newer host runtime.
 
     This fixes the structural part of a nested scan up front:
@@ -2813,11 +2962,10 @@ class PreparedChildScan:
 
     Two execution entry points exist:
 
-    - ``run()`` keeps the rich host-only return value.
-    - ``acquire()`` is a compiler-friendly execution entry that returns ``None`` and
-      can therefore be called from kernels.
-    - ``prime()`` explicitly primes the detached child subtree from host code before an
-      outer kernel is first compiled.
+    - ``execute()`` / ``inspect()`` for ordinary host-side use
+    - ``acquire()`` as a compiler-friendly entry point returning ``None``
+    - ``prime()`` to explicitly prime the detached child subtree before an outer
+      kernel is first compiled
 
     `acquire()` now supports two execution shapes:
 
@@ -2840,54 +2988,30 @@ class PreparedChildScan:
         extra_metadata: Mapping[str, Any] | None = None,
         max_rtio_underflow_retries: int = 3,
         max_transitory_error_retries: int = 10,
-        expose_analysis_results: bool = False,
         expose_outputs: Sequence[str] | None = None,
     ):
-        self._owner = owner
-        self._fragment = fragment
         self._name = name
         self._segmented = segmented
         self._extra_metadata = {} if extra_metadata is None else dict(extra_metadata)
         self._max_rtio_underflow_retries = max_rtio_underflow_retries
         self._max_transitory_error_retries = max_transitory_error_retries
-        self._expose_analysis_results = expose_analysis_results
-        self._expose_outputs = None if expose_outputs is None else tuple(expose_outputs)
-
-        self._request: ScanRequest | None = None
-        self._overrides: dict[str, list[tuple[str, ParamStore]]] | None = None
-        self._last_result: HostScanRunResult | None = None
+        super().__init__(
+            owner,
+            fragment,
+            expose_outputs=expose_outputs,
+        )
         self._kernel_runner = None
         self._kernel_runner_ready = False
         self._kernel_support_error: str | None = None
         self._kernel_axis_bindings: list[_ScanAxisBinding] = []
         self._kernel_program: HostScanProgram | None = None
-        self._kernel_result: HostScanRunResult | None = None
+        self._kernel_result: ScanInspection | None = None
         self._kernel_run_context: RunContext | None = None
         self._kernel_preview = None
         self._kernel_collector: _PointResultCollector | None = None
         self._kernel_batch_state: _ResidentKernelBatchState | None = None
         self._kernel_parent_provider: _KernelParentScanContextProvider | None = None
         self._kernel_host_setup_active = False
-        (
-            self._exposed_analysis_channel_specs,
-            self._exposed_output_channel_specs,
-        ) = _resolve_prepared_child_output_channels(
-            self._fragment,
-            expose_analysis_results=expose_analysis_results,
-            expose_outputs=expose_outputs,
-        )
-
-        analysis_results_class = type(
-            f"_PreparedChildAnalysisResults_{id(self)}",
-            (),
-            {},
-        )
-        self.analysis_results = analysis_results_class()
-        for result_name, channel in self._exposed_analysis_channel_specs.items():
-            accessor = _make_prepared_child_analysis_result_accessor(
-                self, result_name, channel
-            )
-            setattr(self.analysis_results, result_name, accessor)
 
         if _fragment_uses_kernel_execution(fragment):
             runner_class = type(
@@ -2900,15 +3024,37 @@ class PreparedChildScan:
             self.acquire = self._acquire_host
 
     @host_only
-    def configure(
-        self,
-        request: ScanRequest,
-        *,
-        overrides: dict[str, list[tuple[str, ParamStore]]] | None = None,
-    ) -> None:
-        self._request = request
-        self._overrides = overrides
+    def _after_configure(self) -> None:
         self._refresh_kernel_acquire_runner()
+
+    @host_only
+    def _prepare_execution_request(self, request: ScanRequest) -> ScanRequest:
+        return _prepare_child_scan_request(
+            request,
+            name=self._name,
+            segmented=self._segmented,
+            extra_metadata=self._extra_metadata,
+        )
+
+    @host_only
+    def _execute_inspection_request(self, request: ScanRequest) -> ScanInspection:
+        return _execute_scan_request_inspection(
+            self._owner,
+            self._fragment,
+            request,
+            overrides=self._overrides,
+            run_context=None,
+            max_rtio_underflow_retries=self._max_rtio_underflow_retries,
+            max_transitory_error_retries=self._max_transitory_error_retries,
+        )
+
+    @host_only
+    def _not_configured_message(self) -> str:
+        return f"Prepared child scan '{self._name}' has not been configured yet"
+
+    @host_only
+    def _not_executed_message(self) -> str:
+        return f"Prepared child scan '{self._name}' has not been executed yet"
 
     @host_only
     def prime(self) -> None:
@@ -2922,28 +3068,6 @@ class PreparedChildScan:
         """
 
         self._fragment.host_setup()
-
-    @host_only
-    def run(self) -> HostScanRunResult:
-        if self._request is None:
-            raise RuntimeError(
-                f"Prepared child scan '{self._name}' has not been configured yet"
-            )
-
-        self._last_result = run_host_scan(
-            self._owner,
-            self._fragment,
-            _prepare_child_scan_request(
-                _clone_scan_request_for_execution(self._request),
-                name=self._name,
-                segmented=self._segmented,
-                extra_metadata=self._extra_metadata,
-            ),
-            overrides=self._overrides,
-            max_rtio_underflow_retries=self._max_rtio_underflow_retries,
-            max_transitory_error_retries=self._max_transitory_error_retries,
-        )
-        return self._last_result
 
     @portable
     def acquire(self) -> None:
@@ -2969,7 +3093,7 @@ class PreparedChildScan:
                 "PreparedChildScan.acquire() should use the dedicated prepared kernel "
                 "backend for child fragments using @kernel"
             )
-        self.run()
+        self.execute()
 
     @portable
     def _acquire_kernel(self) -> None:
@@ -3093,7 +3217,7 @@ class PreparedChildScan:
                     start_unix_time=time.time(),
                 )
 
-            self._kernel_result = HostScanRunResult.empty(
+            self._kernel_result = ScanInspection.empty(
                 self._kernel_program.axes,
                 self._kernel_program.parameters,
                 self._kernel_program.channels,
@@ -3261,29 +3385,23 @@ class PreparedChildScan:
         return KernelStreamingExecutor._STATUS_RESTART_HOST_CONTEXT
 
     @host_only
-    def last_result(self) -> HostScanRunResult | None:
-        """Return the most recent host-side result object, if any."""
-
-        return self._last_result
-
-    @host_only
-    def _get_exposed_analysis_result(self, result_name: str) -> Any:
+    def _get_exposed_output_value(self, result_name: str) -> Any:
         """Return one declared fixed output from the most recent child-scan run."""
 
-        if result_name not in self._exposed_analysis_channel_specs:
+        if result_name not in self._exposed_output_channel_specs:
             raise AttributeError(
-                f"Prepared child scan '{self._name}' does not expose analysis result "
+                f"Prepared child scan '{self._name}' does not expose output "
                 f"{result_name!r}"
             )
         if self._last_result is None:
             raise RuntimeError(
-                f"Prepared child scan '{self._name}' has not been run yet"
+                f"Prepared child scan '{self._name}' has not been executed yet"
             )
         try:
             return self._last_result.analysis_results[result_name]
         except KeyError as exc:
             raise RuntimeError(
-                f"Prepared child scan '{self._name}' did not produce analysis result "
+                f"Prepared child scan '{self._name}' did not produce output "
                 f"{result_name!r} in its most recent run"
             ) from exc
 
@@ -3297,7 +3415,6 @@ def prepare_child_scan(
     extra_metadata: Mapping[str, Any] | None = None,
     max_rtio_underflow_retries: int = 3,
     max_transitory_error_retries: int = 10,
-    expose_analysis_results: bool = False,
     expose_outputs: Sequence[str] | None = None,
 ) -> PreparedChildScan:
     """Return a prepared child-scan handle with fixed structural scan identity.
@@ -3309,11 +3426,10 @@ def prepare_child_scan(
 
     _auto_detach_prepared_child_fragment(owner, fragment)
     prepared_class_namespace = _make_prepared_child_get_outputs_methods(
-        _resolve_prepared_child_output_channels(
+        _resolve_declared_scan_output_channels(
             fragment,
-            expose_analysis_results=expose_analysis_results,
             expose_outputs=expose_outputs,
-        )[1]
+        )
     )
     prepared_class = type(
         f"_PreparedChildScan_{id(owner)}_{name.replace('/', '_')}",
@@ -3328,7 +3444,6 @@ def prepare_child_scan(
         extra_metadata=extra_metadata,
         max_rtio_underflow_retries=max_rtio_underflow_retries,
         max_transitory_error_retries=max_transitory_error_retries,
-        expose_analysis_results=expose_analysis_results,
         expose_outputs=expose_outputs,
     )
 
@@ -3343,7 +3458,6 @@ def setattr_prepared_child_scan(
     extra_metadata: Mapping[str, Any] | None = None,
     max_rtio_underflow_retries: int = 3,
     max_transitory_error_retries: int = 10,
-    expose_analysis_results: bool = False,
     expose_outputs: Sequence[str] | None = None,
     **kwargs,
 ) -> PreparedChildScan:
@@ -3369,51 +3483,8 @@ def setattr_prepared_child_scan(
         extra_metadata=extra_metadata,
         max_rtio_underflow_retries=max_rtio_underflow_retries,
         max_transitory_error_retries=max_transitory_error_retries,
-        expose_analysis_results=expose_analysis_results,
         expose_outputs=expose_outputs,
     )
-
-
-def run_subscan(
-    owner: HasEnvironment,
-    fragment: ExpFragment,
-    request: ScanRequest,
-    *,
-    name: str,
-    segmented: bool = True,
-    extra_metadata: Mapping[str, Any] | None = None,
-    overrides: dict[str, list[tuple[str, ParamStore]]] | None = None,
-    max_rtio_underflow_retries: int = 3,
-    max_transitory_error_retries: int = 10,
-) -> HostScanRunResult:
-    """Run ``request`` as a child scan nested under the current parent point.
-
-    This is deliberately only a convenience wrapper. The nested scan still runs
-    through the same ``HostScanSession`` and ``HostScanProgramRunner`` path as a root
-    scan; the helper merely derives the structural child scan site and reuses the
-    caller's request unchanged otherwise.
-
-    ``request.site`` remains meaningful for site-local options such as:
-
-    - ``dataset_prefix`` overrides,
-    - request-specific site metadata.
-
-    Any ``extra_metadata`` passed here is merged on top of the request site's own
-    extra metadata before the child site is created.
-    """
-    prepared = prepare_child_scan(
-        owner,
-        fragment,
-        name=name,
-        segmented=segmented,
-        extra_metadata=extra_metadata,
-        max_rtio_underflow_retries=max_rtio_underflow_retries,
-        max_transitory_error_retries=max_transitory_error_retries,
-    )
-    prepared.configure(request, overrides=overrides)
-    return prepared.run()
-
-
 def _fragment_tree_needs_param_initialisation(fragment: ExpFragment) -> bool:
     """Return whether any free parameter handle in the fragment tree is unbound.
 
@@ -3558,12 +3629,11 @@ def _apply_resolved_parameter_values(
         parameter.handle._store.set_value(point.parameter_values[parameter.key])
 
 
-class HostScanExperiment(EnvExperiment):
-    """Thin ``EnvExperiment`` adapter for the new host-only runtime.
+class PreparedScanExperiment(EnvExperiment):
+    """Thin ``EnvExperiment`` adapter over a root ``PreparedScan``.
 
-    This is the code-first path. The experiment code supplies the request directly and
-    the result behaves like a normal ARTIQ experiment rather than a dashboard-driven
-    ndscan submission target.
+    This is the code-first convenience path. The experiment code supplies the request
+    directly, while the adapter just constructs and executes a root ``PreparedScan``.
     """
 
     def build(
@@ -3587,25 +3657,25 @@ class HostScanExperiment(EnvExperiment):
             self.fragment,
             self._request_spec,
         )
-        self._session = HostScanSession(
+        self._session = PreparedScan(
             self,
             self.fragment,
-            request,
+            request=request,
             overrides=overrides,
             max_rtio_underflow_retries=self._max_rtio_underflow_retries,
             max_transitory_error_retries=self._max_transitory_error_retries,
         )
 
     def run(self) -> None:
-        self._session.run()
+        self._session.execute()
 
 
-class HostDashboardScanExperiment(EnvExperiment):
-    """Dashboard-driven host-runtime adapter.
+class PreparedDashboardScanExperiment(EnvExperiment):
+    """Dashboard-driven ``PreparedScan`` adapter.
 
     This path publishes ndscan-style submission metadata via ``PARAMS_ARG_KEY`` and
     expects the submitted ``host_scan`` payload to be compiled into a ``ScanRequest``
-    during ``prepare()``.
+    during ``prepare()`` before constructing a root ``PreparedScan``.
     """
 
     argument_ui = "ndscan"
@@ -3632,31 +3702,31 @@ class HostDashboardScanExperiment(EnvExperiment):
             self.fragment,
             self._default_request_spec,
         )
-        self._session = HostScanSession(
+        self._session = PreparedScan(
             self,
             self.fragment,
-            request,
+            request=request,
             overrides=overrides,
             max_rtio_underflow_retries=self._max_rtio_underflow_retries,
             max_transitory_error_retries=self._max_transitory_error_retries,
         )
 
     def run(self) -> None:
-        self._session.run()
+        self._session.execute()
 
 
-def make_fragment_host_scan_exp(
+def make_fragment_prepared_scan_exp(
     fragment_class: type[ExpFragment],
     request_factory,
     *args,
     max_rtio_underflow_retries: int = 3,
     max_transitory_error_retries: int = 10,
-) -> type[HostScanExperiment]:
-    """Create a runnable ``EnvExperiment`` for the new host-only runtime.
+) -> type[PreparedScanExperiment]:
+    """Create a runnable ``EnvExperiment`` convenience wrapper over ``PreparedScan``.
 
     Example::
 
-        MyHostScan = make_fragment_host_scan_exp(
+        MyPreparedScanExp = make_fragment_prepared_scan_exp(
             MyFragment,
             lambda fragment: ScanRequest.zipped(
                 [
@@ -3666,11 +3736,15 @@ def make_fragment_host_scan_exp(
             ),
         )
 
+    This helper only removes ARTIQ ``EnvExperiment`` boilerplate. It still resolves the
+    request factory, constructs a root ``PreparedScan`` in ``prepare()``, and calls
+    ``execute()`` in ``run()``.
+
     The request factory is intentionally passed the fragment instance so callers can
-    build requests directly from fragment handles.
+    build ``ScanRequest`` objects directly from fragment handles.
     """
 
-    class FragmentHostScanShim(HostScanExperiment):
+    class FragmentPreparedScanShim(PreparedScanExperiment):
         def build(self):
             super().build(
                 lambda: fragment_class(self, [], *args),
@@ -3681,33 +3755,37 @@ def make_fragment_host_scan_exp(
 
     # Present the generated experiment as a normal top-level class to ARTIQ's
     # discovery/examine machinery rather than as a nested local shim.
-    FragmentHostScanShim.__name__ = fragment_class.__name__
-    FragmentHostScanShim.__qualname__ = fragment_class.__name__
-    FragmentHostScanShim.__module__ = fragment_class.__module__
-    FragmentHostScanShim.__doc__ = fragment_class.__doc__
-    return FragmentHostScanShim
+    FragmentPreparedScanShim.__name__ = fragment_class.__name__
+    FragmentPreparedScanShim.__qualname__ = fragment_class.__name__
+    FragmentPreparedScanShim.__module__ = fragment_class.__module__
+    FragmentPreparedScanShim.__doc__ = fragment_class.__doc__
+    return FragmentPreparedScanShim
 
 
-def make_fragment_host_dashboard_scan_exp(
+def make_fragment_prepared_dashboard_scan_exp(
     fragment_class: type[ExpFragment],
     default_request_spec: HostScanSpec | Mapping[str, Any] | None = None,
     *args,
     max_rtio_underflow_retries: int = 3,
     max_transitory_error_retries: int = 10,
-) -> type[HostDashboardScanExperiment]:
-    """Create a dashboard-driven host-runtime experiment.
+) -> type[PreparedDashboardScanExperiment]:
+    """Create a dashboard-driven ``PreparedScan`` convenience wrapper.
 
-    Unlike ``make_fragment_host_scan_exp()``, this entrypoint does not take a request
-    factory.  It publishes ndscan submission metadata to the dashboard and expects a
-    submitted ``host_scan`` payload to be compiled into a ``ScanRequest`` before the
-    run starts.
+    Unlike ``make_fragment_prepared_scan_exp()``, this entrypoint does not take a
+    request factory. It publishes ndscan submission metadata to the dashboard and
+    expects a submitted ``host_scan`` payload to be compiled into a ``ScanRequest``
+    before the run starts.
 
-    ``default_request_spec`` is optional.  When provided as a ``HostScanSpec`` or dict
+    This helper only removes the dashboard/``EnvExperiment`` boilerplate. The compiled
+    request still flows into a root ``PreparedScan`` which is executed via the normal
+    runtime path.
+
+    ``default_request_spec`` is optional. When provided as a ``HostScanSpec`` or dict
     transport payload, it becomes the initial ``host_scan`` value shown to the
     dashboard and also serves as a fallback when running headlessly.
     """
 
-    class FragmentHostDashboardScanShim(HostDashboardScanExperiment):
+    class FragmentPreparedDashboardScanShim(PreparedDashboardScanExperiment):
         def build(self):
             super().build(
                 lambda: fragment_class(self, [], *args),
@@ -3716,11 +3794,11 @@ def make_fragment_host_dashboard_scan_exp(
                 max_transitory_error_retries=max_transitory_error_retries,
             )
 
-    FragmentHostDashboardScanShim.__name__ = fragment_class.__name__
-    FragmentHostDashboardScanShim.__qualname__ = fragment_class.__name__
-    FragmentHostDashboardScanShim.__module__ = fragment_class.__module__
-    FragmentHostDashboardScanShim.__doc__ = fragment_class.__doc__
-    return FragmentHostDashboardScanShim
+    FragmentPreparedDashboardScanShim.__name__ = fragment_class.__name__
+    FragmentPreparedDashboardScanShim.__qualname__ = fragment_class.__name__
+    FragmentPreparedDashboardScanShim.__module__ = fragment_class.__module__
+    FragmentPreparedDashboardScanShim.__doc__ = fragment_class.__doc__
+    return FragmentPreparedDashboardScanShim
 
 
 def _resolve_host_scan_request_spec(

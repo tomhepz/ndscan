@@ -6,7 +6,7 @@ same non-empty scan group to zip them together point-by-point.
 
 from __future__ import annotations
 
-from ndscan.experiment import make_fragment_host_dashboard_scan_exp
+from ndscan.experiment import make_fragment_prepared_dashboard_scan_exp
 
 from host_runtime_zip_scan import TandemResponseFragment
 
@@ -16,6 +16,6 @@ class TandemResponseDashboardFragment(TandemResponseFragment):
         return super().get_always_shown_params() + [self.left, self.right]
 
 
-HostRuntimeZipScanDashboard = make_fragment_host_dashboard_scan_exp(
+HostRuntimeZipScanDashboard = make_fragment_prepared_dashboard_scan_exp(
     TandemResponseDashboardFragment
 )

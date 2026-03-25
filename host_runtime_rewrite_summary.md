@@ -444,7 +444,7 @@ flowchart TD
     SRC --> EXEC
     EXEC --> OBS[PointObservation...]
     OBS --> WRITE
-    OBS --> MEM[HostScanRunResult]
+    OBS --> MEM[ScanInspection]
     MEM --> ANALYSIS
     ANALYSIS --> FB[BatchFeedback]
     FB --> SRC

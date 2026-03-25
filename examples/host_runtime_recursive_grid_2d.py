@@ -23,7 +23,7 @@ from ndscan.experiment import (
     ProductPointPolicy,
     RecursiveMidpointPointPolicy1D,
     ScanRequest,
-    make_fragment_host_scan_exp,
+    make_fragment_prepared_scan_exp,
 )
 
 
@@ -41,7 +41,7 @@ class BowlSurfaceFragment(ExpFragment):
         self.z.push((x - 0.5) ** 2 + 0.5 * (y + 1.0) ** 2)
 
 
-HostRuntimeRecursiveGrid2D = make_fragment_host_scan_exp(
+HostRuntimeRecursiveGrid2D = make_fragment_prepared_scan_exp(
     BowlSurfaceFragment,
     lambda fragment: ScanRequest(
         axes=(fragment.x, fragment.y),

@@ -13,7 +13,7 @@ from ndscan.experiment import (
     FloatChannel,
     FloatParam,
     ScanRequest,
-    make_fragment_host_scan_exp,
+    make_fragment_prepared_scan_exp,
 )
 
 
@@ -31,7 +31,7 @@ class ExplicitPointFragment(ExpFragment):
         self.z.push(x + 2.0 * y)
 
 
-HostRuntimeExplicitPointScan = make_fragment_host_scan_exp(
+HostRuntimeExplicitPointScan = make_fragment_prepared_scan_exp(
     ExplicitPointFragment,
     lambda fragment: ScanRequest.explicit(
         [fragment.x, fragment.y],

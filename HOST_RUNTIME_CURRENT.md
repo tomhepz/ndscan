@@ -114,7 +114,7 @@ There are two current declaration routes:
 - reusable: declare mappings on a fragment with `add_parameter_mapping(...)` or
   `rebind_param(...)`
 
-### `HostScanSession`
+### `PreparedScan`
 
 Top-level entry point for executing one host-runtime scan.
 
@@ -154,7 +154,7 @@ flowchart TD
     SRC --> EXEC[_HostPointExecutor.execute_point]
     EXEC --> OBS[PointObservation]
     OBS --> WRITE[ScanSiteDatasetWriter.append_observations]
-    OBS --> MEM[HostScanRunResult.record_batch]
+    OBS --> MEM[ScanInspection.record_batch]
     MEM --> ANALYSIS[_HostScanAnalysisPlan.observe_batch]
     ANALYSIS --> FEEDBACK[BatchFeedback]
     FEEDBACK --> SRC2[PointPolicy.observe_batch]
@@ -167,7 +167,7 @@ runner does this in order:
 
 1. execute all points in the batch
 2. append their point data to the scan site
-3. mirror them into the in-memory `HostScanRunResult`
+3. mirror them into the in-memory `ScanInspection`
 4. run online analyses on accumulated data
 5. hand batch feedback to the point policy
 6. flush the site writer
@@ -258,9 +258,9 @@ Nested scans do not use a separate execution framework.
 The current nested path is:
 
 - parent point is active
-- user code calls `run_subscan(...)`
-- `run_subscan(...)` derives a child `ScanSite`
-- child scan runs through another `HostScanSession`
+- user code configures and executes a prepared child scan
+- the prepared child scan derives a child `ScanSite`
+- child scan runs through another `PreparedScan`
 - child site records:
   - `site.path`
   - `site.parent_path`

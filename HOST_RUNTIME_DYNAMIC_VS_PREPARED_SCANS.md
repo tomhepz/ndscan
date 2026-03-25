@@ -171,51 +171,47 @@ So the prepared/dynamic split is not only an API preference. It is a direct
 consequence of what the ARTIQ compiler can type-check and compile predictably.
 
 
-## Dynamic Scans
+## Prepared Scans
 
-The current host runtime already has a good dynamic host-side scan API:
+The current host runtime now uses one nested-scan style:
 
-- `run_host_scan(...)`
-- `run_subscan(...)`
+- `prepare_scan(...)`
+- `prepare_child_scan(...)`
+- `PreparedScan`
+- `PreparedChildScan`
 
-The important property of these helpers is that they are convenient and expressive.
+The important property of these handles is that they are structurally fixed and use
+the same contract everywhere:
 
-They let user code:
-
-- construct a fresh `ScanRequest` at the point of use
-- run it immediately
-- get back a rich Python `HostScanRunResult`
-- inspect coordinates, values, parameters, and analysis results directly
+- configure a `ScanRequest`
+- execute the scan
+- read stable `ScanOutputs`
+- optionally inspect the host-side result artifact
 
 That is what makes examples like:
 
 ```python
-x_request = ScanRequest.cartesian([(self.line.x, x_points)])
-x_result = run_subscan(self, self.line, x_request, name="scan_x")
-self.m.push(x_result.analysis_results["m"])
+self.line_scan.configure(ScanRequest.cartesian([(self.line.x, x_points)]))
+self.m.push(self.line_scan.execute()["m"])
 ```
 
-pleasant to write.
+the intended pattern.
 
-### What Dynamic Gives You
+### What Prepared Gives You
 
-- no predeclaration in `build_fragment()`
-- no separate "prepared scan" object
-- easy construction of scan requests from current host-side data
-- rich immediate Python return values
-- natural composition for host-only nested scans
+- predeclared structure in `build_fragment()`
+- one nested-scan API for both host and kernel execution
+- easy construction of requests from current host-side data
+- stable summary outputs plus optional host-only inspection
+- natural composition without introducing a second nested runtime
 
-### Why Dynamic Is Hard To Call From Kernel Code
+### Why Prepared Works For Kernel Code
 
-The same features that make dynamic scans pleasant on the host make them a poor fit
-for compiled kernel use:
+The same prepared handle can be driven through either backend because:
 
-- they create fresh Python-level scan sessions dynamically
-- they return rich Python objects (`HostScanRunResult`)
-- they rely on host-side orchestration as part of the API itself
-
-So a dynamic helper like `run_subscan(...)` is a good **host convenience API**, but it
-is not a good **kernel execution ABI**.
+- it fixes the compiler-visible structure ahead of time
+- it avoids rich dynamic Python return types in compiled paths
+- it keeps host-side orchestration behind a stable execution ABI
 
 
 ### What Is Genuinely Dynamic?
@@ -609,8 +605,8 @@ It is tempting to talk about:
 
 but this is no longer the most useful split.
 
-In the current host runtime, `run_subscan(...)` already just derives a child site and
-then delegates into the same session/controller path as the root scan.
+In the current host runtime, a prepared child scan already just derives a child site
+and then delegates into the same session/controller path as the root scan.
 
 So the meaningful distinction is not:
 
@@ -648,8 +644,8 @@ That already solves the important problem:
 
 If later a parent fragment such as `ScanXFragment.run_once()` also needs to be `@kernel`
 while still invoking a nested scan efficiently, that is where prepared child scans
-become necessary. A dynamic helper returning `HostScanRunResult` is simply the wrong
-shape for compiled code.
+become necessary. Rich host inspection artifacts are simply the wrong shape for
+compiled code.
 
 
 ## Why A Prepared Scan Is Still Not "Kernel Autonomy"
@@ -697,8 +693,7 @@ the right basic idea:
 
 - one resident kernel region
 - host feeding work by RPC
-- nested kernel-capable execution using a prepared/static path rather than a dynamic
-  host convenience helper
+- nested kernel-capable execution using a prepared/static path
 
 What the newer host runtime improves is not that kernel story by itself, but the place
 where that story should live.
@@ -738,25 +733,14 @@ In other words:
 The current names are slightly misleading because they mix semantic structure and
 implementation history.
 
-In particular, `run_subscan(...)` sounds more legacy-specific than the actual current
-design.
+If naming is revisited further, the clearest public surface is now simply:
 
-If naming is revisited, the clearest public split would be:
-
-- `run_scan(...)`
-- `run_child_scan(...)`
 - `prepare_scan(...)`
 - `prepare_child_scan(...)`
 - `PreparedScan`
+- `PreparedChildScan`
 
-This makes the important distinction explicit:
-
-- dynamic vs prepared
-
-rather than:
-
-- host vs kernel
-- top-level vs subscan
+with host/kernal selection remaining internal executor detail.
 
 
 ## Naming Principles
@@ -799,9 +783,12 @@ If naming is revisited, the following principles should help:
 
 The codebase now has the first concrete pieces of this split:
 
-- `PreparedChildScan.run()`
+- `PreparedChildScan.execute()`
   - host-only
-  - returns the full `HostScanRunResult`
+  - returns stable `ScanOutputs`
+- `PreparedChildScan.inspect()`
+  - host-only inspection hook
+  - returns the full `ScanInspection`
 - `PreparedChildScan.acquire()`
   - compiler-friendly entry point returning `None`
   - callable from `@kernel`
@@ -810,10 +797,10 @@ The codebase now has the first concrete pieces of this split:
     driven by host-fed batches
 - `PreparedChildScan` can now also expose selected fixed analysis outputs through a
   compiler-friendly accessor surface:
-  - `child_scan.analysis_results.fit_slope.get()`
-  - `child_scan.analysis_results.fit_intercept.get()`
+  - `child_scan.get_outputs()`
+  - `child_scan.outputs()`
 
-Those fixed outputs are intentionally narrower than `HostScanRunResult`:
+Those fixed outputs are intentionally narrower than `ScanInspection`:
 
 - they are declared structurally up front,
 - they currently support numeric default-analysis outputs,
@@ -821,10 +808,10 @@ Those fixed outputs are intentionally narrower than `HostScanRunResult`:
 - and they leave room for the underlying implementation to stay host-driven today or
   become kernel-reduced later without changing the public concept.
 
-In other words, the current prepared child-scan path already proves the API split:
+In other words, the current prepared child-scan path already proves the API shape:
 
-- dynamic/rich nested scans use `run_subscan(...)`
-- prepared nested scans use `PreparedChildScan`
+- nested scans use `PreparedChildScan`
+- root scans use `PreparedScan`
 
 The current kernel-capable prepared path is still intentionally strict:
 

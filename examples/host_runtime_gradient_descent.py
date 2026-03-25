@@ -23,7 +23,7 @@ from ndscan.experiment import (
     FloatParam,
     GradientDescentPointPolicy,
     ScanRequest,
-    make_fragment_host_scan_exp,
+    make_fragment_prepared_scan_exp,
 )
 
 
@@ -50,7 +50,7 @@ class QuadraticLossFragment(ExpFragment):
         )
 
 
-HostRuntimeGradientDescent = make_fragment_host_scan_exp(
+HostRuntimeGradientDescent = make_fragment_prepared_scan_exp(
     QuadraticLossFragment,
     lambda fragment: ScanRequest(
         axes=(fragment.x0, fragment.x1, fragment.x2, fragment.x3),

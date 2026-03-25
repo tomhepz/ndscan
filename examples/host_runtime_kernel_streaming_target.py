@@ -17,7 +17,7 @@ from ndscan.experiment import (
     FloatChannel,
     FloatParam,
     ScanRequest,
-    make_fragment_host_scan_exp,
+    make_fragment_prepared_scan_exp,
     kernel,
 )
 
@@ -63,7 +63,7 @@ def make_kernel_streaming_target_request(fragment: KernelStreamingTargetFragment
     )
 
 
-HostRuntimeKernelStreamingTarget = make_fragment_host_scan_exp(
+HostRuntimeKernelStreamingTarget = make_fragment_prepared_scan_exp(
     KernelStreamingTargetFragment,
     make_kernel_streaming_target_request,
 )

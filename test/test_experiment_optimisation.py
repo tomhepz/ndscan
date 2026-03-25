@@ -14,12 +14,12 @@ try:
         ExplicitBatchExplorationStrategy,
         FloatChannel,
         FloatParam,
-        HostScanSession,
         LocalLengthscaleExplorationStrategy,
         MhcsExplorationStrategy,
         NuboBatchBayesianOptimisationBackend,
         NuboBayesianOptimisationState,
         OptimiserObservation,
+        PreparedScan,
         ScanRequest,
         ScheduledExplorationStrategy,
         extract_scalar_channel_objective,
@@ -28,6 +28,11 @@ try:
     _OPTIMISATION_DEPS_AVAILABLE = True
 except ModuleNotFoundError:
     _OPTIMISATION_DEPS_AVAILABLE = False
+
+
+def _execute_and_inspect(scan):
+    scan.execute()
+    return scan.inspect()
 
 
 @unittest.skipUnless(
@@ -223,7 +228,7 @@ if _OPTIMISATION_DEPS_AVAILABLE:
                 execution_policy=ExecutionPolicy(max_points_per_batch=2),
             )
 
-            result = HostScanSession(fragment, fragment, request).run()
+            result = _execute_and_inspect(PreparedScan(fragment, fragment, request))
 
             prefix = result.site_prefix
             self.assertEqual(self.dataset_db.get(prefix + "state.num_points"), 4)
@@ -274,7 +279,7 @@ if _OPTIMISATION_DEPS_AVAILABLE:
             self.assertEqual(backend_description["fit_steps"], 7)
             self.assertEqual(backend_description["fit_lr"], 0.04)
 
-            result = HostScanSession(fragment, fragment, request).run()
+            result = _execute_and_inspect(PreparedScan(fragment, fragment, request))
             prefix = result.site_prefix
             self.assertEqual(self.dataset_db.get(prefix + "state.num_points"), 4)
             self.assertEqual(len(self.dataset_db.get(prefix + "points.channel_0")), 4)

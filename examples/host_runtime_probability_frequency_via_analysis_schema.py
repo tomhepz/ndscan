@@ -8,14 +8,14 @@ dict-based host scan schema compilation path instead of the code-first
 
 from __future__ import annotations
 
-from ndscan.experiment import make_fragment_host_scan_exp
+from ndscan.experiment import make_fragment_prepared_scan_exp
 
 from host_runtime_probability_frequency_via_analysis import (
     FrequencyFromProbabilityViaAnalysisFragment,
 )
 
 
-HostRuntimeProbabilityFrequencyViaAnalysisSchema = make_fragment_host_scan_exp(
+HostRuntimeProbabilityFrequencyViaAnalysisSchema = make_fragment_prepared_scan_exp(
     FrequencyFromProbabilityViaAnalysisFragment,
     {
         "version": 1,

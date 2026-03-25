@@ -1,369 +1,907 @@
 # Module Namespace Tidy-Up Proposal
 
-This note proposes a cleaner module tree for `ndscan`.
+This note proposes an updated module layout for the current prepared-scan direction.
 
-The goal is not to rename everything immediately. The goal is to make the major
-concepts explicit so future work, especially around the host runtime and dashboard
-submission, has a clearer home.
+It replaces the older tidy-up sketch with a structure that better matches what the
+codebase has become after the recent runtime work:
 
-## Why
+- one prepared scan runtime shared by host and kernel execution
+- one scan-semantics layer used by both fragment rebindings and ad hoc request mappings
+- one submission/compiler boundary
+- one persisted scan-site schema contract
+- one clearly isolated legacy path
 
-The current `ndscan.experiment` package has accumulated several responsibilities:
 
-- experiment-definition API
-- legacy execution/runtime code
-- host-runtime execution code
-- host-scan schema compilation
-- logical scan mappings and expression compilation
-- scan-site persistence details
+## Short Thesis
 
-That makes the package hard to navigate and makes it unclear where new code should
-live.
+The code is now easier to think about if it is split into:
 
-The most important design choice is:
+- `define`
+- `scan`
+- `submission`
+- `runtime`
+- `schema`
+- `legacy`
+- `dashboard`
+- `results`
+- `plots`
 
-- split by responsibility
-- not by version labels like `v1` / `v2`
+with `ndscan.experiment` kept as a public facade.
 
-Names like `legacy`, `host`, `submission`, and `define` age much better than
-`v1` / `v2`.
+The two most important refinements compared to the earlier tidy-up note are:
 
-## Principles
+1. `request/` should really be `scan/`
+2. persisted dataset schema should not live inside `runtime/`
 
-### 1. Keep a friendly facade
 
-User experiment code should still be able to write:
+## Why `scan/` Rather Than `request/`
 
-```python
-from ndscan.experiment import *
-```
+After the recent runtime work, `request/` looks slightly too narrow as a name.
 
-So `ndscan.experiment` should become a facade/re-export layer, not the place where
-all implementation detail lives forever.
+The reason is `ParameterMapping`.
 
-### 2. Separate ontology from execution
+Today there is only one real mapping execution path:
 
-These are different concerns:
+- fragment-side `rebind_param(...)` creates `ParameterMapping`
+- ad hoc request-level mappings also use `ParameterMapping`
+- submission text/schema compilation also lowers to `ParameterMapping`
+- runtime execution merges them all and applies them through the same per-point logic
 
-- what a fragment/parameter/result channel is
-- how a scan request is submitted/compiled
-- how a runtime executes that request
+So mappings are not just "part of request submission". They are part of scan
+semantics.
 
-They should not be mixed in one large package namespace.
+The same is true, more mildly, for:
 
-### 3. Keep the dashboard out of the runtime
+- `ScanVariable`
+- fixed pseudoparams
+- point policies
+- BO ask/tell point-selection logic
 
-Qt/dashboard code should emit declarative submission objects.
+These are all part of "what scan is being described", not part of "how the runtime is
+executing it right now".
 
-Compilation from dashboard state into runtime objects should live in a
-submission-oriented layer, not inside the runtime loop itself.
+So the cleaner conceptual package name is:
 
-### 4. Keep offline results reading independent
+- `scan/`
 
-Reading HDF5 snapshots should stay separate from experiment/runtime code as much as
-possible.
+rather than:
 
-## Proposed Target Tree
+- `request/`
 
-If the tree were designed from scratch, a sensible layout would be:
+
+## Why `schema/` Needs To Exist
+
+There is a second boundary that becomes clearer once the new runtime is taken
+seriously: the persisted scan-site schema is not the same thing as runtime writing.
+
+Those are three separate concerns:
+
+1. the persisted schema contract
+2. the runtime writer implementation
+3. the offline reader/plotting interpretation
+
+For example, the current [`scan_site.py`](/home/lab/artiq-files/install/ndscan/ndscan/experiment/scan_site.py)
+mixes:
+
+- `ScanSite` as a structural schema object
+- dataset key conventions
+- `ScanSiteDatasetWriter` as runtime write behavior
+
+That is workable, but it couples:
+
+- runtime execution
+- persisted schema definition
+- results reading
+
+more tightly than necessary.
+
+The cleaner split is:
+
+- `schema/scan_site.py`: persisted contract
+- `runtime/persistence.py`: writer and preview coordination
+- `results/scan_site_reader.py`: offline reader
+
+
+## Recommended Top-Level Structure
+
+If the project were being laid out now, a good target tree would be:
 
 ```text
 ndscan/
     __init__.py
 
-    define/
-        __init__.py
-        fragment.py
-        parameters.py
-        result_channels.py
-        annotations.py
-        analysis.py
-
-    submission/
-        __init__.py
-        host_scan_schema.py
-        legacy_scan_schema.py
-        compile_host_scan.py
-        compile_legacy_scan.py
-        expression.py
-
-    runtime/
-        __init__.py
-
-        host/
-            __init__.py
-            request.py
-            point_policy.py
-            scan_mapping.py
-            session.py
-            analysis.py
-            scan_site.py
-            optimisation.py
-
-        legacy/
-            __init__.py
-            entry_point.py
-            scan_runner.py
-            scan_generator.py
-            subscan.py
-
-    results/
-        __init__.py
-        scan_site_reader.py
-        arguments.py
-        pyplot.py
-        tools.py
-
-    dashboard/
-        __init__.py
-        argument_editor.py
-        scan_options.py
-        param_tree_dialog.py
-        utils.py
-
-    plots/
-        __init__.py
-        model/
-        widgets/
-        legacy/
-        host/
-
-    compat/
-        __init__.py
-        experiment.py
-```
-
-## Meaning of the Top-Level Areas
-
-### `define/`
-
-Stable experiment-building ontology:
-
-- fragments
-- parameters
-- result channels
-- annotations
-- default analysis declarations
-
-This is the layer experiment authors conceptually program against.
-
-### `submission/`
-
-Everything that turns a declarative request into runtime objects:
-
-- schema validation
-- schema-to-request compilation
-- tiny expression language for text mappings
-- future dashboard-facing request dataclasses
-
-This is where the new `host_scan_schema.py` really belongs conceptually.
-
-### `runtime/host/`
-
-Execution of the new host-driven scan model:
-
-- `ScanRequest`
-- `ExecutionPolicy`
-- `PointPolicy`
-- point execution/session orchestration
-- request-level scan mappings
-- host BO backends
-- scan-site persistence for this runtime
-
-### `runtime/legacy/`
-
-The older runtime path, clearly named as such:
-
-- `entry_point.py`
-- `scan_runner.py`
-- `scan_generator.py`
-- `subscan.py`
-
-This avoids pretending the two execution models are one coherent implementation.
-
-### `results/`
-
-Offline reading and tooling:
-
-- HDF5 snapshot readers
-- plotting helpers
-- argument/result tools
-
-### `dashboard/`
-
-Qt submission UI only.
-
-The dashboard should depend on `submission/` and selected definition schema, not on
-runtime internals directly.
-
-## Proposed Incremental Mapping From Today
-
-This is the pragmatic version, starting from the current tree.
-
-### Keep `ndscan.experiment` as a facade
-
-Do not break public imports early.
-
-Instead:
-
-- move implementation modules underneath clearer internal namespaces
-- re-export the stable public symbols from `ndscan.experiment`
-
-### First extraction
-
-Move schema compilation out of `host_runtime.py`.
-
-Status:
-
-- this has already started via `ndscan/experiment/host_scan_schema.py`
-
-This is the right first move because schema compilation is conceptually separate from
-scan execution and will keep growing as dashboard work lands.
-
-### Second extraction
-
-Create a more obvious submission cluster around:
-
-- `expression.py`
-- `scan_mapping.py`
-- `host_scan_schema.py`
-
-That could be either:
-
-```text
-ndscan/experiment/submission/
-```
-
-or eventually:
-
-```text
-ndscan/submission/
-```
-
-### Third extraction
-
-Group legacy runtime code explicitly:
-
-```text
-ndscan/experiment/legacy/
-```
-
-or later:
-
-```text
-ndscan/runtime/legacy/
-```
-
-This gives the codebase a clear place to put bug fixes without implying new runtime
-features should also go there.
-
-### Fourth extraction
-
-Group host-runtime execution files:
-
-- `host_runtime.py`
-- `point_policy.py`
-- host-side analysis helpers
-- BO backends
-- scan-site persistence
-
-That cluster could become:
-
-```text
-ndscan/experiment/host/
-```
-
-before any larger top-level package split.
-
-## Recommended Intermediate Tree
-
-If we want a realistic near-term target without moving every public import, this is a
-good intermediate structure:
-
-```text
-ndscan/experiment/
-    __init__.py            # facade/re-exports
+    experiment/
+        __init__.py          # public facade for experiment authoring
 
     define/
+        __init__.py
         fragment.py
         parameters.py
         result_channels.py
         annotations.py
         default_analysis.py
 
-    submission/
-        expression.py
-        host_scan_schema.py
-        scan_mapping.py
-
-    host/
-        runtime.py
-        point_policy.py
+    scan/
+        __init__.py
+        request.py
+        policy.py
+        mappings.py
+        variables.py
         optimisation.py
+
+    submission/
+        __init__.py
+        scan_spec.py
+        compile.py
+        transport.py
+        expression.py
+        overrides.py
+
+    runtime/
+        __init__.py
+        api.py
+        context.py
+        program.py
+        runner.py
+        executors.py
+        analysis.py
+        persistence.py
+        adapters.py
+
+    schema/
+        __init__.py
         scan_site.py
-        _host_analysis.py
 
     legacy/
+        __init__.py
         entry_point.py
         scan_generator.py
         scan_runner.py
         subscan.py
+
+    dashboard/
+        __init__.py
+        argument_editor.py
+        param_tree_dialog.py
+        override_entry.py
+        scan_options.py
+        host_scan_options.py
+        submission/
+            __init__.py
+            common.py
+            prepared.py
+            legacy.py
+
+    results/
+        __init__.py
+        arguments.py
+        scan_site_reader.py
+        pyplot.py
+        tools.py
+
+    plots/
+        __init__.py
+        ...
+
+    common/
+        __init__.py
+        ...
 ```
 
-This is likely the best balance between:
 
-- conceptual cleanliness
-- migration effort
-- keeping imports stable
+## Responsibilities By Package
 
-## File-Level Mapping Suggestion
+### `define/`
+
+This is the experiment-building ontology:
+
+- fragments
+- parameters
+- result-channel declarations
+- fragment-defined analyses
+- annotations
+
+This is what experiment authors conceptually program against.
+
+It should be the most stable area of the tree.
+
+### `scan/`
+
+This is the scan-semantics layer.
+
+It should contain:
+
+- `ScanRequest`
+- execution policy
+- preview policy
+- `ScanVariable`
+- fixed pseudoparams
+- `ParameterMapping`
+- point policies
+- BO point-selection backends
+
+This layer answers:
+
+- what scan is being described?
+- what logical quantities vary?
+- how are concrete parameter values derived?
+- how are batches chosen?
+
+It should not care whether execution later happens:
+
+- on the host
+- through a resident kernel loop
+
+### `submission/`
+
+This is the bridge from external/declarative representations to scan semantics.
+
+It should contain:
+
+- typed spec dataclasses
+- transport dict round-tripping
+- schema validation
+- expression compilation for text mappings
+- compilation into `ScanRequest` plus overrides
+
+This is where the current [`host_scan_schema.py`](/home/lab/artiq-files/install/ndscan/ndscan/experiment/host_scan_schema.py)
+really belongs conceptually.
+
+The important rule is:
+
+- `submission/` may depend on `define/` and `scan/`
+- `runtime/` should not depend on dashboard UI
+
+### `runtime/`
+
+This is the prepared-scan execution core.
+
+It should contain:
+
+- `PreparedScan`
+- `PreparedChildScan`
+- root/nested execution context
+- request binding and runnable program creation
+- host/kernel executors
+- runtime analysis adapters
+- runtime persistence/writer coordination
+- thin `EnvExperiment` adapters
+
+This namespace should represent:
+
+- one runtime concept
+- multiple executors
+
+not separate host and kernel runtimes.
+
+### `schema/`
+
+This is the persisted contract for scan-site data.
+
+It should contain:
+
+- `ScanSite`
+- schema revision constants
+- stable key/group naming conventions
+- any small schema-only encode/decode helpers
+
+It should **not** contain:
+
+- `HasEnvironment`
+- dataset manager calls
+- preview file logic
+- runtime batch orchestration
+
+Both `runtime/` and `results/` should depend on this package, not on each other.
+
+### `legacy/`
+
+This is the old execution model, clearly named as such.
+
+It should contain:
+
+- `entry_point.py`
+- `scan_generator.py`
+- `scan_runner.py`
+- `subscan.py`
+
+This keeps legacy code available without letting it continue to shape the new runtime
+layout.
+
+### `dashboard/`
+
+This is UI code only.
+
+The important split inside it is:
+
+- widgets/editor state
+- submission-state translation
+
+The dashboard should produce submission objects and transport payloads. It should not
+invent its own runtime semantics.
+
+### `results/` and `plots/`
+
+These remain separate.
+
+Offline reading and plotting should stay decoupled from the runtime as much as
+possible.
+
+
+## Recommended Dependency Rules
+
+The dependency rules matter more than the names.
+
+The intended dependency shape is:
+
+```mermaid
+flowchart LR
+    EXP[ndscan.experiment facade]
+
+    DEF[define]
+    SCAN[scan]
+    SUB[submission]
+    RT[runtime]
+    SCH[schema]
+    LEG[legacy]
+    DASH[dashboard]
+    RES[results]
+    PLOTS[plots]
+
+    EXP --> DEF
+    EXP --> SCAN
+    EXP --> RT
+
+    DEF --> SCAN
+    DEF --> RT
+    SCAN --> SUB
+    SCAN --> RT
+
+    SUB --> DASH
+    SCH --> RT
+    SCH --> RES
+    RES --> PLOTS
+
+    DEF --> LEG
+
+    style EXP fill:#eef,stroke:#335
+    style RT fill:#efe,stroke:#353
+    style SCH fill:#ffe,stroke:#663
+    style LEG fill:#f9eaea,stroke:#844
+```
+
+More explicitly:
+
+- `define/` depends only on small shared utilities
+- `scan/` may depend on `define/`
+- `submission/` may depend on `define/` and `scan/`
+- `runtime/` may depend on `define/`, `scan/`, and `schema/`
+- `dashboard/` may depend on `submission/`, not on runtime internals
+- `results/` may depend on `schema/`, not on runtime controller objects
+- `legacy/` may depend on `define/`, but should stay isolated from the new runtime
+
+The most important prohibitions are:
+
+- `runtime/` should not depend on dashboard code
+- `results/` should not depend on runtime execution code
+- `schema/` should not depend on runtime code
+
+
+## Sensible Cross-Module Interfaces
+
+The interfaces between these packages should be small and explicit.
+
+### `define -> scan`
+
+Shared authoring/runtime reference types:
+
+- `ParamHandle`
+- `ResultChannel`
+- fragment-defined analysis declarations
+
+`scan/` uses these to describe what is being scanned or derived.
+
+### `submission -> scan`
+
+This should compile down to a small boundary:
+
+- `ScanRequest`
+- override store map
+
+That is the only thing the runtime should need from submission.
+
+### `scan -> runtime`
+
+The runtime should consume:
+
+- `ScanRequest`
+- `ExecutionPolicy`
+- point-policy interfaces
+- `ParameterMapping`
+
+It should not need to know whether the request came from:
+
+- code
+- dashboard
+- typed spec
+- transport dict
+
+### `schema -> runtime` and `schema -> results`
+
+The shared persisted-data boundary should be:
+
+- `ScanSite`
+- schema revision constants
+- stable dataset key semantics
+
+`runtime/` writes it. `results/` reads it.
+
+### `runtime` internal boundaries
+
+The runtime itself should be split around a few core objects:
+
+- public prepared API
+- request binding/program creation
+- execution control
+- executor backends
+- persistence
+
+That lets most modules depend on interfaces rather than on one giant file.
+
+
+## Proposed Runtime Split
+
+The biggest immediate simplification is to split the current
+[`host_runtime.py`](/home/lab/artiq-files/install/ndscan/ndscan/experiment/host_runtime.py)
+by responsibility.
+
+A good split would be:
+
+```text
+runtime/
+    api.py
+    context.py
+    program.py
+    runner.py
+    executors.py
+    analysis.py
+    persistence.py
+    adapters.py
+```
+
+### `runtime/api.py`
+
+Public prepared-scan surface:
+
+- `ScanOutputs`
+- `ScanInspection`
+- `PreparedScan`
+- `PreparedChildScan`
+- `prepare_scan(...)`
+- `prepare_child_scan(...)`
+- `setattr_prepared_child_scan(...)`
+
+This is the user-facing runtime API.
+
+### `runtime/context.py`
+
+Root-run and nested-scan execution context:
+
+- `ActiveScanContext`
+- run context
+- preview policy
+- preview coordinator
+- contextvar helpers
+- child-site derivation helpers
+
+### `runtime/program.py`
+
+Binding scan semantics to a concrete fragment:
+
+- bound axis/parameter/result-channel dataclasses
+- resolved execution-point lowering
+- `HostScanProgram`
+- `HostScanProgramBuilder`
+
+This is where `ScanRequest` becomes runnable program state.
+
+### `runtime/runner.py`
+
+Runtime orchestration:
+
+- `HostScanProgramRunner`
+- batch publication flow
+- pause/restart/completion control
+
+This is where the runtime lifecycle belongs.
+
+### `runtime/executors.py`
+
+Execution backends only:
+
+- `HostExecutor`
+- `KernelStreamingExecutor`
+- resident kernel point runner
+- point-invocation runner
+- point result collection
+
+This is where "how points run" belongs.
+
+### `runtime/analysis.py`
+
+Runtime-side analysis glue:
+
+- host analysis adapter
+- online/final analysis orchestration
+- analysis metadata extraction
+
+### `runtime/persistence.py`
+
+Runtime write behavior:
+
+- `ScanSiteDatasetWriter`
+- preview snapshot writing
+- writer transport adapter
+- dataset-prefix helpers
+
+This module should depend on `schema/scan_site.py`, not define the persisted schema
+contract itself.
+
+### `runtime/adapters.py`
+
+Thin ARTIQ convenience wrappers:
+
+- `PreparedScanExperiment`
+- `PreparedDashboardScanExperiment`
+- `make_fragment_prepared_scan_exp(...)`
+- `make_fragment_prepared_dashboard_scan_exp(...)`
+
+
+## Proposed `scan/` Split
+
+The current request-side concepts should be grouped more clearly than they are now.
+
+```text
+scan/
+    request.py
+    policy.py
+    mappings.py
+    variables.py
+    optimisation.py
+```
+
+### `scan/request.py`
+
+- `ScanRequest`
+- execution policy
+- preview policy
+
+### `scan/variables.py`
+
+- `ScanVariable`
+- `FixedPseudoparam`
+
+### `scan/mappings.py`
+
+- `ParameterMapping`
+- shared mapping helpers
+
+This is where both:
+
+- fragment-side `rebind_param(...)`
+- request-side ad hoc mappings
+
+meet semantically.
+
+### `scan/policy.py`
+
+- `BasePoint`
+- `BatchFeedback`
+- point-policy interfaces and concrete policies
+
+### `scan/optimisation.py`
+
+- BO ask/tell backends
+- acquisition/fitting helpers
+
+This belongs here because BO is fundamentally point-selection logic, not an executor
+feature.
+
+
+## Proposed `submission/` Split
+
+The current `host_scan_schema.py` is doing more than one job.
+
+A cleaner split would be:
+
+```text
+submission/
+    scan_spec.py
+    compile.py
+    transport.py
+    expression.py
+    overrides.py
+```
+
+### `submission/scan_spec.py`
+
+- typed spec dataclasses
+- validation rules
+
+### `submission/compile.py`
+
+- spec/schema -> `ScanRequest`
+- spec/schema -> override store map
+
+### `submission/transport.py`
+
+- dict payload round-tripping used by the dashboard argument channel
+
+### `submission/expression.py`
+
+- safe expression parsing / lowering for text mappings
+
+### `submission/overrides.py`
+
+- override map utilities / merge helpers
+
+
+## Proposed `schema/` Split
+
+The persisted scan-site contract deserves its own small home:
+
+```text
+schema/
+    scan_site.py
+```
+
+That file should contain only schema concepts, for example:
+
+- `ScanSite`
+- schema revision constants
+- stable field/key names
+- maybe small schema-only helpers
+
+It should not contain:
+
+- ARTIQ `HasEnvironment`
+- dataset sinks
+- dataset manager writes
+- preview snapshot logic
+
+That runtime code belongs in `runtime/persistence.py`.
+
+
+## How The Modules Come Together
+
+The end-to-end picture should be:
+
+```mermaid
+flowchart TD
+    A1[Fragment code in define]
+    A2[Code-built ScanRequest in scan]
+    A3[Dashboard UI state in dashboard]
+    A4[Submission compiler in submission]
+    A5[PreparedScan / PreparedChildScan in runtime.api]
+    A6[Program builder in runtime.program]
+    A7[Runner in runtime.runner]
+    A8[HostExecutor / KernelStreamingExecutor in runtime.executors]
+    A9[Writer in runtime.persistence]
+    A10[Persisted contract in schema.scan_site]
+    A11[Offline reader in results]
+    A12[Plotting in plots]
+
+    A1 --> A2
+    A3 --> A4
+    A4 --> A2
+    A1 --> A5
+    A2 --> A5
+    A5 --> A6
+    A6 --> A7
+    A7 --> A8
+    A7 --> A9
+    A9 --> A10
+    A10 --> A11
+    A11 --> A12
+
+    style A5 fill:#eef,stroke:#335
+    style A8 fill:#efe,stroke:#353
+    style A10 fill:#ffe,stroke:#663
+```
+
+In words:
+
+- authoring code lives in `define/`
+- scan semantics live in `scan/`
+- dashboard transport becomes scan semantics in `submission/`
+- prepared runtime entrypoints live in `runtime/api.py`
+- execution backends live in `runtime/executors.py`
+- persistence writes the schema defined in `schema/`
+- results and plots read that persisted schema without runtime dependency
+
+
+## Current Files Mapped To Proposed Homes
 
 Current -> proposed home:
 
-- `experiment/fragment.py` -> `experiment/define/fragment.py`
-- `experiment/parameters.py` -> `experiment/define/parameters.py`
-- `experiment/result_channels.py` -> `experiment/define/result_channels.py`
-- `experiment/annotations.py` -> `experiment/define/annotations.py`
-- `experiment/default_analysis.py` -> `experiment/define/default_analysis.py`
+### Definition / authoring
 
-- `experiment/expression.py` -> `experiment/submission/expression.py`
-- `experiment/scan_mapping.py` -> `experiment/submission/scan_mapping.py`
-- `experiment/host_scan_schema.py` -> `experiment/submission/host_scan_schema.py`
+- `experiment/fragment.py` -> `define/fragment.py`
+- `experiment/parameters.py` -> `define/parameters.py`
+- `experiment/result_channels.py` -> split:
+  - channel definitions -> `define/result_channels.py`
+  - sink/runtime-ish pieces -> likely `runtime/persistence.py` or a small sibling module
+- `experiment/annotations.py` -> `define/annotations.py`
+- `experiment/default_analysis.py` -> `define/default_analysis.py`
 
-- `experiment/host_runtime.py` -> `experiment/host/runtime.py`
-- `experiment/point_policy.py` -> `experiment/host/point_policy.py`
-- `experiment/optimisation.py` -> `experiment/host/optimisation.py`
-- `experiment/scan_site.py` -> `experiment/host/scan_site.py`
-- `experiment/_host_analysis.py` -> `experiment/host/analysis.py`
+### Scan semantics
 
-- `experiment/entry_point.py` -> `experiment/legacy/entry_point.py`
-- `experiment/scan_generator.py` -> `experiment/legacy/scan_generator.py`
-- `experiment/scan_runner.py` -> `experiment/legacy/scan_runner.py`
-- `experiment/subscan.py` -> `experiment/legacy/subscan.py`
+- pieces of `experiment/host_runtime.py`:
+  - `ScanRequest`
+  - `ExecutionPolicy`
+  - `PreviewPolicy`
+  - `ScanVariable`
+  - `ParameterMapping`
+  -> `scan/*`
+- `experiment/point_policy.py` -> `scan/policy.py`
+- `experiment/optimisation.py` -> `scan/optimisation.py`
+- `experiment/scan_mapping.py` -> `scan/mappings.py`
 
-## Explicit Non-Goals
+### Submission / compilation
 
-This proposal does not require:
+- `experiment/host_scan_schema.py` -> `submission/scan_spec.py` + `submission/compile.py` + `submission/transport.py`
+- `experiment/expression.py` -> `submission/expression.py`
+- override helpers from `host_runtime.py` -> `submission/overrides.py`
 
-- removing `ndscan.experiment`
-- rewriting public APIs immediately
-- unifying legacy and host runtime concepts artificially
-- renaming everything in one big breaking commit
+### Prepared runtime
 
-## Recommended Next Moves
+- `experiment/host_runtime.py` -> split across `runtime/*`
+- `experiment/_host_analysis.py` -> `runtime/analysis.py`
 
-In order:
+### Persisted schema
 
-1. Keep `host_scan_schema.py` as the submission/compiler home and avoid adding new
-   schema logic back into `host_runtime.py`.
-2. Move `expression.py` and `scan_mapping.py` into the same submission cluster.
-3. Move legacy runtime files under a `legacy/` namespace.
-4. Move host runtime files under a `host/` namespace.
-5. Keep `ndscan.experiment` as a facade throughout.
+- `experiment/scan_site.py` -> split:
+  - schema contract -> `schema/scan_site.py`
+  - writer implementation -> `runtime/persistence.py`
+
+### Legacy
+
+- `experiment/entry_point.py` -> `legacy/entry_point.py`
+- `experiment/scan_generator.py` -> `legacy/scan_generator.py`
+- `experiment/scan_runner.py` -> `legacy/scan_runner.py`
+- `experiment/subscan.py` -> `legacy/subscan.py`
+
+### Dashboard
+
+- `dashboard/submission/host.py` -> `dashboard/submission/prepared.py`
+- `dashboard/submission/legacy.py` stays `dashboard/submission/legacy.py`
+
+
+## What To Do With `ndscan.experiment`
+
+Do not delete it. Turn it into a facade.
+
+The user-facing imports can still be:
+
+```python
+from ndscan.experiment import *
+```
+
+but internally `ndscan.experiment` should mostly re-export from:
+
+- `ndscan.define`
+- `ndscan.scan`
+- `ndscan.runtime.api`
+- selected submission helpers where appropriate
+
+This gives:
+
+- stable public imports
+- a much clearer internal tree
+
+
+## What To Do With `utils`
+
+`utils` should not become one of the major conceptual homes.
+
+That is where structure goes to die.
+
+Keep only genuinely generic helpers in `common/` or a tiny `utils.py`.
+
+If a helper is about:
+
+- scan semantics
+- submission compilation
+- runtime execution
+- persisted schema
+- dashboard state
+
+then it should live in that package, not in a general catch-all.
+
+
+## Recommended Incremental Migration
+
+This is the order I would use.
+
+### 1. Split `host_runtime.py` into `runtime/` modules
+
+Do this first while keeping `ndscan.experiment` re-exports stable.
+
+This gives the biggest readability win with the least semantic churn.
+
+### 2. Extract scan semantics into `scan/`
+
+Move:
+
+- `ScanRequest`
+- execution policy
+- preview policy
+- `ScanVariable`
+- `ParameterMapping`
+- point policies
+
+out of `host_runtime.py`.
+
+### 3. Split `scan_site.py`
+
+Move:
+
+- schema contract into `schema/scan_site.py`
+- writer implementation into `runtime/persistence.py`
+
+This is the clearest way to separate runtime writing from persisted contract.
+
+### 4. Split `host_scan_schema.py`
+
+Turn it into:
+
+- typed spec definitions
+- compiler
+- transport
+- override helpers
+
+rather than one mixed module.
+
+### 5. Move legacy runtime into `legacy/`
+
+This makes the codebase easier to navigate immediately.
+
+### 6. Rename dashboard host submission to dashboard prepared submission
+
+This finishes removing old conceptual naming from the new path where practical.
+
+
+## Explicit Recommendation
+
+Compared to the earlier draft, the structure should now be:
+
+- `define`
+- `scan`
+- `submission`
+- `runtime`
+- `schema`
+- `legacy`
+- `dashboard`
+- `results`
+- `plots`
+
+with `ndscan.experiment` kept as a facade.
+
+That is better than:
+
+- keeping almost everything in `experiment/`
+- splitting by `host` versus `kernel`
+- making `utils` a major namespace
+- keeping persisted scan-site schema hidden inside the runtime writer
+
+because it mirrors the actual conceptual boundaries of the system we now have.
+
 
 ## Short Version
 
 If only one sentence is remembered, it should be:
 
-> Split by responsibility (`define`, `submission`, `host`, `legacy`, `results`,
-> `dashboard`), and keep `ndscan.experiment` as a compatibility facade.
+> Put scan semantics in `scan`, put transport/spec compilation in `submission`, put
+> prepared execution in `runtime`, put persisted scan-site schema in `schema`,
+> isolate the old path in `legacy`, and keep `ndscan.experiment` as the public
+> facade.

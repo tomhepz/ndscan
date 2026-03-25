@@ -17,7 +17,7 @@ from ndscan.experiment import (
     ExpFragment,
     FloatChannel,
     FloatParam,
-    make_fragment_host_dashboard_scan_exp,
+    make_fragment_prepared_dashboard_scan_exp,
 )
 
 
@@ -34,6 +34,6 @@ class DashboardMappedDriveFragment(ExpFragment):
         self.result.push(2.0 * self.drive.get())
 
 
-HostRuntimeParameterMappingDashboard = make_fragment_host_dashboard_scan_exp(
+HostRuntimeParameterMappingDashboard = make_fragment_prepared_dashboard_scan_exp(
     DashboardMappedDriveFragment
 )

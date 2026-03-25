@@ -18,7 +18,7 @@ from ndscan.experiment import (
     FloatChannel,
     FloatParam,
     ScanRequest,
-    make_fragment_host_scan_exp,
+    make_fragment_prepared_scan_exp,
 )
 
 
@@ -35,7 +35,7 @@ class LinearResponseFragment(ExpFragment):
         self.y.push(self.slope.get() * self.x.get() + self.offset.get())
 
 
-HostRuntimeLinearScan = make_fragment_host_scan_exp(
+HostRuntimeLinearScan = make_fragment_prepared_scan_exp(
     LinearResponseFragment,
     lambda fragment: ScanRequest.cartesian(
         [(fragment.x, [0.5 * i - 2.0 for i in range(11)])],

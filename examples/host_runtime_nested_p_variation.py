@@ -6,8 +6,8 @@ Key differences from the legacy ``SubscanExpFragment`` approach:
 
 - no ``SubscanExpFragment`` subclasses,
 - no ``setattr_subscan(...)``,
-- nested scans use the thin ``run_subscan(...)`` helper,
-- the helper still delegates into the same host-runtime scan path as a root scan.
+- nested scans use prepared child-scan handles,
+- root and nested scans share the same configure/execute/inspect contract.
 
 The runtime model is intentionally simple:
 
@@ -33,8 +33,8 @@ from ndscan.experiment import (
     OpaqueChannel,
     ScanRequest,
     annotations,
-    make_fragment_host_scan_exp,
-    run_subscan,
+    make_fragment_prepared_scan_exp,
+    setattr_prepared_child_scan,
 )
 
 
@@ -114,21 +114,20 @@ class ScanXFragment(ExpFragment):
     """Scan ``x`` for one fixed choice of ``p`` and expose the fitted slope ``m``."""
 
     def build_fragment(self):
-        self.setattr_fragment("line", LineFragment, detached=True)
+        self.line_scan = setattr_prepared_child_scan(
+            self,
+            "line",
+            LineFragment,
+            scan_name="scan_x",
+            extra_metadata={"analysis_note": "default-analysis slope fit"},
+        )
 
         self.setattr_result("m", FloatChannel, description="Extracted slope")
 
     def run_once(self):
         x_points = np.linspace(0.0, 5.0, 6).tolist()
-        x_request = ScanRequest.cartesian([(self.line.x, x_points)])
-        x_result = run_subscan(
-            self,
-            self.line,
-            x_request,
-            name="scan_x",
-            extra_metadata={"analysis_note": "default-analysis slope fit"},
-        )
-        self.m.push(x_result.analysis_results["m"])
+        self.line_scan.configure(ScanRequest.cartesian([(self.line.x, x_points)]))
+        self.m.push(self.line_scan.execute()["m"])
 
     def get_default_analyses(self):
         return [
@@ -167,25 +166,24 @@ class HowDoesPVaryFragment(ExpFragment):
     """
 
     def build_fragment(self):
-        self.setattr_fragment("scan_x", ScanXFragment, detached=True)
+        self.scan_p = setattr_prepared_child_scan(
+            self,
+            "scan_x",
+            ScanXFragment,
+            scan_name="scan_p",
+            extra_metadata={"analysis_note": "default-analysis exponent fit"},
+        )
 
         self.setattr_result("fit_e", FloatChannel, description="Extracted exponent")
 
     def run_once(self):
         # Start at p = 1 to keep the log-space fit well-defined.
         p_points = np.linspace(1.0, 5.0, 10).tolist()
-        p_request = ScanRequest.cartesian([(self.scan_x.line.p, p_points)])
-        p_result = run_subscan(
-            self,
-            self.scan_x,
-            p_request,
-            name="scan_p",
-            extra_metadata={"analysis_note": "default-analysis exponent fit"},
-        )
-        self.fit_e.push(p_result.analysis_results["fit_e"])
+        self.scan_p.configure(ScanRequest.cartesian([(self.scan_x.line.p, p_points)]))
+        self.fit_e.push(self.scan_p.execute()["fit_e"])
 
 
-HostRuntimeHowDoesPVary = make_fragment_host_scan_exp(
+HostRuntimeHowDoesPVary = make_fragment_prepared_scan_exp(
     HowDoesPVaryFragment,
     # The top-level runtime executes one root point. That point then launches the
     # nested scans inside ``HowDoesPVaryFragment.run_once()``.

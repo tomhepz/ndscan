@@ -29,7 +29,7 @@ from ndscan.experiment import (
     ScanRequest,
     ScanVariable,
     kernel,
-    make_fragment_host_scan_exp,
+    make_fragment_prepared_scan_exp,
 )
 
 
@@ -66,7 +66,7 @@ logical_drive = ScanVariable(
 )
 
 
-HostRuntimeKernelMappedLogicalAxis = make_fragment_host_scan_exp(
+HostRuntimeKernelMappedLogicalAxis = make_fragment_prepared_scan_exp(
     KernelHardwareDriveFragment,
     lambda fragment: ScanRequest.cartesian(
         [(logical_drive, [0.0, 1.0, 2.0, 3.0])],
@@ -84,7 +84,7 @@ HostRuntimeKernelMappedLogicalAxis = make_fragment_host_scan_exp(
 )
 
 
-HostRuntimeKernelMappedParamAxis = make_fragment_host_scan_exp(
+HostRuntimeKernelMappedParamAxis = make_fragment_prepared_scan_exp(
     KernelLogicalAndPhysicalDriveFragment,
     lambda fragment: ScanRequest.cartesian(
         [(fragment.logical_drive, [0.0, 1.0, 2.0, 3.0])],
@@ -121,7 +121,7 @@ class KernelWrapperMappedDriveFragment(ExpFragment):
         self.hardware.run_once()
 
 
-HostRuntimeKernelWrapperRebind = make_fragment_host_scan_exp(
+HostRuntimeKernelWrapperRebind = make_fragment_prepared_scan_exp(
     KernelWrapperMappedDriveFragment,
     lambda fragment: ScanRequest.cartesian(
         [(fragment.logical_drive, [0.0, 1.0, 2.0, 3.0])],
