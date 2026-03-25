@@ -52,10 +52,16 @@ from artiq.language import (
     rpc,
 )
 
-from ._host_analysis import HostScanAnalysisEngine
-from .fragment import ExpFragment, Fragment, RestartKernelTransitoryError, TransitoryError
-from .parameters import ParamHandle, ParamStore
-from .point_policy import (
+from .analysis import HostScanAnalysisEngine
+from .persistence import ScanSite, ScanSiteDatasetWriter
+from ..experiment.fragment import (
+    ExpFragment,
+    Fragment,
+    RestartKernelTransitoryError,
+    TransitoryError,
+)
+from ..experiment.parameters import ParamHandle, ParamStore
+from ..experiment.point_policy import (
     BasePoint,
     BatchFeedback,
     CartesianPointPolicy,
@@ -65,10 +71,14 @@ from .point_policy import (
     SinglePointPolicy,
     ZipPointPolicy,
 )
-from .result_channels import FloatChannel, IntChannel, ResultChannel, SingleUseSink
-from .scan_mapping import FixedPseudoparam, ParameterMapping, ScanVariable
-from .scan_site import ScanSite, ScanSiteDatasetWriter
-from .utils import is_kernel
+from ..experiment.result_channels import (
+    FloatChannel,
+    IntChannel,
+    ResultChannel,
+    SingleUseSink,
+)
+from ..experiment.scan_mapping import FixedPseudoparam, ParameterMapping, ScanVariable
+from ..experiment.utils import is_kernel
 from ..utils import PARAMS_ARG_KEY, merge_no_duplicates
 
 __all__ = [
@@ -733,7 +743,7 @@ class ScanRequest:
 
 # Imported here rather than at module top because the schema compiler constructs
 # ``ScanRequest`` and ``ExecutionPolicy`` instances from this module.
-from .host_scan_schema import (
+from ..experiment.host_scan_schema import (
     HostScanSchemaError,
     HostScanGridModeSpec,
     HostScanSpec,

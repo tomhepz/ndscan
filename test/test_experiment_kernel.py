@@ -42,7 +42,7 @@ from ndscan.experiment.fragment import (
     RestartKernelTransitoryError,
     TransitoryError,
 )
-from ndscan.experiment.host_runtime import (
+from ndscan.runtime.api import (
     ExecutionPolicy,
     ParameterMapping,
     PreparedScan,

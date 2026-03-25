@@ -39,7 +39,7 @@ from .scan_mapping import FixedPseudoparam, ParameterMapping, ScanVariable
 from .utils import path_matches_spec
 
 if TYPE_CHECKING:
-    from .host_runtime import ExecutionPolicy, ScanRequest
+    from ndscan.runtime.api import ExecutionPolicy, ScanRequest
 
 __all__ = [
     "HostScanSchemaError",
@@ -796,7 +796,7 @@ class _CompiledSchemaEntry:
 def _compile_execution_policy_from_spec(
     execution: HostScanExecutionSpec,
 ) -> "ExecutionPolicy":
-    from .host_runtime import ExecutionPolicy
+    from ndscan.runtime.api import ExecutionPolicy
 
     return ExecutionPolicy(max_points_per_batch=execution.max_points_per_batch)
 
@@ -1074,7 +1074,7 @@ def _compile_grid_schema_request(
     metadata: Mapping[str, Any],
     execution_policy: "ExecutionPolicy",
 ) -> tuple["ScanRequest", dict[str, list[tuple[str, ParamStore]]]]:
-    from .host_runtime import ScanRequest
+    from ndscan.runtime.api import ScanRequest
 
     overrides = _collect_compiled_overrides(compiled_entries)
     fixed_pseudoparams = tuple(
@@ -1155,7 +1155,7 @@ def _compile_gpo_schema_request(
     metadata: Mapping[str, Any],
     execution_policy: "ExecutionPolicy",
 ) -> tuple["ScanRequest", dict[str, list[tuple[str, ParamStore]]]]:
-    from .host_runtime import ExecutionPolicy, ScanRequest
+    from ndscan.runtime.api import ExecutionPolicy, ScanRequest
 
     overrides = _collect_compiled_overrides(compiled_entries)
     fixed_pseudoparams = tuple(

@@ -20,12 +20,12 @@ from typing import TYPE_CHECKING, Any
 
 from artiq.language import HasEnvironment
 
+from ..experiment.result_channels import AppendingDatasetSink, ScalarDatasetSink
+from ..experiment.utils import dump_json, to_metadata_broadcast_type
 from ..utils import SCHEMA_REVISION_KEY
-from .result_channels import AppendingDatasetSink, ScalarDatasetSink
-from .utils import dump_json, to_metadata_broadcast_type
 
 if TYPE_CHECKING:
-    from .host_runtime import PointObservation
+    from .api import PointObservation
 
 __all__ = [
     "ScanSite",

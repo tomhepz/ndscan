@@ -1737,7 +1737,7 @@ class HostRuntimeCase(HasEnvironmentCase):
         request = ScanRequest.cartesian([(fragment.value, [0.0, 1.0, 2.0])])
 
         with patch(
-            "ndscan.experiment.host_runtime.time.time",
+            "ndscan.runtime.api.time.time",
             side_effect=[999.0, 1000.0, 1001.0, 1002.0, 1003.0],
         ):
             session = PreparedScan(fragment, fragment, request)
@@ -1893,7 +1893,7 @@ class HostRuntimeCase(HasEnvironmentCase):
                 ),
             )
             with patch(
-                "ndscan.experiment.host_runtime.time.monotonic",
+                "ndscan.runtime.api.time.monotonic",
                 side_effect=[0.0, 60.0, 119.0, 121.0],
             ):
                 session = PreparedScan(fragment, fragment, request)
@@ -1940,7 +1940,7 @@ class HostRuntimeCase(HasEnvironmentCase):
             )
 
             with patch(
-                "ndscan.experiment.host_runtime.time.monotonic",
+                "ndscan.runtime.api.time.monotonic",
                 side_effect=[0.0, 1.0, 2.0],
             ):
                 session = PreparedScan(fragment, fragment, request)
@@ -1977,7 +1977,7 @@ class HostRuntimeCase(HasEnvironmentCase):
             )
 
             with patch(
-                "ndscan.experiment.host_runtime.time.monotonic",
+                "ndscan.runtime.api.time.monotonic",
                 side_effect=[0.0, 60.0, 121.0, 122.0],
             ):
                 session = PreparedScan(parent, parent, request)
@@ -2026,7 +2026,7 @@ class HostRuntimeCase(HasEnvironmentCase):
                 )
 
                 with patch(
-                    "ndscan.experiment.host_runtime.time.monotonic",
+                    "ndscan.runtime.api.time.monotonic",
                     side_effect=[0.0, 1.0],
                 ):
                     session = PreparedScan(fragment, fragment, request)
@@ -2724,7 +2724,7 @@ class HostRuntimeCase(HasEnvironmentCase):
         request = ScanRequest.explicit([parent.outer], [[10.0], [20.0]])
 
         with patch(
-            "ndscan.experiment.host_runtime.time.time",
+            "ndscan.runtime.api.time.time",
             side_effect=[
                 0.0,
                 1.0,

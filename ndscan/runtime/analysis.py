@@ -24,12 +24,12 @@ from collections.abc import Mapping, Sequence
 from functools import reduce
 from typing import Any
 
+from ..experiment.annotations import AnnotationContext
+from ..experiment.default_analysis import AnalysisFeedback
+from ..experiment.fragment import ExpFragment
+from ..experiment.result_channels import LastValueSink, ResultChannel
+from ..experiment.scan_runner import describe_analyses, filter_default_analyses
 from ..utils import merge_no_duplicates
-from .annotations import AnnotationContext
-from .default_analysis import AnalysisFeedback
-from .fragment import ExpFragment
-from .result_channels import LastValueSink, ResultChannel
-from .scan_runner import describe_analyses, filter_default_analyses
 
 
 class _TemporaryAnalysisResultSinks:
