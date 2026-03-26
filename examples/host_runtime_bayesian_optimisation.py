@@ -24,19 +24,14 @@ from __future__ import annotations
 
 import math
 
-from ndscan.experiment import (
-    AskTellOptimiserPointPolicy,
-    ExecutionPolicy,
-    ExpFragment,
-    FloatChannel,
-    FloatParam,
-    ScanRequest,
-    make_fragment_prepared_scan_exp,
-    make_fragment_prepared_dashboard_scan_exp
-)
+from artiq.experiment import *
+from ndscan.define import *
+from ndscan.define import annotations
+from ndscan.scan import *
+from ndscan.runtime.api import *
 
 try:
-    from ndscan.experiment.optimisation import (
+    from ndscan.scan.optimisation import (
         CompositeExplorationStrategy,
         ExplicitBatchExplorationStrategy,
         LocalLengthscaleExplorationStrategy,

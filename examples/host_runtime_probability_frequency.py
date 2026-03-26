@@ -22,21 +22,11 @@ import math
 
 import numpy as np
 
-from ndscan.experiment import (
-    CustomAnalysis,
-    ExecutionPolicy,
-    ExpFragment,
-    FloatChannel,
-    FloatParam,
-    IntChannel,
-    OpaqueChannel,
-    RepeatPointPolicy,
-    ScanRequest,
-    SinglePointPolicy,
-    annotations,
-    make_fragment_prepared_scan_exp,
-    prepare_child_scan,
-)
+from artiq.experiment import *
+from ndscan.define import *
+from ndscan.define import annotations
+from ndscan.scan import *
+from ndscan.runtime.api import *
 
 
 TRUE_FREQUENCY = 0.2

@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from itertools import product
 from typing import Any
 
-from .default_analysis import AnalysisFeedback
+from ..define.default_analysis import AnalysisFeedback
 
 __all__ = [
     "BasePoint",

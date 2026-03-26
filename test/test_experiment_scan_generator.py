@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from ndscan.experiment.scan_generator import (
+from ndscan.legacy.scan_generator import (
     CentreSpanGenerator,
     CentreSpanRefiningGenerator,
     ExpandingGenerator,

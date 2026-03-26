@@ -24,7 +24,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from ...experiment.host_scan_schema import (
+from ...submission.host_scan_schema import (
     HostScanChannelObjectiveSpec,
     HostScanChannelTargetSpec,
     HostScanEntry,

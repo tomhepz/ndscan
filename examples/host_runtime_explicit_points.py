@@ -8,13 +8,11 @@ product.
 
 from __future__ import annotations
 
-from ndscan.experiment import (
-    ExpFragment,
-    FloatChannel,
-    FloatParam,
-    ScanRequest,
-    make_fragment_prepared_scan_exp,
-)
+from artiq.experiment import *
+from ndscan.define import *
+from ndscan.define import annotations
+from ndscan.scan import *
+from ndscan.runtime.api import *
 
 
 class ExplicitPointFragment(ExpFragment):

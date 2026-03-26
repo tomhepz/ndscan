@@ -18,10 +18,12 @@ from fixtures import (
 )
 from mock_environment import HasEnvironmentCase
 from sipyco import pyon
+from artiq.experiment import *
 
-from ndscan.experiment import *
-from ndscan.experiment.parameters import FloatParamStore
-from ndscan.experiment.utils import is_kernel
+from ndscan.define import *
+from ndscan.define.parameters import FloatParamStore
+from ndscan.define.utils import is_kernel
+from ndscan.legacy import *
 from ndscan.utils import PARAMS_ARG_KEY, SCHEMA_REVISION, SCHEMA_REVISION_KEY
 
 ScanAddOneExp = make_fragment_scan_exp(AddOneFragment)

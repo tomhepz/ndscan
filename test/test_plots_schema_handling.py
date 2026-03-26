@@ -1,8 +1,10 @@
 import json
 
 from mock_environment import *
+from artiq.experiment import *
 
-from ndscan.experiment import *
+from ndscan.define import *
+from ndscan.legacy import *
 from ndscan.plots.utils import *
 
 

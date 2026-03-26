@@ -7,7 +7,7 @@ This is the schema-driven counterpart to ``host_runtime_parameter_mapping.py``:
 - the physical ``drive`` parameter is rebound from a small text expression.
 """
 
-from ndscan.experiment import make_fragment_prepared_scan_exp
+from ndscan.runtime.api import make_fragment_prepared_scan_exp
 
 from host_runtime_parameter_mapping import HardwareDriveFragment
 

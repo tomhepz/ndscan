@@ -2,7 +2,7 @@ import unittest
 
 from mock_environment import HasEnvironmentCase
 
-from ndscan.experiment.result_channels import (
+from ndscan.define.result_channels import (
     ArraySink,
     LastValueSink,
     ResettableAppendingDatasetSink,

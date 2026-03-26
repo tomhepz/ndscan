@@ -20,8 +20,8 @@ from typing import TYPE_CHECKING, Any
 
 from artiq.language import HasEnvironment
 
-from ..experiment.result_channels import AppendingDatasetSink, ScalarDatasetSink
-from ..experiment.utils import dump_json, to_metadata_broadcast_type
+from ..define.result_channels import AppendingDatasetSink, ScalarDatasetSink
+from ..define.utils import dump_json, to_metadata_broadcast_type
 from ..utils import SCHEMA_REVISION_KEY
 
 if TYPE_CHECKING:

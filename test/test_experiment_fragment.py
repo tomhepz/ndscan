@@ -8,9 +8,11 @@ from fixtures import (
     ReboundReboundAddOneFragment,
 )
 from mock_environment import HasEnvironmentCase
+from artiq.experiment import *
 
-from ndscan.experiment import *
-from ndscan.experiment.parameters import IntParamStore
+from ndscan.define import *
+from ndscan.define.parameters import IntParamStore
+from ndscan.legacy import *
 
 
 class DatasetDefaultFragment(Fragment):

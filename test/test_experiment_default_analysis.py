@@ -6,21 +6,21 @@ from typing import Any
 import numpy as np
 from mock_environment import HasEnvironmentCase
 
-from ndscan.experiment.default_analysis import CustomAnalysis, OnlineFit
-from ndscan.experiment.entry_point import run_fragment_once
-from ndscan.experiment.fragment import ExpFragment
-from ndscan.experiment.parameters import (
+from ndscan.define.default_analysis import CustomAnalysis, OnlineFit
+from ndscan.define.fragment import ExpFragment
+from ndscan.define.parameters import (
     FloatParam,
     FloatParamHandle,
     FloatParamStore,
 )
-from ndscan.experiment.result_channels import (
+from ndscan.define.result_channels import (
     FloatChannel,
     ResultChannel,
 )
-from ndscan.experiment.scan_generator import LinearGenerator
-from ndscan.experiment.scan_runner import ScanAxis, match_default_analysis
-from ndscan.experiment.subscan import SubscanExpFragment
+from ndscan.legacy.entry_point import run_fragment_once
+from ndscan.legacy.scan_generator import LinearGenerator
+from ndscan.legacy.scan_runner import ScanAxis, match_default_analysis
+from ndscan.legacy.subscan import SubscanExpFragment
 from ndscan.utils import FIT_OBJECTS
 
 TOLERATED_FIT_ERROR = 3e-2

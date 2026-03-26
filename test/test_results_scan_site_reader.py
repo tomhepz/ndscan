@@ -8,20 +8,14 @@ import h5py
 
 from mock_environment import ExpFragmentCase
 
-from ndscan.experiment import (
-    BasePoint,
-    compile_host_scan_schema,
-    ExpFragment,
-    ExplicitPointPolicy,
-    FloatChannel,
-    FloatParam,
-    ParameterMapping,
-    prepare_child_scan,
-    ScanRequest,
-    ScanVariable,
-    PreparedScan,
-)
+from ndscan.define.fragment import ExpFragment
+from ndscan.define.parameters import FloatParam
+from ndscan.define.result_channels import FloatChannel
 from ndscan.results.scan_site_reader import read_host_runtime_snapshot
+from ndscan.runtime.api import PreparedScan, ScanRequest, prepare_child_scan
+from ndscan.scan.mapping import ParameterMapping, ScanVariable
+from ndscan.scan.point_policy import BasePoint, ExplicitPointPolicy
+from ndscan.submission.host_scan_schema import compile_host_scan_schema
 
 
 def _execute_and_inspect(scan):

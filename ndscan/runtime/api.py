@@ -54,14 +54,15 @@ from artiq.language import (
 
 from .analysis import HostScanAnalysisEngine
 from .persistence import ScanSite, ScanSiteDatasetWriter
-from ..experiment.fragment import (
+from ..define.fragment import (
     ExpFragment,
     Fragment,
     RestartKernelTransitoryError,
     TransitoryError,
 )
-from ..experiment.parameters import ParamHandle, ParamStore
-from ..experiment.point_policy import (
+from ..define.parameters import ParamHandle, ParamStore
+from ..scan.mapping import FixedPseudoparam, ParameterMapping, ScanVariable
+from ..scan.point_policy import (
     BasePoint,
     BatchFeedback,
     CartesianPointPolicy,
@@ -71,14 +72,20 @@ from ..experiment.point_policy import (
     SinglePointPolicy,
     ZipPointPolicy,
 )
-from ..experiment.result_channels import (
+from ..define.result_channels import (
     FloatChannel,
     IntChannel,
     ResultChannel,
     SingleUseSink,
 )
-from ..experiment.scan_mapping import FixedPseudoparam, ParameterMapping, ScanVariable
-from ..experiment.utils import is_kernel
+from ..define.utils import is_kernel
+from ..submission.host_scan_schema import (
+    HostScanGridModeSpec,
+    HostScanSchemaError,
+    HostScanSpec,
+    compile_host_scan_schema,
+    compile_host_scan_spec,
+)
 from ..utils import PARAMS_ARG_KEY, merge_no_duplicates
 
 __all__ = [
@@ -740,17 +747,6 @@ class ScanRequest:
             metadata={} if metadata is None else metadata,
             execution_policy=ExecutionPolicy() if execution_policy is None else execution_policy,
         )
-
-# Imported here rather than at module top because the schema compiler constructs
-# ``ScanRequest`` and ``ExecutionPolicy`` instances from this module.
-from ..experiment.host_scan_schema import (
-    HostScanSchemaError,
-    HostScanGridModeSpec,
-    HostScanSpec,
-    compile_host_scan_schema,
-    compile_host_scan_spec,
-)
-
 
 @dataclass(frozen=True)
 class BoundScanAxis:

@@ -16,15 +16,11 @@ request uses ``ExecutionPolicy(max_points_per_batch=9)`` for the four-dimensiona
 
 from __future__ import annotations
 
-from ndscan.experiment import (
-    ExecutionPolicy,
-    ExpFragment,
-    FloatChannel,
-    FloatParam,
-    GradientDescentPointPolicy,
-    ScanRequest,
-    make_fragment_prepared_scan_exp,
-)
+from artiq.experiment import *
+from ndscan.define import *
+from ndscan.define import annotations
+from ndscan.scan import *
+from ndscan.runtime.api import *
 
 
 class QuadraticLossFragment(ExpFragment):

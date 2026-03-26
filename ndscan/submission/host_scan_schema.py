@@ -23,9 +23,13 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import numpy as np
 
 from .expression import ExpressionCompileError
-from .fragment import ExpFragment
-from .parameters import ParamHandle, ParamStore
-from .point_policy import (
+from ..define.fragment import ExpFragment
+from ..define.parameters import ParamHandle, ParamStore
+from ..define.result_channels import ResultChannel
+from ..define.utils import path_matches_spec
+from ..legacy.scan_generator import GENERATORS
+from ..scan.mapping import FixedPseudoparam, ParameterMapping, ScanVariable
+from ..scan.point_policy import (
     AskTellOptimiserPointPolicy,
     ExplicitPointPolicy,
     PointPolicy,
@@ -33,10 +37,6 @@ from .point_policy import (
     SinglePointPolicy,
     ZipPointPolicy,
 )
-from .result_channels import ResultChannel
-from .scan_generator import GENERATORS
-from .scan_mapping import FixedPseudoparam, ParameterMapping, ScanVariable
-from .utils import path_matches_spec
 
 if TYPE_CHECKING:
     from ndscan.runtime.api import ExecutionPolicy, ScanRequest
@@ -1178,7 +1178,7 @@ def _compile_gpo_schema_request(
         bounds[1].append(entry.bounds[1])
 
     try:
-        from .optimisation import (
+        from ..scan.optimisation import (
             NuboBatchBayesianOptimisationBackend,
             extract_scalar_channel_objective,
         )

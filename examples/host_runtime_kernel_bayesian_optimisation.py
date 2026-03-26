@@ -19,18 +19,14 @@ it easy to verify the desired property in tests:
 
 from __future__ import annotations
 
-from ndscan.experiment import (
-    ExecutionPolicy,
-    ExpFragment,
-    FloatChannel,
-    FloatParam,
-    ScanRequest,
-    kernel,
-    make_fragment_prepared_scan_exp,
-)
+from artiq.experiment import *
+from ndscan.define import *
+from ndscan.define import annotations
+from ndscan.scan import *
+from ndscan.runtime.api import *
 
 try:
-    from ndscan.experiment import (
+    from ndscan.scan.optimisation import (
         AskTellOptimiserPointPolicy,
         NuboBatchBayesianOptimisationBackend,
         extract_scalar_channel_objective,

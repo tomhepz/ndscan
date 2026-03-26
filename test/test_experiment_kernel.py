@@ -35,13 +35,23 @@ try:
 except ImportError:
     _KERNEL_BO_DEPS_AVAILABLE = False
 
-from ndscan.experiment.entry_point import make_fragment_scan_exp, run_fragment_once
-from ndscan.experiment.fragment import (
+from ndscan.define.fragment import (
     AggregateExpFragment,
     ExpFragment,
     RestartKernelTransitoryError,
     TransitoryError,
 )
+from ndscan.define.parameters import (
+    BoolParam,
+    EnumParam,
+    FloatParam,
+    IntParam,
+    StringParam,
+)
+from ndscan.define.result_channels import FloatChannel, IntChannel, OpaqueChannel
+from ndscan.legacy.entry_point import make_fragment_scan_exp, run_fragment_once
+from ndscan.legacy.scan_generator import LinearGenerator, ListGenerator
+from ndscan.legacy.subscan import SubscanExpFragment, setattr_subscan
 from ndscan.runtime.api import (
     ExecutionPolicy,
     ParameterMapping,
@@ -51,16 +61,6 @@ from ndscan.runtime.api import (
     prepare_child_scan,
     setattr_prepared_child_scan,
 )
-from ndscan.experiment.parameters import (
-    BoolParam,
-    EnumParam,
-    FloatParam,
-    IntParam,
-    StringParam,
-)
-from ndscan.experiment.result_channels import FloatChannel, IntChannel, OpaqueChannel
-from ndscan.experiment.scan_generator import LinearGenerator, ListGenerator
-from ndscan.experiment.subscan import SubscanExpFragment, setattr_subscan
 from ndscan.utils import SCHEMA_REVISION, SCHEMA_REVISION_KEY
 
 

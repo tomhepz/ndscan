@@ -6,24 +6,24 @@ try:
     import torch
     from mock_environment import HasEnvironmentCase
 
-    from ndscan.experiment import (
-        AskTellOptimiserPointPolicy,
-        compile_host_scan_schema,
-        ExecutionPolicy,
-        ExpFragment,
+    from ndscan.define.fragment import ExpFragment
+    from ndscan.define.parameters import FloatParam
+    from ndscan.define.result_channels import FloatChannel
+    from ndscan.runtime.api import ExecutionPolicy, PreparedScan, ScanRequest
+    from ndscan.scan.optimisation import (
         ExplicitBatchExplorationStrategy,
-        FloatChannel,
-        FloatParam,
         LocalLengthscaleExplorationStrategy,
         MhcsExplorationStrategy,
         NuboBatchBayesianOptimisationBackend,
         NuboBayesianOptimisationState,
-        OptimiserObservation,
-        PreparedScan,
-        ScanRequest,
         ScheduledExplorationStrategy,
         extract_scalar_channel_objective,
     )
+    from ndscan.scan.point_policy import (
+        AskTellOptimiserPointPolicy,
+        OptimiserObservation,
+    )
+    from ndscan.submission.host_scan_schema import compile_host_scan_schema
 
     _OPTIMISATION_DEPS_AVAILABLE = True
 except ModuleNotFoundError:

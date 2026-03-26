@@ -17,15 +17,11 @@ from __future__ import annotations
 
 from artiq.language import EnvExperiment
 
-from ndscan.experiment import (
-    CustomAnalysis,
-    ExpFragment,
-    FloatChannel,
-    FloatParam,
-    ScanRequest,
-    annotations,
-    prepare_scan,
-)
+from artiq.experiment import *
+from ndscan.define import *
+from ndscan.define import annotations
+from ndscan.scan import *
+from ndscan.runtime.api import *
 
 
 def _fit_line_through_origin(xs, ys) -> float:

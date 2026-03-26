@@ -34,15 +34,11 @@ from __future__ import annotations
 
 import time
 
-from ndscan.experiment import (
-    ExecutionPolicy,
-    ExpFragment,
-    FloatChannel,
-    FloatParam,
-    PreviewPolicy,
-    ScanRequest,
-    make_fragment_prepared_scan_exp,
-)
+from artiq.experiment import *
+from ndscan.define import *
+from ndscan.define import annotations
+from ndscan.scan import *
+from ndscan.runtime.api import *
 
 
 class SlowPreviewFragment(ExpFragment):

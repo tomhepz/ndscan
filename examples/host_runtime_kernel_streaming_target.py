@@ -11,15 +11,11 @@ executor:
 
 from __future__ import annotations
 
-from ndscan.experiment import (
-    ExecutionPolicy,
-    ExpFragment,
-    FloatChannel,
-    FloatParam,
-    ScanRequest,
-    make_fragment_prepared_scan_exp,
-    kernel,
-)
+from artiq.experiment import *
+from ndscan.define import *
+from ndscan.define import annotations
+from ndscan.scan import *
+from ndscan.runtime.api import *
 
 
 class KernelStreamingTargetFragment(ExpFragment):

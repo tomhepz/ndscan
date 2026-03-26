@@ -14,8 +14,10 @@ from fixtures import (
     TwoAnalysisFragment,
 )
 from mock_environment import ExpFragmentCase
+from artiq.experiment import *
 
-from ndscan.experiment import *
+from ndscan.define import *
+from ndscan.legacy import *
 
 
 class Scan1DFragment(ExpFragment):

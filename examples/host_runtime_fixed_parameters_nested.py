@@ -23,14 +23,11 @@ contain only the child's fixed parameters.
 
 from __future__ import annotations
 
-from ndscan.experiment import (
-    ExpFragment,
-    FloatChannel,
-    FloatParam,
-    ScanRequest,
-    make_fragment_prepared_scan_exp,
-    prepare_child_scan,
-)
+from artiq.experiment import *
+from ndscan.define import *
+from ndscan.define import annotations
+from ndscan.scan import *
+from ndscan.runtime.api import *
 
 
 class FixedLeafFragment(ExpFragment):

@@ -3,8 +3,9 @@ Common fragments/… for unit tests.
 """
 
 import numpy
+from artiq.experiment import *
 
-from ndscan.experiment import *
+from ndscan.define import *
 
 
 class AddOneFragment(ExpFragment):

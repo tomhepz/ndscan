@@ -30,16 +30,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from ndscan.experiment import (
-    ExecutionPolicy,
-    ExpFragment,
-    FloatChannel,
-    FloatParam,
-    ScanRequest,
-    kernel,
-    make_fragment_prepared_scan_exp,
-    setattr_prepared_child_scan,
-)
+from artiq.experiment import *
+from ndscan.define import *
+from ndscan.define import annotations
+from ndscan.scan import *
+from ndscan.runtime.api import *
 
 
 class KernelLineFragment(ExpFragment):

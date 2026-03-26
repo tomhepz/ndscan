@@ -18,8 +18,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from .expression import compile_expression
-from .parameters import ParamHandle
+from ..define.parameters import ParamHandle
+from ..submission.expression import compile_expression
 
 __all__ = [
     "ScanVariable",
@@ -156,7 +156,7 @@ class ParameterMapping:
 
         This is the GUI-oriented counterpart to writing a mapping function in Python.
         The expression language is intentionally tiny and is implemented by the
-        standalone :mod:`ndscan.experiment.expression` module.
+        standalone :mod:`ndscan.submission.expression` module.
 
         ``symbols`` maps expression variable names onto either dynamic dependencies
         (``ParamHandle`` / ``ScanVariable``) or fixed values. Fixed values are baked

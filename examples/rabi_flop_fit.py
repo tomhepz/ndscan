@@ -6,7 +6,10 @@ subscan from other fragments.
 import oitg.fitting
 from rabi_flop import RabiFlopSim
 
-from ndscan.experiment import *
+from artiq.experiment import *
+from ndscan.define import *
+from ndscan.define import annotations
+from ndscan.legacy import *
 
 
 class RabiFlopWithAnalysis(RabiFlopSim):

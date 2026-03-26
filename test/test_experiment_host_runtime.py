@@ -7,8 +7,9 @@ import unittest
 from unittest.mock import patch
 
 import h5py
-import ndscan.experiment
 import numpy as np
+import ndscan.experiment as experiment_facade
+from artiq.experiment import kernel
 from artiq.language.core import TerminationRequested
 from examples.host_runtime_prepared_root_linear_scan import (
     HostRuntimePreparedRootLinearScan,
@@ -16,48 +17,46 @@ from examples.host_runtime_prepared_root_linear_scan import (
 from mock_environment import HasEnvironmentCase
 from sipyco import pyon
 
-from ndscan.experiment import (
-    AnalysisFeedback,
+from ndscan.dashboard.submission import HostSubmissionBackend, select_submission_backend
+from ndscan.define import annotations
+from ndscan.define.default_analysis import AnalysisFeedback, CustomAnalysis, OnlineFit
+from ndscan.define.fragment import ExpFragment, RestartKernelTransitoryError
+from ndscan.define.parameters import FloatParam
+from ndscan.define.result_channels import FloatChannel, IntChannel
+from ndscan.runtime.api import (
+    ExecutionPolicy,
+    PointObservation,
+    PreparedScan,
+    PreviewPolicy,
+    ScanRequest,
+    make_child_scan_site,
+    make_fragment_prepared_dashboard_scan_exp,
+    make_fragment_prepared_scan_exp,
+    prepare_child_scan,
+    setattr_prepared_child_scan,
+)
+from ndscan.runtime.persistence import ScanSite
+from ndscan.scan.mapping import ParameterMapping, ScanVariable
+from ndscan.scan.point_policy import (
     BasePoint,
     BatchFeedback,
     CartesianPointPolicy,
     ConcatPointPolicy,
-    CustomAnalysis,
-    ExecutionPolicy,
-    ExpFragment,
     ExplicitPointPolicy,
-    FloatChannel,
-    FloatParam,
     GradientDescentPointPolicy,
-    IntChannel,
     PointPolicy,
-    PointObservation,
-    PreviewPolicy,
     ProductPointPolicy,
     RecursiveMidpointPointPolicy1D,
     RepeatPointPolicy,
-    HostScanSpec,
-    OnlineFit,
-    ParameterMapping,
-    compile_host_scan_spec,
-    compile_host_scan_schema,
-    ScanRequest,
-    ScanVariable,
-    ScanSite,
-    RestartKernelTransitoryError,
     SinglePointPolicy,
     UntilConditionPointPolicy,
     ZipPointPolicy,
-    annotations,
-    kernel,
-    make_child_scan_site,
-    make_fragment_prepared_scan_exp,
-    make_fragment_prepared_dashboard_scan_exp,
-    PreparedScan,
-    prepare_child_scan,
-    setattr_prepared_child_scan,
 )
-from ndscan.dashboard.submission import HostSubmissionBackend, select_submission_backend
+from ndscan.submission.host_scan_schema import (
+    HostScanSpec,
+    compile_host_scan_schema,
+    compile_host_scan_spec,
+)
 from ndscan.utils import PARAMS_ARG_KEY
 from ndscan.utils import FIT_OBJECTS
 
@@ -289,7 +288,7 @@ class PointPolicyTest(unittest.TestCase):
 
 class HostScanSchemaCompilationTest(HasEnvironmentCase):
     def test_host_scan_base_class_is_not_exported_via_star_imports(self):
-        self.assertNotIn("PreparedScanExperiment", ndscan.experiment.__all__)
+        self.assertNotIn("PreparedScanExperiment", experiment_facade.__all__)
 
     def test_host_scan_spec_round_trips_through_dict_transport(self):
         spec = HostScanSpec.from_dict(

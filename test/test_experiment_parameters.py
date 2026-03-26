@@ -3,8 +3,8 @@ from enum import Enum, unique
 
 from mock_environment import HasEnvironmentCase
 
-from ndscan.experiment.fragment import Fragment
-from ndscan.experiment.parameters import (
+from ndscan.define.fragment import Fragment
+from ndscan.define.parameters import (
     BoolParam,
     EnumParam,
     FloatParam,

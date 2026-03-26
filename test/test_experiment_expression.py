@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from ndscan.experiment.expression import (
+from ndscan.submission.expression import (
     ExpressionNameError,
     ExpressionSyntaxError,
     ExpressionValidationError,
