@@ -25,7 +25,7 @@ from ..define.utils import dump_json, to_metadata_broadcast_type
 from ..utils import SCHEMA_REVISION_KEY
 
 if TYPE_CHECKING:
-    from .api import PointObservation
+    from .program import PointObservation
 
 __all__ = [
     "ScanSite",

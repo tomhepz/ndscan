@@ -1,0 +1,1130 @@
+"""Request, binding, and program-layer types for the prepared runtime."""
+
+from __future__ import annotations
+
+import logging
+import time
+from collections import OrderedDict
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
+
+import numpy as np
+
+from artiq.language import HasEnvironment
+
+from .analysis import HostScanAnalysisEngine
+from .context import PreviewPolicy
+from .persistence import ScanSite, ScanSiteDatasetWriter
+from ..define.fragment import ExpFragment
+from ..define.parameters import ParamHandle, ParamStore
+from ..define.result_channels import ResultChannel
+from ..define.utils import is_kernel
+from ..scan.mapping import FixedPseudoparam, ParameterMapping, ScanVariable
+from ..scan.point_policy import (
+    BasePoint,
+    BatchFeedback,
+    CartesianPointPolicy,
+    ExplicitPointPolicy,
+    PointPolicy,
+    ProductPointPolicy,
+    SinglePointPolicy,
+    ZipPointPolicy,
+)
+
+__all__ = [
+    "ExecutionPolicy",
+    "ScanRequest",
+    "BoundScanAxis",
+    "BoundResultChannel",
+    "PointObservation",
+    "ScanOutputs",
+    "ScanInspection",
+]
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ScanOutputs:
+    """Stable named output surface for completed scans."""
+
+    values: OrderedDict[str, Any]
+
+    @classmethod
+    def empty(cls) -> "ScanOutputs":
+        return cls(OrderedDict())
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, Any]) -> "ScanOutputs":
+        return cls(OrderedDict(mapping.items()))
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return tuple(self.values.keys())
+
+    def __len__(self) -> int:
+        return len(self.values)
+
+    def __contains__(self, name: str) -> bool:
+        return name in self.values
+
+    def __getitem__(self, name: str) -> Any:
+        return self.values[name]
+
+    def get(self, name: str, default: Any = None) -> Any:
+        return self.values.get(name, default)
+
+    def as_tuple(self, *names: str) -> tuple[Any, ...]:
+        selected = self.names if not names else names
+        return tuple(self.values[name] for name in selected)
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self.values)
+
+
+@dataclass(frozen=True)
+class ExecutionPolicy:
+    """Host-runtime scheduling and flush policy for one scan request."""
+
+    max_points_per_batch: int | None = None
+    preview_policy: PreviewPolicy | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_points_per_batch is not None and self.max_points_per_batch <= 0:
+            raise ValueError("max_points_per_batch must be positive when specified")
+        if self.preview_policy is not None and not isinstance(
+            self.preview_policy, PreviewPolicy
+        ):
+            raise TypeError("preview_policy must be a PreviewPolicy instance")
+
+
+@dataclass(frozen=True)
+class ScanRequest:
+    """User-facing prepared-runtime scan request."""
+
+    axes: tuple[ParamHandle | ScanVariable, ...]
+    point_policy: PointPolicy
+    site: ScanSite = field(default_factory=ScanSite)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    execution_policy: ExecutionPolicy = field(default_factory=ExecutionPolicy)
+    parameter_mappings: tuple[ParameterMapping, ...] = ()
+    fixed_pseudoparams: tuple[FixedPseudoparam, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.execution_policy, ExecutionPolicy):
+            raise TypeError("execution_policy must be an ExecutionPolicy instance")
+        for mapping in self.parameter_mappings:
+            if not isinstance(mapping, ParameterMapping):
+                raise TypeError(
+                    "parameter_mappings must contain ParameterMapping instances"
+                )
+        for pseudoparam in self.fixed_pseudoparams:
+            if not isinstance(pseudoparam, FixedPseudoparam):
+                raise TypeError(
+                    "fixed_pseudoparams must contain FixedPseudoparam instances"
+                )
+
+    def with_site(self, site: ScanSite) -> "ScanRequest":
+        return ScanRequest(
+            axes=self.axes,
+            point_policy=self.point_policy,
+            site=site,
+            metadata=self.metadata,
+            execution_policy=self.execution_policy,
+            parameter_mappings=self.parameter_mappings,
+            fixed_pseudoparams=self.fixed_pseudoparams,
+        )
+
+    def with_parameter_mappings(
+        self, parameter_mappings: Sequence[ParameterMapping]
+    ) -> "ScanRequest":
+        return ScanRequest(
+            axes=self.axes,
+            point_policy=self.point_policy,
+            site=self.site,
+            metadata=self.metadata,
+            execution_policy=self.execution_policy,
+            parameter_mappings=self.parameter_mappings + tuple(parameter_mappings),
+            fixed_pseudoparams=self.fixed_pseudoparams,
+        )
+
+    @classmethod
+    def single(
+        cls,
+        *,
+        site: ScanSite | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        execution_policy: ExecutionPolicy | None = None,
+    ) -> "ScanRequest":
+        return cls(
+            axes=(),
+            point_policy=SinglePointPolicy(),
+            site=ScanSite() if site is None else site,
+            metadata={} if metadata is None else metadata,
+            execution_policy=ExecutionPolicy()
+            if execution_policy is None
+            else execution_policy,
+        )
+
+    @classmethod
+    def linear(
+        cls,
+        axis: ParamHandle | ScanVariable,
+        *,
+        start: float,
+        stop: float,
+        num_points: int,
+        site: ScanSite | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        execution_policy: ExecutionPolicy | None = None,
+    ) -> "ScanRequest":
+        if num_points < 2:
+            raise ValueError("linear scans require at least 2 points")
+        values = np.linspace(start=float(start), stop=float(stop), num=int(num_points))
+        return cls.cartesian(
+            [(axis, values.tolist())],
+            site=site,
+            metadata=metadata,
+            execution_policy=execution_policy,
+        )
+
+    @classmethod
+    def cartesian(
+        cls,
+        axes: Sequence[tuple[ParamHandle | ScanVariable, Sequence[Any]]],
+        *,
+        site: ScanSite | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        execution_policy: ExecutionPolicy | None = None,
+    ) -> "ScanRequest":
+        return cls(
+            axes=tuple(handle for handle, _ in axes),
+            point_policy=CartesianPointPolicy([values for _, values in axes]),
+            site=ScanSite() if site is None else site,
+            metadata={} if metadata is None else metadata,
+            execution_policy=ExecutionPolicy()
+            if execution_policy is None
+            else execution_policy,
+        )
+
+    @classmethod
+    def zipped(
+        cls,
+        axes: Sequence[tuple[ParamHandle | ScanVariable, Sequence[Any]]],
+        *,
+        site: ScanSite | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        execution_policy: ExecutionPolicy | None = None,
+    ) -> "ScanRequest":
+        return cls(
+            axes=tuple(handle for handle, _ in axes),
+            point_policy=ZipPointPolicy([values for _, values in axes]),
+            site=ScanSite() if site is None else site,
+            metadata={} if metadata is None else metadata,
+            execution_policy=ExecutionPolicy()
+            if execution_policy is None
+            else execution_policy,
+        )
+
+    @classmethod
+    def explicit(
+        cls,
+        axes: Sequence[ParamHandle | ScanVariable],
+        points: Sequence[Sequence[Any]],
+        *,
+        site: ScanSite | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        execution_policy: ExecutionPolicy | None = None,
+    ) -> "ScanRequest":
+        return cls(
+            axes=tuple(axes),
+            point_policy=ExplicitPointPolicy(len(axes), points),
+            site=ScanSite() if site is None else site,
+            metadata={} if metadata is None else metadata,
+            execution_policy=ExecutionPolicy()
+            if execution_policy is None
+            else execution_policy,
+        )
+
+
+@dataclass(frozen=True)
+class BoundScanAxis:
+    """Runtime-bound scan input metadata."""
+
+    source: ParamHandle | ScanVariable
+    key: str
+    point_key: str
+    path: str
+    schema: dict[str, Any]
+    identity: tuple[str, str]
+    param_store: ParamStore | None = None
+
+    def metadata(self) -> dict[str, Any]:
+        if isinstance(self.source, ParamHandle):
+            return {
+                "path": self.path,
+                "param": self.schema,
+            }
+        return {
+            "path": self.path,
+            "variable": self.schema,
+        }
+
+
+@dataclass(frozen=True)
+class BoundScanParameter:
+    """Runtime-bound actual fragment parameter recorded point-by-point."""
+
+    handle: ParamHandle
+    key: str
+    path: str
+    param_schema: dict[str, Any]
+    is_scanned: bool
+    scan_role: str
+
+    @property
+    def identity(self) -> tuple[str, str]:
+        return self.handle._store.identity
+
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "param": self.param_schema,
+            "is_scanned": self.is_scanned,
+            "scan_role": self.scan_role,
+        }
+
+
+@dataclass(frozen=True)
+class _BoundParameterMapping:
+    """Validated parameter mapping ready for point-by-point execution."""
+
+    mapping: ParameterMapping
+    targets: tuple[ParamHandle, ...]
+    dependencies: tuple[ParamHandle | ScanVariable, ...]
+
+
+@dataclass(frozen=True)
+class BoundResultChannel:
+    """Runtime-bound result channel metadata."""
+
+    channel: ResultChannel
+    key: str
+
+
+@dataclass(frozen=True)
+class PointObservation:
+    """Result of one successfully completed point."""
+
+    point_index: int
+    axis_values: OrderedDict[str, Any]
+    channel_values: OrderedDict[str, Any]
+    pseudoparam_values: OrderedDict[str, Any] = field(default_factory=OrderedDict)
+    parameter_values: OrderedDict[str, Any] = field(default_factory=OrderedDict)
+    point_metadata: OrderedDict[str, Any] = field(default_factory=OrderedDict)
+    acquired_at_unix: float | None = None
+
+
+@dataclass(frozen=True)
+class _ResolvedExecutionPoint:
+    """Concrete point installation plan shared by host and kernel executors."""
+
+    point: BasePoint
+    axis_values: OrderedDict[str, Any]
+    pseudoparam_values: OrderedDict[str, Any]
+    parameter_values: OrderedDict[str, Any]
+    rpc_parameter_values: tuple[Any, ...]
+
+
+@dataclass
+class _ScanAxisBinding:
+    """Temporary rebinding of one logical scan axis onto a dedicated store."""
+
+    handles: tuple[ParamHandle, ...]
+    original_stores: tuple[ParamStore, ...]
+
+    def restore(self) -> None:
+        for handle, store in zip(self.handles, self.original_stores, strict=True):
+            handle.set_store(store)
+
+
+@dataclass
+class HostScanRuntimeStats:
+    """Lightweight runtime counters/timings for executor bring-up and profiling."""
+
+    batch_count: int = 0
+    point_count: int = 0
+    executor_entry_count: int = 0
+    first_executor_entry_elapsed_s: float | None = None
+    total_executor_elapsed_s: float = 0.0
+    total_batch_finalize_elapsed_s: float = 0.0
+
+
+@dataclass
+class ScanInspection:
+    """Host-only inspection artifact for one completed prepared scan execution."""
+
+    coordinates: OrderedDict[str, list[Any]]
+    parameters: OrderedDict[str, list[Any]]
+    values: dict[ResultChannel, list[Any]]
+    analysis_results: dict[str, Any]
+    online_analysis_results: dict[str, dict[str, Any]]
+    annotations: list[dict[str, Any]]
+    online_analysis_annotations: dict[str, list[dict[str, Any]]]
+    runtime_stats: HostScanRuntimeStats
+    point_metadata: OrderedDict[str, list[Any]]
+    site_prefix: str
+
+    @classmethod
+    def empty(
+        cls,
+        axes: Sequence[BoundScanAxis],
+        parameters: Sequence[BoundScanParameter],
+        channels: Sequence[BoundResultChannel],
+        site_prefix: str,
+        *,
+        initial_annotations: Sequence[dict[str, Any]] = (),
+    ) -> "ScanInspection":
+        return cls(
+            coordinates=OrderedDict((axis.identity, []) for axis in axes),
+            parameters=OrderedDict((parameter.identity, []) for parameter in parameters),
+            values={binding.channel: [] for binding in channels},
+            analysis_results={},
+            online_analysis_results={},
+            annotations=list(initial_annotations),
+            online_analysis_annotations={},
+            runtime_stats=HostScanRuntimeStats(),
+            point_metadata=OrderedDict(),
+            site_prefix=site_prefix,
+        )
+
+    def record(
+        self,
+        observation: PointObservation,
+        axes: Sequence[BoundScanAxis],
+        parameters: Sequence[BoundScanParameter],
+        channels: Sequence[BoundResultChannel],
+    ) -> None:
+        for axis in axes:
+            if axis.param_store is not None:
+                self.coordinates[axis.identity].append(
+                    observation.axis_values[axis.key]
+                )
+            else:
+                self.coordinates[axis.identity].append(
+                    observation.pseudoparam_values[axis.point_key]
+                )
+
+        for parameter in parameters:
+            self.parameters[parameter.identity].append(
+                observation.parameter_values[parameter.key]
+            )
+
+        for binding in channels:
+            self.values[binding.channel].append(observation.channel_values[binding.key])
+
+        if observation.acquired_at_unix is not None:
+            self.point_metadata.setdefault("point.acquired_at_unix", []).append(
+                observation.acquired_at_unix
+            )
+        for key, value in observation.point_metadata.items():
+            self.point_metadata.setdefault(key, []).append(value)
+
+    def record_batch(
+        self,
+        observations: Sequence[PointObservation],
+        axes: Sequence[BoundScanAxis],
+        parameters: Sequence[BoundScanParameter],
+        channels: Sequence[BoundResultChannel],
+    ) -> None:
+        for observation in observations:
+            self.record(observation, axes, parameters, channels)
+
+    def outputs(self) -> ScanOutputs:
+        return ScanOutputs.from_mapping(self.analysis_results)
+
+
+class _HostPointBatchSource:
+    """Host-side batch source/fallback point-feedback seam."""
+
+    def __init__(self, point_policy: PointPolicy, execution_policy: ExecutionPolicy):
+        self._point_policy = point_policy
+        self._execution_policy = execution_policy
+
+    @property
+    def point_policy(self) -> PointPolicy:
+        return self._point_policy
+
+    def describe(self) -> dict[str, Any]:
+        return self._point_policy.describe()
+
+    def effective_batch_size(self) -> int:
+        request_limit = self._execution_policy.max_points_per_batch
+        if request_limit is None:
+            request_limit = 1
+
+        preferred = self._point_policy.preferred_batch_size(request_limit)
+        if preferred <= 0:
+            raise ValueError("preferred_batch_size() must return a positive integer")
+        return min(request_limit, preferred)
+
+    def next_batch(self):
+        requested_size = self.effective_batch_size()
+        batch = self._point_policy.next_batch(requested_size)
+        if batch:
+            return batch
+        if self._point_policy.is_finished():
+            return []
+        raise RuntimeError(
+            f"{type(self._point_policy).__name__} returned no points before finishing"
+        )
+
+    def has_more_work(self) -> bool:
+        return not self._point_policy.is_finished()
+
+    def observe_batch(self, feedback: BatchFeedback) -> None:
+        self._point_policy.observe_batch(feedback)
+
+    def kernel_batch_source(self):
+        return None
+
+
+class _HostAnalysisAdapter:
+    """Host-side analysis seam."""
+
+    def __init__(self, engine: HostScanAnalysisEngine):
+        self._engine = engine
+
+    @property
+    def engine(self) -> HostScanAnalysisEngine:
+        return self._engine
+
+    def metadata(self) -> dict[str, Any]:
+        return self._engine.metadata()
+
+    def initial_annotations(self) -> list[dict[str, Any]]:
+        return self._engine.initial_annotations()
+
+    def observe_batch(
+        self,
+        completed_batch: Sequence[PointObservation],
+        result: ScanInspection,
+        site_writer: ScanSiteDatasetWriter,
+    ):
+        return self._engine.observe_batch(completed_batch, result, site_writer)
+
+    def execute_final(
+        self, result: ScanInspection, site_writer: ScanSiteDatasetWriter
+    ) -> None:
+        self._engine.execute_final(result, site_writer)
+
+    def kernel_reducer(self):
+        return None
+
+
+class _HostObservationTransport:
+    """Host-side persistence/preview seam for completed observations."""
+
+    def __init__(self, site_writer: ScanSiteDatasetWriter):
+        self._site_writer = site_writer
+
+    @property
+    def site_writer(self) -> ScanSiteDatasetWriter:
+        return self._site_writer
+
+    @property
+    def prefix(self) -> str:
+        return self._site_writer.prefix
+
+    @property
+    def next_point_index(self) -> int:
+        return self._site_writer.next_point_index
+
+    def register_preview(self, preview) -> None:
+        if preview is not None:
+            preview.register_writer(self._site_writer)
+
+    def unregister_preview(self, preview) -> None:
+        if preview is not None:
+            preview.unregister_writer(self._site_writer)
+
+    def publish_metadata(
+        self,
+        metadata: Mapping[str, Any],
+        *,
+        extra_metadata: Mapping[str, Any],
+        start_unix_time: float,
+    ) -> None:
+        self._site_writer.publish_metadata(
+            metadata,
+            extra_metadata=extra_metadata,
+            start_unix_time=start_unix_time,
+        )
+
+    def start_segment(
+        self, *, parent_point_index: int | None, start_unix_time: float
+    ) -> None:
+        self._site_writer.start_segment(
+            parent_point_index=parent_point_index,
+            start_unix_time=start_unix_time,
+        )
+
+    def append_observations(self, observations: Sequence[PointObservation]) -> None:
+        self._site_writer.append_observations(observations)
+
+    def flush(self) -> None:
+        self._site_writer.flush()
+
+    def finish_segment(self) -> None:
+        self._site_writer.finish_segment()
+
+    def set_completed(self, completed: bool) -> None:
+        self._site_writer.set_completed(completed)
+
+    def close(self) -> None:
+        self._site_writer.close()
+
+    def maybe_write_preview(self, preview) -> None:
+        if preview is not None:
+            preview.maybe_write_preview()
+
+    def write_completion_preview(self, preview) -> None:
+        if preview is not None:
+            preview.write_completion_preview()
+
+    def kernel_transport(self):
+        return None
+
+
+def _make_batch_feedback(
+    observations: Sequence[PointObservation],
+    result: ScanInspection,
+    axes: Sequence[BoundScanAxis],
+    parameters: Sequence[BoundScanParameter],
+    channels: Sequence[BoundResultChannel],
+    online_analyses: dict[str, Any],
+) -> BatchFeedback:
+    return BatchFeedback(
+        observations=tuple(observations),
+        axis_data={
+            axis.source: tuple(result.coordinates[axis.identity]) for axis in axes
+        },
+        parameter_data={
+            parameter.handle: tuple(result.parameters[parameter.identity])
+            for parameter in parameters
+        },
+        result_data={
+            binding.channel: tuple(result.values[binding.channel]) for binding in channels
+        },
+        online_analyses=online_analyses,
+    )
+
+
+def _publish_completed_batch(
+    completed_batch: Sequence[PointObservation],
+    result: ScanInspection,
+    *,
+    axes: Sequence[BoundScanAxis],
+    parameters: Sequence[BoundScanParameter],
+    channels: Sequence[BoundResultChannel],
+    point_source: _HostPointBatchSource,
+    analysis: _HostAnalysisAdapter,
+    transport: _HostObservationTransport,
+    preview,
+) -> None:
+    if not completed_batch:
+        return
+
+    started_at = time.perf_counter()
+    transport.append_observations(completed_batch)
+    result.record_batch(completed_batch, axes, parameters, channels)
+    online_analyses = analysis.observe_batch(
+        completed_batch,
+        result,
+        transport.site_writer,
+    )
+    point_source.observe_batch(
+        _make_batch_feedback(
+            completed_batch,
+            result,
+            axes,
+            parameters,
+            channels,
+            online_analyses,
+        )
+    )
+    transport.flush()
+    transport.maybe_write_preview(preview)
+    result.runtime_stats.batch_count += 1
+    result.runtime_stats.point_count += len(completed_batch)
+    result.runtime_stats.total_batch_finalize_elapsed_s += (
+        time.perf_counter() - started_at
+    )
+
+
+class HostScanProgram:
+    """Validated, fragment-bound host scan plan."""
+
+    def __init__(
+        self,
+        fragment: ExpFragment,
+        request: ScanRequest,
+        axes: Sequence[BoundScanAxis],
+        parameters: Sequence[BoundScanParameter],
+        channels: Sequence[BoundResultChannel],
+        parameter_mappings: Sequence[_BoundParameterMapping],
+        site_writer: ScanSiteDatasetWriter,
+        analysis_engine: HostScanAnalysisEngine,
+    ):
+        self.fragment = fragment
+        self.request = request
+        self.axes = tuple(axes)
+        self.parameters = tuple(parameters)
+        self.channels = tuple(channels)
+        self.parameter_mappings = tuple(parameter_mappings)
+        self.point_source = _HostPointBatchSource(
+            request.point_policy, request.execution_policy
+        )
+        self.analysis = _HostAnalysisAdapter(analysis_engine)
+        self.transport = _HostObservationTransport(site_writer)
+
+    def metadata(self) -> dict[str, Any]:
+        metadata = {
+            "site.fragment_fqn": self.fragment.fqn,
+            "scan.point_policy": self.point_source.describe(),
+            "scan.parameters": {
+                parameter.key: parameter.metadata()
+                for parameter in self.parameters
+            },
+            "scan.pseudoparams": {
+                axis.point_key: axis.metadata()
+                for axis in self.axes
+                if isinstance(axis.source, ScanVariable)
+            },
+            "scan.fixed_pseudoparams": {
+                pseudoparam.name: {
+                    "variable": pseudoparam.variable.describe(),
+                    "value": _parameter_value_for_metadata(pseudoparam.value),
+                }
+                for pseudoparam in self.request.fixed_pseudoparams
+            },
+            "scan.fixed_parameters": _collect_fixed_parameter_metadata(
+                self.fragment,
+                self.parameters,
+            ),
+            "scan.channels": {
+                binding.key: binding.channel.describe()
+                for binding in self.channels
+            },
+        }
+        if self.parameter_mappings:
+            metadata["scan.parameter_mappings"] = {
+                f"mapping_{index}": mapping.mapping.describe(
+                    {axis.source: axis.point_key for axis in self.axes}
+                )
+                for index, mapping in enumerate(self.parameter_mappings)
+            }
+        metadata.update(self.analysis.metadata())
+        return metadata
+
+
+def _parameter_value_for_metadata(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.name
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    return value
+
+
+def _collect_fixed_parameter_metadata(
+    fragment: ExpFragment,
+    varying_parameters: Sequence[BoundScanParameter],
+) -> dict[str, Any]:
+    varying_keys = {
+        _mapping_target_key(parameter.handle) for parameter in varying_parameters
+    }
+    fixed_parameters = []
+
+    def walk(current: ExpFragment) -> None:
+        for name, param in current._free_params.items():
+            handle = getattr(current, name)
+            key = _mapping_target_key(handle)
+            if key in varying_keys or handle._store is None:
+                continue
+            fixed_parameters.append(
+                {
+                    "path": current._stringize_path(),
+                    "param": param.describe(),
+                    "value": _parameter_value_for_metadata(handle._store.get_value()),
+                }
+            )
+        for child in current._subfragments:
+            if child in current._detached_subfragments:
+                continue
+            walk(child)
+
+    walk(fragment)
+    return {
+        f"fixed_param_{index}": entry for index, entry in enumerate(fixed_parameters)
+    }
+
+
+def _axis_source_key(source: ParamHandle | ScanVariable) -> tuple[Any, ...]:
+    if isinstance(source, ParamHandle):
+        return ("param", id(source.owner), source.name)
+    return ("variable", source.name)
+
+
+def _mapping_target_key(handle: ParamHandle) -> tuple[int, str]:
+    return (id(handle.owner), handle.name)
+
+
+def _build_bound_axes(
+    axes: Sequence[ParamHandle | ScanVariable],
+) -> list[BoundScanAxis]:
+    bound_axes = []
+    seen = set[tuple[Any, ...]]()
+    next_pseudoparam_index = 0
+    next_param_index = 0
+    for index, source in enumerate(axes):
+        key = _axis_source_key(source)
+        if key in seen:
+            if isinstance(source, ParamHandle):
+                raise ValueError(
+                    f"Scan axis '{source.owner._stringize_path()}/{source.name}' "
+                    "was specified more than once"
+                )
+            raise ValueError(
+                f"Scan variable '{source.name}' was specified more than once"
+            )
+        seen.add(key)
+
+        if isinstance(source, ParamHandle):
+            if source._store is None:
+                raise ValueError(
+                    f"Parameter handle '{source.name}' is not bound to a store yet; "
+                    "initialise fragment parameters before building a host scan"
+                )
+            bound_axes.append(
+                BoundScanAxis(
+                    source=source,
+                    key=f"axis_{index}",
+                    point_key=f"param_{next_param_index}",
+                    path=source.owner._stringize_path(),
+                    schema=source.parameter.describe(),
+                    identity=source._store.identity,
+                    param_store=source._store,
+                )
+            )
+            next_param_index += 1
+            continue
+
+        bound_axes.append(
+            BoundScanAxis(
+                source=source,
+                key=f"axis_{index}",
+                point_key=f"pseudoparam_{next_pseudoparam_index}",
+                path="",
+                schema=source.describe(),
+                identity=(source.fqn, ""),
+                param_store=None,
+            )
+        )
+        next_pseudoparam_index += 1
+    return bound_axes
+
+
+def _build_bound_parameters(
+    axes: Sequence[BoundScanAxis],
+    parameter_mappings: Sequence[_BoundParameterMapping],
+) -> list[BoundScanParameter]:
+    parameters = []
+    seen = set[tuple[int, str]]()
+    next_index = 0
+
+    for axis in axes:
+        if not isinstance(axis.source, ParamHandle):
+            continue
+        key = _mapping_target_key(axis.source)
+        if key in seen:
+            continue
+        seen.add(key)
+        parameters.append(
+            BoundScanParameter(
+                handle=axis.source,
+                key=f"param_{next_index}",
+                path=axis.source.owner._stringize_path(),
+                param_schema=axis.source.parameter.describe(),
+                is_scanned=True,
+                scan_role="direct",
+            )
+        )
+        next_index += 1
+
+    for mapping in parameter_mappings:
+        for target in mapping.targets:
+            key = _mapping_target_key(target)
+            if key in seen:
+                continue
+            seen.add(key)
+            parameters.append(
+                BoundScanParameter(
+                    handle=target,
+                    key=f"param_{next_index}",
+                    path=target.owner._stringize_path(),
+                    param_schema=target.parameter.describe(),
+                    is_scanned=False,
+                    scan_role="derived",
+                )
+            )
+            next_index += 1
+
+    return parameters
+
+
+def _collect_parameter_mappings(
+    fragment: ExpFragment,
+    request: ScanRequest,
+    axes: Sequence[BoundScanAxis],
+) -> list[_BoundParameterMapping]:
+    mappings = tuple(fragment._parameter_mappings) + tuple(request.parameter_mappings)
+    if not mappings:
+        return []
+
+    axis_sources = {axis.source for axis in axes}
+    scanned_param_targets = {
+        _mapping_target_key(axis.source)
+        for axis in axes
+        if isinstance(axis.source, ParamHandle)
+    }
+    producers = {}
+    for mapping in mappings:
+        for target in mapping.targets:
+            key = _mapping_target_key(target)
+            if key in scanned_param_targets:
+                raise ValueError(
+                    f"Parameter '{target.owner._stringize_path()}/{target.name}' "
+                    "cannot be both a direct scan axis and a mapping target"
+                )
+            if key in producers:
+                raise ValueError(
+                    f"Parameter '{target.owner._stringize_path()}/{target.name}' "
+                    "is produced by more than one parameter mapping"
+                )
+            if target._store is None:
+                raise ValueError(
+                    f"Cannot map unbound parameter '{target.owner._stringize_path()}/{target.name}'"
+                )
+            producers[key] = mapping
+
+    for mapping in mappings:
+        for dependency in mapping.dependencies:
+            if isinstance(dependency, ScanVariable) and dependency not in axis_sources:
+                raise ValueError(
+                    f"Scan variable dependency '{dependency.name}' is not present in the scan axes"
+                )
+            if isinstance(dependency, ParamHandle) and dependency._store is None:
+                raise ValueError(
+                    f"Parameter dependency '{dependency.owner._stringize_path()}/{dependency.name}' "
+                    "is not bound to a store"
+                )
+
+    ordered = _order_parameter_mappings(mappings)
+    return [
+        _BoundParameterMapping(
+            mapping=mapping,
+            targets=tuple(mapping.targets),
+            dependencies=tuple(mapping.dependencies),
+        )
+        for mapping in ordered
+    ]
+
+
+def _order_parameter_mappings(
+    mappings: Sequence[ParameterMapping],
+) -> list[ParameterMapping]:
+    producers = {}
+    for mapping in mappings:
+        for target in mapping.targets:
+            producers[_mapping_target_key(target)] = mapping
+
+    dependencies = {mapping: set() for mapping in mappings}
+    for mapping in mappings:
+        for dependency in mapping.dependencies:
+            if not isinstance(dependency, ParamHandle):
+                continue
+            producer = producers.get(_mapping_target_key(dependency), None)
+            if producer is not None and producer is not mapping:
+                dependencies[mapping].add(producer)
+
+    ordered = []
+    ready = [mapping for mapping in mappings if not dependencies[mapping]]
+    while ready:
+        mapping = ready.pop(0)
+        ordered.append(mapping)
+        for other in mappings:
+            if mapping in dependencies[other]:
+                dependencies[other].remove(mapping)
+                if (
+                    not dependencies[other]
+                    and other not in ordered
+                    and other not in ready
+                ):
+                    ready.append(other)
+
+    if len(ordered) != len(mappings):
+        raise ValueError("Parameter mappings contain a dependency cycle")
+    return ordered
+
+
+def _fragment_uses_kernel_execution(fragment: ExpFragment) -> bool:
+    return any(
+        is_kernel(method)
+        for method in (
+            fragment.device_setup,
+            fragment.run_once,
+            fragment.device_cleanup,
+        )
+    )
+
+
+def _missing_kernel_core_devices(fragment: ExpFragment) -> tuple[str, ...]:
+    missing = set[str]()
+    for method in (
+        fragment.device_setup,
+        fragment.run_once,
+        fragment.device_cleanup,
+    ):
+        if not is_kernel(method):
+            continue
+        core_name = method.artiq_embedded.core_name
+        if core_name is not None and not hasattr(fragment, core_name):
+            missing.add(core_name)
+    return tuple(sorted(missing))
+
+
+def _can_use_kernel_streaming_executor(
+    fragment: ExpFragment,
+    axes: Sequence[BoundScanAxis],
+    parameters: Sequence[BoundScanParameter],
+) -> bool:
+    if not _fragment_uses_kernel_execution(fragment):
+        return False
+    if not axes:
+        return False
+    return bool(parameters)
+
+
+def _fragment_tree_needs_param_initialisation(fragment: ExpFragment) -> bool:
+    for name in fragment._free_params.keys():
+        if getattr(fragment, name)._store is None:
+            return True
+    for subfragment in fragment._subfragments:
+        if _fragment_tree_needs_param_initialisation(subfragment):
+            return True
+    return False
+
+
+def _install_scan_axis_stores(
+    axis_handles: Sequence[ParamHandle],
+) -> list[_ScanAxisBinding]:
+    bindings = []
+    seen = set[tuple[int, str]]()
+    for handle in axis_handles:
+        key = (id(handle.owner), handle.name)
+        if key in seen:
+            raise ValueError(
+                f"Scan axis '{handle.owner._stringize_path()}/{handle.name}' was specified more than once"
+            )
+        seen.add(key)
+
+        affected_handles = tuple(handle.owner._get_all_handles_for_param(handle.name))
+        original_stores = tuple(bound_handle._store for bound_handle in affected_handles)
+        if any(store is None for store in original_stores):
+            raise ValueError(
+                f"Cannot scan parameter '{handle.name}' before its stores are initialised"
+            )
+
+        scan_store = type(handle._store)(handle._store.identity, handle.get())
+        for bound_handle in affected_handles:
+            bound_handle.set_store(scan_store)
+
+        bindings.append(_ScanAxisBinding(affected_handles, original_stores))
+    return bindings
+
+
+def _resolve_execution_point(
+    point: BasePoint,
+    axes: Sequence[BoundScanAxis],
+    parameters: Sequence[BoundScanParameter],
+    parameter_mappings: Sequence[_BoundParameterMapping],
+) -> _ResolvedExecutionPoint:
+    axis_map = OrderedDict(
+        (axis.key, value) for axis, value in zip(axes, point.axis_values, strict=True)
+    )
+    pseudoparam_map = OrderedDict()
+
+    dependency_values = {}
+    for axis, value in zip(axes, point.axis_values, strict=True):
+        if axis.param_store is not None:
+            axis.param_store.set_value(value)
+            dependency_values[axis.source] = axis.param_store.get_value()
+        else:
+            pseudoparam_map[axis.point_key] = value
+            dependency_values[axis.source] = value
+
+    for mapping in parameter_mappings:
+        for dependency in mapping.dependencies:
+            if (
+                isinstance(dependency, ParamHandle)
+                and dependency not in dependency_values
+            ):
+                dependency_values[dependency] = dependency.get()
+
+        updates = mapping.mapping.compute(dependency_values)
+        for target, value in updates.items():
+            if target._store is None:
+                raise ValueError(
+                    f"Cannot apply parameter mapping to unbound parameter '{target.name}'"
+                )
+            target._store.set_value(value)
+            dependency_values[target] = target.get()
+
+    parameter_values = OrderedDict(
+        (parameter.key, parameter.handle.get()) for parameter in parameters
+    )
+    rpc_parameter_values = tuple(
+        parameter.handle._store.to_rpc_type(parameter_values[parameter.key])
+        for parameter in parameters
+    )
+    return _ResolvedExecutionPoint(
+        point=point,
+        axis_values=axis_map,
+        pseudoparam_values=pseudoparam_map,
+        parameter_values=parameter_values,
+        rpc_parameter_values=rpc_parameter_values,
+    )
+
+
+def _resolve_execution_batch(
+    points: Sequence[BasePoint],
+    axes: Sequence[BoundScanAxis],
+    parameters: Sequence[BoundScanParameter],
+    parameter_mappings: Sequence[_BoundParameterMapping],
+) -> list[_ResolvedExecutionPoint]:
+    return [
+        _resolve_execution_point(point, axes, parameters, parameter_mappings)
+        for point in points
+    ]
+
+
+def _apply_resolved_parameter_values(
+    parameters: Sequence[BoundScanParameter],
+    point: _ResolvedExecutionPoint,
+) -> None:
+    for parameter in parameters:
+        parameter.handle._store.set_value(point.parameter_values[parameter.key])

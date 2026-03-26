@@ -1,612 +1,761 @@
 # Prepared Runtime Walkthrough
 
-This note is for reading the new prepared-scan runtime as it exists today.
+This is the current readthrough guide for the new prepared-scan runtime.
 
-Short answer: yes, the library is now coherent enough to read through as a human, but
-not by opening [`ndscan/runtime/api.py`](ndscan/runtime/api.py) and reading it top to
-bottom with no guide.
+It is written for the code as it exists now, after the split into:
 
-The good news is that the runtime now has a fairly clean conceptual model:
+- `ndscan/define`
+- `ndscan/scan`
+- `ndscan/submission`
+- `ndscan/runtime`
+- `ndscan/legacy`
 
-- one prepared scan contract for root and nested scans,
-- one host-directed controller,
-- one batch boundary model,
-- one stable output surface,
-- two execution backends underneath (`HostExecutor` and
-  `KernelStreamingExecutor`).
-
-The main remaining problem is packaging, not semantics:
-
-- [`ndscan/runtime/api.py`](ndscan/runtime/api.py) is still too large,
-- some request-side concepts still live in `api.py`,
-- a few boundaries that are conceptually separate are still physically colocated.
-
-So the right way to read it is:
-
-1. understand the model,
-2. read the small supporting modules,
-3. then read `api.py` in sections,
-4. and only after that compare with the legacy runtime.
+It replaces the older mental model where the implementation lived mostly in one
+large `host_runtime.py` or one large `runtime/api.py`.
 
 
 ## Short Thesis
 
-The new runtime is built around this idea:
+The current runtime is easiest to understand if you treat it as:
 
-- the host owns scan structure, point selection, batch boundaries, persistence, and
-  analyses,
-- the kernel, when used, is only an execution backend for the chosen point body,
-- nested scans are just prepared scans inside prepared scans,
-- both code-defined and dashboard-defined scans compile down to the same
-  `ScanRequest` and execute through the same prepared runtime.
+- one scan description model: `ScanRequest`
+- one prepared execution model: `PreparedScan` / `PreparedChildScan`
+- one host-controlled batch model
+- two execution backends:
+  - host point execution
+  - resident kernel point execution
 
-That is the key difference from the legacy design:
-
-- the old runtime split "scan description", "execution style", and "nesting style"
-  much more strongly,
-- the new runtime tries to make them all flow through one runtime concept.
+The important design choice is that host and kernel are no longer different scan
+models. They are different executors underneath the same prepared-scan contract.
 
 
-## The Main Mental Model
+## Start Here
 
-The runtime is easiest to understand if you keep the following stack in your head:
+If you only want the fastest route to understanding, read these files in order:
 
-- `define/` defines what fragments, parameters, result channels, and default analyses
-  are.
-- `scan/` defines what a scan means logically: axes, pseudoparams, mappings, point
-  policies.
-- `submission/` compiles dashboard or typed submission specs into runtime objects.
-- `runtime/` executes a prepared scan using either a host or resident-kernel
-  executor.
-- `legacy/` is the old generator/runner/subscan model and is now mostly there for
-  compatibility and comparison.
+1. [`ndscan/define/fragment.py`](ndscan/define/fragment.py)
+2. [`ndscan/define/parameters.py`](ndscan/define/parameters.py)
+3. [`ndscan/define/result_channels.py`](ndscan/define/result_channels.py)
+4. [`ndscan/scan/mapping.py`](ndscan/scan/mapping.py)
+5. [`ndscan/scan/point_policy.py`](ndscan/scan/point_policy.py)
+6. [`ndscan/runtime/program.py`](ndscan/runtime/program.py)
+7. [`ndscan/runtime/executors.py`](ndscan/runtime/executors.py)
+8. [`ndscan/runtime/prepared.py`](ndscan/runtime/prepared.py)
+9. [`ndscan/runtime/adapters.py`](ndscan/runtime/adapters.py)
 
-In other words:
+Read these later:
 
-- `define` is experiment ontology,
-- `scan` is scan semantics,
-- `submission` is compilation,
-- `runtime` is execution.
+- [`ndscan/runtime/context.py`](ndscan/runtime/context.py)
+- [`ndscan/runtime/analysis.py`](ndscan/runtime/analysis.py)
+- [`ndscan/runtime/persistence.py`](ndscan/runtime/persistence.py)
+- [`ndscan/submission/host_scan_schema.py`](ndscan/submission/host_scan_schema.py)
+- [`ndscan/runtime/api.py`](ndscan/runtime/api.py)
+
+Do not start with [`ndscan/runtime/api.py`](ndscan/runtime/api.py). It is now
+deliberately a facade.
 
 
 ## Package Map
 
 ```mermaid
 flowchart LR
-    Define["define/\nfragments, params,\nresult channels,\ndefault analyses"]
-    Scan["scan/\npoint policies,\nmappings,\npseudoparams"]
-    Submission["submission/\nhost scan spec,\nexpression compile"]
-    Runtime["runtime/\nprepared scans,\nprogram runner,\nexecutors,\npersistence"]
-    Legacy["legacy/\nentry point,\ngenerators,\nold subscan"]
-    Dashboard["dashboard/\nsubmission UI"]
-    Results["results/\nreaders + plotting"]
+    EXP[ndscan.experiment<br/>public facade]
 
-    Scan --> Define
-    Define -. fragment-side rebind_param() lowers to ParameterMapping .-> Scan
-    Submission --> Define
-    Submission --> Scan
-    Submission --> Legacy
-    Runtime --> Define
-    Runtime --> Scan
-    Runtime --> Submission
-    Runtime --> Legacy
-    Dashboard --> Submission
-    Dashboard --> Runtime
-    Results --> Runtime
+    subgraph DEFINE[ndscan.define]
+        FRAG[fragment.py]
+        PARAM[parameters.py]
+        CHAN[result_channels.py]
+        ANAL[default_analysis.py]
+    end
+
+    subgraph SCAN[ndscan.scan]
+        MAP[mapping.py]
+        POL[point_policy.py]
+        OPT[optimisation.py]
+    end
+
+    subgraph SUBMIT[ndscan.submission]
+        SCHEMA[host_scan_schema.py]
+        EXPR[expression.py]
+    end
+
+    subgraph RUNTIME[ndscan.runtime]
+        CTX[context.py]
+        PROG[program.py]
+        EXEC[executors.py]
+        PREP[prepared.py]
+        ADAPT[adapters.py]
+        PERSIST[persistence.py]
+        HAN[analysis.py]
+        API[api.py]
+    end
+
+    subgraph LEGACY[ndscan.legacy]
+        GEN[scan_generator.py]
+        RUN[scan_runner.py]
+        SUB[subscan.py]
+    end
+
+    DEFINE --> SCAN
+    DEFINE --> SUBMIT
+    DEFINE --> RUNTIME
+    SCAN --> SUBMIT
+    SCAN --> RUNTIME
+    SUBMIT --> ADAPT
+    PERSIST --> PROG
+    HAN --> PROG
+    CTX --> EXEC
+    PROG --> EXEC
+    EXEC --> PREP
+    CTX --> PREP
+    PROG --> PREP
+    PREP --> ADAPT
+    ADAPT --> API
+    CTX --> API
+    PROG --> API
+    PREP --> API
+    EXP --> DEFINE
+    EXP --> SCAN
+    EXP --> SUBMIT
+    EXP --> API
+    EXP --> LEGACY
 ```
 
-Two important notes about that diagram:
 
-- `define -> scan` is mostly one deliberate seam: fragment-side rebinding lowers to
-  the shared [`ParameterMapping`](ndscan/scan/mapping.py#L96) type instead of using a
-  separate fragment-only mechanism.
-- `results -> runtime` is a current implementation fact because persisted scan-site
-  schema still lives in [`ndscan/runtime/persistence.py`](ndscan/runtime/persistence.py).
-  That is a good candidate for a later `schema/` extraction.
+## The Runtime In One Picture
+
+```mermaid
+flowchart TD
+    REQ[ScanRequest]
+    PREP[PreparedScan or PreparedChildScan]
+    BUILD[HostScanProgramBuilder]
+    PROG[HostScanProgram]
+    RUN[HostScanProgramRunner]
+    EXEC{Executor choice}
+    HOST[HostExecutor]
+    KERN[KernelStreamingExecutor]
+    OBS[PointObservation batch]
+    WRITE[ScanSiteDatasetWriter]
+    ANALYSIS[HostScanAnalysisEngine]
+    FEEDBACK[BatchFeedback]
+    POLICY[PointPolicy]
+    OUT[ScanOutputs / ScanInspection]
+
+    REQ --> PREP
+    PREP --> BUILD
+    BUILD --> PROG
+    PROG --> RUN
+    RUN --> EXEC
+    EXEC --> HOST
+    EXEC --> KERN
+    HOST --> OBS
+    KERN --> OBS
+    OBS --> WRITE
+    OBS --> ANALYSIS
+    ANALYSIS --> FEEDBACK
+    FEEDBACK --> POLICY
+    WRITE --> OUT
+    ANALYSIS --> OUT
+```
 
 
-## Read Order
+## Recommended Reading Order
 
-If you want to understand the new runtime with the least backtracking, read the code
-in this order.
+### 1. Fragment Authoring Layer
 
-### 1. Fragment and parameter model
+Start with:
 
-Read these first:
+- [`ndscan/define/fragment.py`](ndscan/define/fragment.py)
+- [`ndscan/define/parameters.py`](ndscan/define/parameters.py)
+- [`ndscan/define/result_channels.py`](ndscan/define/result_channels.py)
 
-- [`Fragment`](ndscan/define/fragment.py#L44)
-- [`ExpFragment`](ndscan/define/fragment.py#L868)
-- [`ParamHandle` and stores`](ndscan/define/parameters.py)
-- [`ResultChannel`](ndscan/define/result_channels.py)
+What to understand:
+
+- what an `ExpFragment` is
+- how parameters are declared and bound to stores
+- how result channels are declared and pushed to
+- that default analyses are still fragment-defined
 
 Why first:
 
-- everything in the runtime ultimately manipulates fragment parameters and result
-  channels,
-- the runtime only makes sense once you understand `host_setup()`, `device_setup()`,
-  `run_once()`, and how parameter stores behave.
-
-### 2. Mappings and pseudoparams
-
-Then read:
-
-- [`ScanVariable`](ndscan/scan/mapping.py#L32)
-- [`FixedPseudoparam`](ndscan/scan/mapping.py#L78)
-- [`ParameterMapping`](ndscan/scan/mapping.py#L96)
-
-Why second:
-
-- a large part of the new runtime is built around the distinction between logical scan
-  axes and concrete installed fragment parameters,
-- this is also where fragment-side `rebind_param(...)` and ad hoc request-side
-  mappings converge.
-
-### 3. Point policies
-
-Then read:
-
-- [`PointPolicy`](ndscan/scan/point_policy.py#L136)
-- one simple static policy such as
-  [`ExplicitPointPolicy`](ndscan/scan/point_policy.py#L408)
-- one compositional policy such as
-  [`ProductPointPolicy`](ndscan/scan/point_policy.py#L536)
-- one adaptive policy such as
-  [`AskTellOptimiserPointPolicy`](ndscan/scan/point_policy.py#L207)
-
-Why third:
-
-- the runtime is host-directed, so point selection is one of the core extension
-  seams,
-- `PointPolicy` is the replacement for the old generator-centric mental model.
-
-### 4. Persistence
-
-Then read:
-
-- [`ScanSite`](ndscan/runtime/persistence.py#L43)
-- [`ScanSiteDatasetWriter`](ndscan/runtime/persistence.py#L95)
-
-Why here:
-
-- the runtime is batch-oriented, and a lot of the design only makes sense once you see
-  that points are written as append-only observations into a flat site schema,
-- nested scans are modelled structurally by scan-site paths and segments, not by a
-  separate runner stack.
-
-### 5. Analysis
-
-Then read:
-
-- [`HostScanAnalysisEngine`](ndscan/runtime/analysis.py#L65)
-
-Why here:
-
-- the runtime explicitly keeps analyses out of point execution,
-- online and final analyses are both attached to completed batch boundaries rather than
-  to the point body itself.
-
-### 6. Runtime `api.py`, but in sections
-
-Do not read [`ndscan/runtime/api.py`](ndscan/runtime/api.py) as one block. Read it in
-this order:
-
-1. value objects and request model:
-   - [`ScanOutputs`](ndscan/runtime/api.py#L130)
-   - [`ActiveScanContext`](ndscan/runtime/api.py#L173)
-   - [`PreviewPolicy`](ndscan/runtime/api.py#L206)
-   - [`ExecutionPolicy`](ndscan/runtime/api.py#L550)
-   - [`ScanRequest`](ndscan/runtime/api.py#L578)
-   - [`PointObservation`](ndscan/runtime/api.py#L825)
-   - [`ScanInspection`](ndscan/runtime/api.py#L944)
-2. runtime seams and batch-publication helpers:
-   - [`_HostPointBatchSource`](ndscan/runtime/api.py#L1052)
-   - [`_HostAnalysisAdapter`](ndscan/runtime/api.py#L1104)
-   - [`_HostObservationTransport`](ndscan/runtime/api.py#L1144)
-   - [`_publish_completed_batch()`](ndscan/runtime/api.py#L1244)
-3. execution backends:
-   - [`HostExecutor`](ndscan/runtime/api.py#L1372)
-   - [`KernelStreamingExecutor`](ndscan/runtime/api.py#L1492)
-   - [`_ResidentKernelPointRunner`](ndscan/runtime/api.py#L1652)
-4. binding and program construction:
-   - [`HostScanProgram`](ndscan/runtime/api.py#L1870)
-   - [`_build_bound_axes()`](ndscan/runtime/api.py#L2005)
-   - [`_collect_parameter_mappings()`](ndscan/runtime/api.py#L2110)
-   - [`HostScanProgramBuilder`](ndscan/runtime/api.py#L2266)
-   - [`HostScanProgramRunner`](ndscan/runtime/api.py#L2322)
-5. prepared scan handles:
-   - [`_PreparedScanHandleBase`](ndscan/runtime/api.py#L2582)
-   - [`PreparedScan`](ndscan/runtime/api.py#L2679)
-   - [`prepare_scan()`](ndscan/runtime/api.py#L2729)
-   - [`PreparedChildScan`](ndscan/runtime/api.py#L2958)
-   - [`prepare_child_scan()`](ndscan/runtime/api.py#L3415)
-   - [`setattr_prepared_child_scan()`](ndscan/runtime/api.py#L3457)
-6. experiment adapters and submission bridge:
-   - [`PreparedScanExperiment`](ndscan/runtime/api.py#L3638)
-   - [`PreparedDashboardScanExperiment`](ndscan/runtime/api.py#L3679)
-   - [`make_fragment_prepared_scan_exp()`](ndscan/runtime/api.py#L3724)
-   - [`make_fragment_prepared_dashboard_scan_exp()`](ndscan/runtime/api.py#L3771)
-   - [`_resolve_host_scan_request_spec()`](ndscan/runtime/api.py#L3810)
-
-### 7. Submission compiler
-
-After you understand runtime execution, read:
-
-- [`HostScanSpec`](ndscan/submission/host_scan_schema.py#L650)
-- [`compile_host_scan_spec()`](ndscan/submission/host_scan_schema.py#L740)
-- [`compile_host_scan_schema()`](ndscan/submission/host_scan_schema.py#L767)
-
-Why after runtime:
-
-- submission compilation is easier once you already know what object it is trying to
-  produce,
-- the key idea is simple: code-defined scans and dashboard-defined scans both end up as
-  the same `ScanRequest`.
-
-### 8. Legacy, only for comparison
-
-Only then compare with:
-
-- [`FragmentScanExperiment`](ndscan/legacy/entry_point.py#L103)
-- [`TopLevelRunner`](ndscan/legacy/entry_point.py#L293)
-- [`ScanRunner`](ndscan/legacy/scan_runner.py#L68)
-- [`Subscan`](ndscan/legacy/subscan.py#L44)
-- [`SubscanExpFragment`](ndscan/legacy/subscan.py#L742)
-
-This is useful for understanding why the new design exists, but it is the wrong place
-to start if you want to understand the prepared runtime itself.
+- the prepared runtime never invents a second fragment model
+- it only binds scan requests onto ordinary fragments
 
 
-## End-to-End Flow
+### 2. Scan Semantics Layer
 
-### Code-defined root scan
+Read:
+
+- [`ndscan/scan/mapping.py`](ndscan/scan/mapping.py)
+- [`ndscan/scan/point_policy.py`](ndscan/scan/point_policy.py)
+
+Focus on:
+
+- `ScanVariable`
+- `FixedPseudoparam`
+- `ParameterMapping`
+- `PointPolicy`
+- `BatchFeedback`
+
+This is where the runtime’s core semantic choices live:
+
+- logical scan variables are first-class
+- fragment-side rebinds and request-side mappings share one mapping object
+- adaptive scans are expressed as point policies, not legacy generators
+
+This is one of the strongest parts of the new design. The runtime later executes
+these semantics; it does not define them.
+
+
+### 3. Request / Program Layer
+
+Read:
+
+- [`ndscan/runtime/program.py`](ndscan/runtime/program.py)
+
+Read it in this order:
+
+1. `ScanOutputs`
+2. `ExecutionPolicy`
+3. `ScanRequest`
+4. `PointObservation`
+5. `ScanInspection`
+6. `HostScanProgram`
+7. `_collect_parameter_mappings()`
+8. `_resolve_execution_point()`
+
+This file answers three questions:
+
+- what is the stable public scan result surface?
+- how does a `ScanRequest` become a validated bound program?
+- how does one logical point become concrete parameter values?
+
+Important types:
+
+- `ScanOutputs`
+  - stable named output ABI
+- `ScanInspection`
+  - host-only rich inspection artifact
+- `HostScanProgram`
+  - validated, bound execution plan
+
+Important design decision:
+
+- `ScanOutputs` is the API
+- `ScanInspection` is an inspection/debug artifact
+
+That split is deliberate. The old runtime tended to let rich host-side result
+objects define the model. The new runtime does not.
+
+
+## How Mappings Actually Work
 
 ```mermaid
-sequenceDiagram
-    participant User as Experiment code
-    participant Req as ScanRequest
-    participant PS as PreparedScan
-    participant Builder as HostScanProgramBuilder
-    participant Runner as HostScanProgramRunner
-    participant Exec as HostExecutor or KernelStreamingExecutor
-    participant Write as ScanSiteDatasetWriter
-    participant Anal as HostScanAnalysisEngine
+flowchart LR
+    FRAGMAP[Fragment rebind_param/add_parameter_mapping]
+    REQMAP[ScanRequest.parameter_mappings]
+    SUBMAP[Schema text rebinds]
+    MERGE[_collect_parameter_mappings]
+    ORDER[_order_parameter_mappings]
+    RESOLVE[_resolve_execution_point]
+    STORES[Concrete parameter stores]
 
-    User->>Req: build request
-    User->>PS: configure(request)
-    User->>PS: execute()
-    PS->>Builder: build(fragment, request)
-    Builder-->>PS: HostScanProgram
-    PS->>Runner: run()
-    Runner->>Exec: execute/resident-run batches
-    Exec-->>Runner: completed observations
-    Runner->>Write: append + flush completed batch
-    Runner->>Anal: online / final analyses
-    Anal-->>Runner: outputs + annotations
-    Runner-->>PS: ScanInspection
-    PS-->>User: ScanOutputs
+    FRAGMAP --> MERGE
+    REQMAP --> MERGE
+    SUBMAP --> MERGE
+    MERGE --> ORDER
+    ORDER --> RESOLVE
+    RESOLVE --> STORES
 ```
 
-### Dashboard-defined root scan
-
-```mermaid
-sequenceDiagram
-    participant UI as Dashboard payload
-    participant Args as HostArgumentInterface
-    participant Spec as HostScanSpec/dict
-    participant Comp as compile_host_scan_schema/spec
-    participant Req as ScanRequest
-    participant PS as PreparedScan
-
-    UI->>Args: host_scan payload
-    Args->>Spec: resolve submitted/default spec
-    Spec->>Comp: compile
-    Comp-->>Req: ScanRequest + overrides
-    Req->>PS: configure
-    PS->>PS: execute through same runtime
-```
-
-### Nested prepared scan
-
-```mermaid
-flowchart TD
-    ParentPoint["Parent point is executing"]
-    Context["ActiveScanContext\nsite path + point index"]
-    ChildSite["make_child_scan_site()"]
-    ChildHandle["PreparedChildScan"]
-    ChildReq["child ScanRequest\nwith nested ScanSite"]
-    ChildRun["same PreparedScan runtime core"]
-
-    ParentPoint --> Context
-    Context --> ChildSite
-    ChildSite --> ChildReq
-    ChildHandle --> ChildReq
-    ChildReq --> ChildRun
-```
-
-This is one of the core design wins: nested scans do not use a second runtime model.
+This is important because it is one of the reasons the new structure is simpler
+than it first appears. There is only one real mapping execution path.
 
 
-## Internal Runtime Flow
+### 4. Persistence and Analysis Sidecars
 
-The core of the runtime is the controller loop in
-[`HostScanProgramRunner`](ndscan/runtime/api.py#L2322).
+Read:
 
-Its job is:
+- [`ndscan/runtime/persistence.py`](ndscan/runtime/persistence.py)
+- [`ndscan/runtime/analysis.py`](ndscan/runtime/analysis.py)
 
-1. prepare the fragment once,
-2. publish scan metadata once,
-3. keep asking the point policy for the next batch,
-4. run that batch through an executor,
-5. publish the completed batch,
-6. let analyses and the point policy observe the batch,
-7. decide whether to continue, restart host context, pause, or finish.
+These are sidecars, not the control loop itself.
 
-The important thing is that batch boundaries are the only coordination boundary.
+`persistence.py` owns:
 
-That is where the runtime:
+- `ScanSite`
+- `make_scan_site_prefix()`
+- `ScanSiteDatasetWriter`
 
-- appends data,
-- updates in-memory inspection state,
-- runs online analyses,
-- feeds back into adaptive point policies,
-- writes previews,
-- checks pause requests.
+`analysis.py` owns:
 
-This is the design center of the runtime.
+- `HostScanAnalysisEngine`
 
-### Controller and backend split
+The point of the split is:
+
+- the executor loop decides when batches complete
+- the writer decides how those completed observations are written
+- the analysis engine decides how accumulated observations become analysis outputs
+
+This separation is cleaner than the legacy setup where sink wiring and runtime flow
+were more entangled.
+
+
+### 5. Runtime Context
+
+Read:
+
+- [`ndscan/runtime/context.py`](ndscan/runtime/context.py)
+
+Focus on:
+
+- `ActiveScanContext`
+- `PreviewPolicy`
+- `RunContext`
+- `make_child_scan_site()`
+
+This file is small but conceptually important.
+
+It owns runtime-wide state that should not live in the executors:
+
+- preview snapshot coordination
+- root run context
+- current active parent point for nested scans
+- child scan site placement
+
+This is why nested scans and preview HDF5 snapshots work without every executor
+having to reinvent the same bookkeeping.
+
+
+### 6. Execution Backends and Main Loop
+
+Read:
+
+- [`ndscan/runtime/executors.py`](ndscan/runtime/executors.py)
+
+Read it in this order:
+
+1. `_execute_scan_request_inspection()`
+2. `HostScanProgramBuilder`
+3. `HostScanProgramRunner`
+4. `HostExecutor`
+5. `KernelStreamingExecutor`
+6. `_ResidentKernelPointRunner`
+
+This is the core runtime loop.
+
+`HostScanProgramBuilder` does validation and binding:
+
+- bind axes
+- collect saved result channels
+- validate mappings
+- decide whether kernel streaming is even eligible
+- create the `HostScanProgram`
+
+`HostScanProgramRunner` owns the run:
+
+- root preview / run context
+- metadata publication
+- executor selection
+- batch-finalisation boundary
+- final analysis
+- close/complete handling
+
+`HostExecutor` and `KernelStreamingExecutor` are peers. That is the key model:
+
+- same `HostScanProgram`
+- same `ScanRequest`
+- same batch-finalisation contract
+- different point-body execution backend
+
+
+## Host vs Kernel Execution
 
 ```mermaid
 flowchart TD
-    Request["ScanRequest"]
-    Builder["HostScanProgramBuilder"]
-    Program["HostScanProgram"]
-    Runner["HostScanProgramRunner"]
-    PointSource["_HostPointBatchSource"]
-    Analysis["_HostAnalysisAdapter"]
-    Transport["_HostObservationTransport"]
-    HostExec["HostExecutor"]
-    KernelExec["KernelStreamingExecutor"]
-    Publish["_publish_completed_batch()"]
+    PROG[HostScanProgram]
+    RUN[HostScanProgramRunner]
+    ELIGIBLE{_can_use_kernel_streaming_executor?}
+    HOST[HostExecutor]
+    KERN[KernelStreamingExecutor]
+    POLICY[point_source.next_batch()]
+    RESOLVE[_resolve_execution_point/_resolve_execution_batch]
+    BODY[fragment.device_setup/run_once/device_cleanup]
+    FINALIZE[_publish_completed_batch]
 
-    Request --> Builder
-    Builder --> Program
-    Program --> Runner
-    Runner --> PointSource
-    Runner --> Analysis
-    Runner --> Transport
-    Runner --> HostExec
-    Runner --> KernelExec
-    HostExec --> Publish
-    KernelExec --> Publish
-    Publish --> Analysis
-    Publish --> Transport
-    Publish --> PointSource
+    PROG --> RUN
+    RUN --> ELIGIBLE
+    ELIGIBLE -->|no| HOST
+    ELIGIBLE -->|yes| KERN
+    HOST --> POLICY
+    HOST --> RESOLVE
+    HOST --> BODY
+    HOST --> FINALIZE
+    KERN --> POLICY
+    KERN --> RESOLVE
+    KERN --> BODY
+    KERN --> FINALIZE
 ```
 
-This split is why the runtime can stay host-directed even with a kernel backend:
+Why this design:
 
-- the controller still lives on the host,
-- only point execution moves behind an executor interface.
+- host point choice remains simple and expressive
+- kernel execution gets the high-performance path when eligible
+- there is still one runtime concept
+
+This is better than a host runtime and a kernel runtime diverging semantically.
 
 
-## Why The Design Looks Like This
+### 7. Prepared Handles
 
-### 1. Host-directed even with kernel execution
+Read:
 
-The runtime keeps point selection, persistence, analyses, and batch boundaries on the
-host because those are the dynamic and stateful parts that benefit most from normal
-Python and ordinary data structures.
+- [`ndscan/runtime/prepared.py`](ndscan/runtime/prepared.py)
 
-The kernel backend is intentionally narrow:
+Read it in this order:
 
-- run a fixed point body efficiently,
-- keep one resident compiled loop,
-- ask the host for already-chosen batches via RPC.
+1. `_PreparedScanHandleBase`
+2. `PreparedScan`
+3. `_prepare_child_scan_request()`
+4. `_scan_outputs_from_inspection()`
+5. `_PreparedChildKernelAcquireSession`
+6. `PreparedChildScan`
+7. `prepare_scan()`
+8. `prepare_child_scan()`
+9. `setattr_prepared_child_scan()`
 
-This is why [`KernelStreamingExecutor`](ndscan/runtime/api.py#L1492) exists instead of
-trying to make the kernel own the whole scan.
+This file is the prepared-scan API layer.
 
-### 2. Batch boundaries are the only global synchronisation point
-
-The runtime has chosen one global boundary to simplify reasoning:
-
-- batches are the unit of feedback,
-- batches are the unit of preview emission,
-- batches are the unit of pause checking,
-- batches are the unit of online-analysis publication,
-- batches are the unit of persistence flush.
-
-That is why `_publish_completed_batch()` is such a central helper in
-[`ndscan/runtime/api.py`](ndscan/runtime/api.py#L1244).
-
-### 3. Fixed outputs are the portable contract
-
-The runtime now distinguishes:
-
-- [`ScanOutputs`](ndscan/runtime/api.py#L130): the stable portable summary surface
-- [`ScanInspection`](ndscan/runtime/api.py#L944): the host-only rich inspection object
-
-This is a deliberate design decision.
-
-The old host-oriented tendency was to let "the rich Python result object" define the
-API. The new design makes that secondary. That is why prepared child scans prefer
-`get_outputs()` / `outputs()` over an open-ended host result shape.
-
-### 4. One mapping path
-
-Fragment-side rebinding and request-side mappings are intentionally not separate
-execution paths.
-
-Both converge through:
-
-- [`ParameterMapping`](ndscan/scan/mapping.py#L96)
-- [`_collect_parameter_mappings()`](ndscan/runtime/api.py#L2110)
-- [`_resolve_execution_point()`](ndscan/runtime/api.py#L3550)
-
-That design is the reason pseudoparams, ad hoc mappings, and fragment rebinding all
-compose naturally with the same executor logic.
-
-### 5. Root and child scans use the same model
-
-The root/child split is now structural, not semantic.
-
-Both root and child use:
+The important thing to notice is that root and child scans now share the same
+host-side contract:
 
 - `configure()`
 - `execute()`
 - `outputs()`
-- `get_outputs()`
 - `inspect()`
+- `get_outputs()` when fixed outputs are declared
 
-The difference is only:
+The only real extra complexity in `PreparedChildScan` is the kernel `acquire()`
+path, because ARTIQ needs a prepared child session with a fixed compiler-visible
+shape.
 
-- root scans are top-level prepared scans,
-- child scans have extra nested-site shaping and a compiler-visible `acquire()` path.
-
-That is why [`PreparedScan`](ndscan/runtime/api.py#L2679) and
-[`PreparedChildScan`](ndscan/runtime/api.py#L2958) are worth reading together.
-
-
-## Why This Was Chosen Over The Legacy Runtime
-
-The old runtime had several ideas worth preserving:
-
-- fixed nested scan structure matters for ARTIQ compilation,
-- result-channel-based analyses are useful,
-- subscans and top-level scans need related semantics.
-
-But the legacy model also carried a few conceptual costs:
-
-- a stronger split between host and kernel paths,
-- a stronger split between top-level and subscan APIs,
-- generator-centric scan description,
-- a tendency for the rich host result shape to define the API.
-
-The new runtime is trying to keep the good parts while changing the center of gravity:
-
-- `ScanRequest` instead of generators as the main scan description,
-- `PointPolicy` instead of generator classes as the point-selection abstraction,
-- prepared handles instead of special nested runner categories,
-- host/kernel as executor choices, not semantic modes,
-- fixed outputs as the portable contract.
-
-That is the core reason it is worth reading the new runtime first and the legacy
-runtime second.
+That is what `_PreparedChildKernelAcquireSession` now isolates.
 
 
-## Where `api.py` Is Still Too Big
+## Nested Prepared Child Flow
 
-[`ndscan/runtime/api.py`](ndscan/runtime/api.py) is coherent now, but it still bundles
-too many responsibilities:
+```mermaid
+flowchart TD
+    PARENT[Parent fragment]
+    CHILD[PreparedChildScan]
+    CFG[configure(request)]
+    EXEC[execute() or acquire()]
+    PREQ[_prepare_child_scan_request]
+    SESSION[_PreparedChildKernelAcquireSession]
+    BUILD[HostScanProgramBuilder]
+    RUNNER[_ResidentKernelPointRunner]
+    PUB[_publish_completed_batch]
+    OUT[get_outputs / outputs / inspect]
 
-- public request/result types,
-- scan/run context utilities,
-- preview handling,
-- runtime helper adapters,
-- executors,
-- program binding,
-- prepared root/child handles,
-- experiment adapters,
-- submission-bridge helpers.
+    PARENT --> CHILD
+    CHILD --> CFG
+    CFG --> EXEC
+    EXEC --> PREQ
+    PREQ --> BUILD
+    BUILD -->|host path| PUB
+    BUILD -->|kernel child path| SESSION
+    SESSION --> RUNNER
+    RUNNER --> PUB
+    PUB --> OUT
+```
 
-So the file is understandable, but not yet nicely packaged.
+This is where the new runtime is better than both old subscan styles:
 
-If you want to refactor further after reading, the next split I would make is:
-
-### 1. `runtime/context.py`
-
-Move:
-
-- [`ActiveScanContext`](ndscan/runtime/api.py#L173)
-- [`PreviewPolicy`](ndscan/runtime/api.py#L206)
-- [`PreviewCoordinator`](ndscan/runtime/api.py#L238)
-- [`RunContext`](ndscan/runtime/api.py#L342)
-- context stack helpers
-
-### 2. `runtime/request.py`
-
-Move:
-
-- [`ExecutionPolicy`](ndscan/runtime/api.py#L550)
-- [`ScanRequest`](ndscan/runtime/api.py#L578)
-- perhaps `ScanOutputs` and `ScanInspection`
-
-Longer-term, this probably belongs under `ndscan.scan`, not under `runtime`.
-
-### 3. `runtime/program.py`
-
-Move:
-
-- bound axis/parameter/channel types
-- [`HostScanProgram`](ndscan/runtime/api.py#L1870)
-- builder helpers such as `_build_bound_axes()`
-- [`HostScanProgramBuilder`](ndscan/runtime/api.py#L2266)
-
-### 4. `runtime/executors.py`
-
-Move:
-
-- [`HostExecutor`](ndscan/runtime/api.py#L1372)
-- [`KernelStreamingExecutor`](ndscan/runtime/api.py#L1492)
-- [`_ResidentKernelPointRunner`](ndscan/runtime/api.py#L1652)
-- `_PointInvocationRunner`
-- `_ResidentKernelBatchState`
-
-### 5. `runtime/prepared.py`
-
-Move:
-
-- [`PreparedScan`](ndscan/runtime/api.py#L2679)
-- [`PreparedChildScan`](ndscan/runtime/api.py#L2958)
-- `prepare_scan()`
-- `prepare_child_scan()`
-- `setattr_prepared_child_scan()`
-
-### 6. `runtime/adapters.py`
-
-Move:
-
-- [`PreparedScanExperiment`](ndscan/runtime/api.py#L3638)
-- [`PreparedDashboardScanExperiment`](ndscan/runtime/api.py#L3679)
-- helper factories
-- `_resolve_host_scan_request_spec()`
-
-That would not materially change the design. It would just make the design easier to
-see in code.
+- composition-oriented API like the old handle-based style
+- fixed prepared kernel execution shape like the old `SubscanExpFragment` idea
+- without making nested scans a separate runtime
 
 
-## What To Read If You Only Have One Hour
+### 8. Experiment / Dashboard Adapters
 
-If you want the shortest useful reading pass, do this:
+Read:
 
-1. [`ndscan/scan/mapping.py`](ndscan/scan/mapping.py)
-2. [`ndscan/scan/point_policy.py`](ndscan/scan/point_policy.py)
-3. [`ndscan/runtime/persistence.py`](ndscan/runtime/persistence.py)
-4. [`ndscan/runtime/analysis.py`](ndscan/runtime/analysis.py)
-5. [`ScanRequest`](ndscan/runtime/api.py#L578)
-6. [`HostExecutor`](ndscan/runtime/api.py#L1372)
-7. [`KernelStreamingExecutor`](ndscan/runtime/api.py#L1492)
-8. [`HostScanProgramRunner`](ndscan/runtime/api.py#L2322)
-9. [`PreparedScan`](ndscan/runtime/api.py#L2679)
-10. [`PreparedChildScan`](ndscan/runtime/api.py#L2958)
+- [`ndscan/runtime/adapters.py`](ndscan/runtime/adapters.py)
 
-That gives you the design center of the new runtime without drowning you in adapter
-code.
+Focus on:
+
+- `PreparedScanExperiment`
+- `PreparedDashboardScanExperiment`
+- `HostArgumentInterface`
+- `_resolve_code_request_spec()`
+- `_resolve_dashboard_request_spec()`
+
+These are front doors, not the core runtime.
+
+The code path is now intentionally narrower:
+
+- code-defined prepared scans accept:
+  - `ScanRequest`
+  - `(ScanRequest, overrides)`
+- dashboard-defined prepared scans accept:
+  - `HostScanSpec`
+  - dashboard transport dict schema
+
+The dashboard path compiles into a `ScanRequest` before it enters the prepared
+runtime. That is the important convergence point.
 
 
-## Final Verdict
+## Code vs Dashboard
 
-The runtime is now at the point where it can be understood as one system.
+```mermaid
+flowchart LR
+    subgraph CODE[Code-defined]
+        C1[Construct ScanRequest]
+        C2[prepare_scan or helper]
+    end
 
-I would describe the situation like this:
+    subgraph DASH[Dashboard-defined]
+        D1[UI payload / HostScanSpec]
+        D2[compile_host_scan_schema/spec]
+        D3[PreparedDashboardScanExperiment]
+    end
 
-- the semantics are now coherent,
-- the interfaces are now visible,
-- the host/kernel story is now unified enough to explain,
-- but `api.py` is still physically too large and should still be split.
+    subgraph CORE[Common prepared runtime]
+        P[PreparedScan]
+        B[HostScanProgramBuilder]
+        R[HostScanProgramRunner]
+    end
 
-So the right next step is not "invent a new model again". The right next step is:
+    C1 --> C2 --> P
+    D1 --> D2 --> D3 --> P
+    P --> B --> R
+```
 
-- read the runtime using this guide,
-- then split `api.py` along the seams that already exist.
+This is one of the central design wins.
+
+The dashboard path is not a different runtime. It is just a different request
+construction path.
+
+
+### 9. Public Facades
+
+Read last:
+
+- [`ndscan/runtime/api.py`](ndscan/runtime/api.py)
+- [`ndscan/experiment/__init__.py`](ndscan/experiment/__init__.py)
+
+These files are useful for finding public names, but they are not where the
+interesting logic lives anymore.
+
+That is intentional.
+
+
+## Good Example Files
+
+Use these after reading the modules:
+
+- [`examples/host_runtime_prepared_root_linear_scan.py`](examples/host_runtime_prepared_root_linear_scan.py)
+  - clearest explicit root `PreparedScan`
+- [`examples/host_runtime_prepared_kernel_nested.py`](examples/host_runtime_prepared_kernel_nested.py)
+  - nested prepared kernel path
+- [`examples/host_runtime_prepared_kernel_nested_ttl.py`](examples/host_runtime_prepared_kernel_nested_ttl.py)
+  - real device leaf with host-chosen points and one resident kernel region
+- [`examples/host_runtime_prepared_kernel_online_fit.py`](examples/host_runtime_prepared_kernel_online_fit.py)
+  - prepared child fixed outputs
+- [`examples/host_runtime_kernel_bayesian_optimisation.py`](examples/host_runtime_kernel_bayesian_optimisation.py)
+  - host-driven BO with kernel-backed objective evaluation
+- [`examples/host_runtime_parameter_mapping_schema.py`](examples/host_runtime_parameter_mapping_schema.py)
+  - schema compilation into the same runtime
+
+
+## Why These Design Decisions Were Made
+
+### One runtime, not separate host and kernel semantics
+
+The old direction made it too easy for host execution and kernel execution to drift
+into different mental models.
+
+The new runtime instead says:
+
+- host chooses batches
+- runtime binds points to concrete parameter values
+- executor backend runs point bodies
+
+That applies on both host and kernel.
+
+
+### Prepared handles rather than dynamic subscan helpers
+
+Prepared handles are better because they give:
+
+- fixed call paths
+- fixed output contracts
+- ARTIQ-compiler-visible structure
+- the same root/child contract
+
+That is why `PreparedScan` and `PreparedChildScan` are now the main API.
+
+
+### `ScanOutputs` over rich result objects
+
+The stable contract is:
+
+- execute the scan
+- read declared outputs
+
+Host-side rich inspection still exists, but it is now secondary:
+
+- useful for debugging
+- useful for tests
+- not the thing that defines the scan model
+
+
+### One mapping path
+
+The mapping system is better than it first looks because fragment-side rebindings and
+request-side mappings are not two execution mechanisms. They converge before point
+execution.
+
+That is simpler than trying to keep separate “fragment mappings” and “request
+mappings” alive all the way through runtime execution.
+
+
+### Batches everywhere
+
+The runtime now consistently treats the batch as the execution boundary for:
+
+- persistence
+- preview snapshots
+- online analysis
+- adaptive feedback
+- scheduler pause points
+
+That is a cleaner model than mixing point-by-point execution with unrelated flush
+and feedback behavior.
+
+
+## Where To Look For Specific Questions
+
+If you want to answer:
+
+- “How is a point policy asked for work?”
+  - [`ndscan/runtime/program.py`](ndscan/runtime/program.py)
+  - `_HostPointBatchSource`
+
+- “How does a logical point become concrete parameter values?”
+  - [`ndscan/runtime/program.py`](ndscan/runtime/program.py)
+  - `_resolve_execution_point()`
+
+- “Where is kernel eligibility decided?”
+  - [`ndscan/runtime/program.py`](ndscan/runtime/program.py)
+  - `_can_use_kernel_streaming_executor()`
+  - [`ndscan/runtime/executors.py`](ndscan/runtime/executors.py)
+  - `HostScanProgramBuilder`
+
+- “Where is the one-resident-kernel loop?”
+  - [`ndscan/runtime/executors.py`](ndscan/runtime/executors.py)
+  - `KernelStreamingExecutor`
+  - `_ResidentKernelPointRunner`
+
+- “Where do nested child scans become segmented child sites?”
+  - [`ndscan/runtime/prepared.py`](ndscan/runtime/prepared.py)
+  - `_prepare_child_scan_request()`
+  - [`ndscan/runtime/context.py`](ndscan/runtime/context.py)
+  - `make_child_scan_site()`
+
+- “Where are fixed outputs declared and enforced?”
+  - [`ndscan/runtime/prepared.py`](ndscan/runtime/prepared.py)
+  - `_resolve_declared_scan_output_channels()`
+  - `_scan_outputs_from_inspection()`
+  - `_make_prepared_child_get_outputs_methods()`
+
+- “Where does the dashboard path become a `ScanRequest`?”
+  - [`ndscan/runtime/adapters.py`](ndscan/runtime/adapters.py)
+  - `HostArgumentInterface.resolve_request()`
+  - [`ndscan/submission/host_scan_schema.py`](ndscan/submission/host_scan_schema.py)
+  - `compile_host_scan_schema()`
+  - `compile_host_scan_spec()`
+
+- “Where are scan-site datasets written?”
+  - [`ndscan/runtime/persistence.py`](ndscan/runtime/persistence.py)
+  - `ScanSiteDatasetWriter`
+
+
+## What To Ignore On First Read
+
+Skip these until the main model is clear:
+
+- optional optimisation backends in [`ndscan/scan/optimisation.py`](ndscan/scan/optimisation.py)
+- preview snapshot details in [`ndscan/runtime/context.py`](ndscan/runtime/context.py)
+- exact dataset-key details in [`ndscan/runtime/persistence.py`](ndscan/runtime/persistence.py)
+- old runtime code in [`ndscan/legacy`](ndscan/legacy)
+
+Those are important, but they are not the conceptual core.
+
+
+## Legacy Comparison
+
+Read these only after the new runtime makes sense:
+
+- [`ndscan/legacy/scan_generator.py`](ndscan/legacy/scan_generator.py)
+- [`ndscan/legacy/scan_runner.py`](ndscan/legacy/scan_runner.py)
+- [`ndscan/legacy/subscan.py`](ndscan/legacy/subscan.py)
+
+The modern runtime is better understood as:
+
+- composition like legacy handle-based subscans
+- prepared compiler-visible kernel execution like legacy `SubscanExpFragment`
+- but under one cleaner runtime model
+
+That is why the new runtime ended up split across `scan/`, `submission/`, and
+`runtime/` instead of trying to evolve the legacy runner in place.
+
+
+## Current Rough Edges
+
+The runtime is now readable, but there are still a few structural oddities worth
+keeping in mind:
+
+- [`ndscan/runtime/program.py`](ndscan/runtime/program.py) still owns `ScanRequest`
+  even though conceptually it belongs to scan semantics
+- [`ndscan/runtime/persistence.py`](ndscan/runtime/persistence.py) still mixes the
+  structural `ScanSite` type with runtime writer logic
+- [`ndscan/runtime/prepared.py`](ndscan/runtime/prepared.py) is still the largest
+  “API plus machinery” file because child kernel acquisition is intrinsically awkward
+
+These are refactor candidates, not design crises.
+
+
+## Suggested Second Pass
+
+After reading the files above once, the most useful second pass is:
+
+1. read [`ndscan/runtime/prepared.py`](ndscan/runtime/prepared.py) again
+2. read [`ndscan/runtime/executors.py`](ndscan/runtime/executors.py) again
+3. then compare with:
+   - [`PREPARED_SCAN_MODEL_NOTES.md`](PREPARED_SCAN_MODEL_NOTES.md)
+   - [`MODULE_NAMESPACE_TIDYUP.md`](MODULE_NAMESPACE_TIDYUP.md)
+
+That gives you:
+
+- the concrete code path
+- the design rationale
+- the module-boundary rationale
+
+
+## Bottom Line
+
+The prepared runtime is now in a form where a human can read it coherently, but only
+if they read it by layers:
+
+- fragment definition
+- scan semantics
+- request/program binding
+- executors
+- prepared handles
+- adapters
+
+If you read it in that order, the current runtime should look like one system.
+
+If you start from the public facades or from legacy modules, it will still feel more
+complicated than it really is.

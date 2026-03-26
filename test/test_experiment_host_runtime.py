@@ -542,7 +542,30 @@ class HostScanSchemaCompilationTest(HasEnvironmentCase):
             "logical_drive + offset",
         )
 
-    def test_make_fragment_prepared_scan_exp_accepts_dict_schema(self):
+    def test_make_fragment_prepared_scan_exp_accepts_compiled_schema_tuple(self):
+        DictShimExperiment = make_fragment_prepared_scan_exp(
+            DictShimFragment,
+            lambda fragment: compile_host_scan_schema(
+                fragment,
+                {
+                    "version": 1,
+                    "mode": {"type": "grid"},
+                    "entries": [],
+                    "execution": {},
+                    "metadata": {"demo_name": "dict_shim"},
+                },
+            ),
+        )
+
+        exp = self.create(DictShimExperiment)
+        exp.prepare()
+        exp.run()
+
+        prefix = "ndscan.rid_0.site.root."
+        self.assertEqual(self.dataset_db.get(prefix + "state.num_points"), 1)
+        self.assertEqual(self.dataset_db.get(prefix + "points.channel_0"), [1.23])
+
+    def test_make_fragment_prepared_scan_exp_rejects_dict_schema(self):
         DictShimExperiment = make_fragment_prepared_scan_exp(
             DictShimFragment,
             {
@@ -555,14 +578,10 @@ class HostScanSchemaCompilationTest(HasEnvironmentCase):
         )
 
         exp = self.create(DictShimExperiment)
-        exp.prepare()
-        exp.run()
+        with self.assertRaises(TypeError):
+            exp.prepare()
 
-        prefix = "ndscan.rid_0.site.root."
-        self.assertEqual(self.dataset_db.get(prefix + "state.num_points"), 1)
-        self.assertEqual(self.dataset_db.get(prefix + "points.channel_0"), [1.23])
-
-    def test_make_fragment_prepared_scan_exp_accepts_host_scan_spec(self):
+    def test_make_fragment_prepared_scan_exp_rejects_host_scan_spec(self):
         DictShimExperiment = make_fragment_prepared_scan_exp(
             DictShimFragment,
             HostScanSpec.from_dict(
@@ -577,12 +596,8 @@ class HostScanSchemaCompilationTest(HasEnvironmentCase):
         )
 
         exp = self.create(DictShimExperiment)
-        exp.prepare()
-        exp.run()
-
-        prefix = "ndscan.rid_0.site.root."
-        self.assertEqual(self.dataset_db.get(prefix + "state.num_points"), 1)
-        self.assertEqual(self.dataset_db.get(prefix + "points.channel_0"), [1.23])
+        with self.assertRaises(TypeError):
+            exp.prepare()
 
 
 class TwoParamAddFragment(ExpFragment):
@@ -1736,7 +1751,7 @@ class HostRuntimeCase(HasEnvironmentCase):
         request = ScanRequest.cartesian([(fragment.value, [0.0, 1.0, 2.0])])
 
         with patch(
-            "ndscan.runtime.api.time.time",
+            "ndscan.runtime.executors.time.time",
             side_effect=[999.0, 1000.0, 1001.0, 1002.0, 1003.0],
         ):
             session = PreparedScan(fragment, fragment, request)
@@ -1892,7 +1907,7 @@ class HostRuntimeCase(HasEnvironmentCase):
                 ),
             )
             with patch(
-                "ndscan.runtime.api.time.monotonic",
+                "ndscan.runtime.context.time.monotonic",
                 side_effect=[0.0, 60.0, 119.0, 121.0],
             ):
                 session = PreparedScan(fragment, fragment, request)
@@ -1939,7 +1954,7 @@ class HostRuntimeCase(HasEnvironmentCase):
             )
 
             with patch(
-                "ndscan.runtime.api.time.monotonic",
+                "ndscan.runtime.context.time.monotonic",
                 side_effect=[0.0, 1.0, 2.0],
             ):
                 session = PreparedScan(fragment, fragment, request)
@@ -1976,7 +1991,7 @@ class HostRuntimeCase(HasEnvironmentCase):
             )
 
             with patch(
-                "ndscan.runtime.api.time.monotonic",
+                "ndscan.runtime.context.time.monotonic",
                 side_effect=[0.0, 60.0, 121.0, 122.0],
             ):
                 session = PreparedScan(parent, parent, request)
@@ -2025,7 +2040,7 @@ class HostRuntimeCase(HasEnvironmentCase):
                 )
 
                 with patch(
-                    "ndscan.runtime.api.time.monotonic",
+                    "ndscan.runtime.context.time.monotonic",
                     side_effect=[0.0, 1.0],
                 ):
                     session = PreparedScan(fragment, fragment, request)
@@ -2723,7 +2738,7 @@ class HostRuntimeCase(HasEnvironmentCase):
         request = ScanRequest.explicit([parent.outer], [[10.0], [20.0]])
 
         with patch(
-            "ndscan.runtime.api.time.time",
+            "ndscan.runtime.executors.time.time",
             side_effect=[
                 0.0,
                 1.0,
