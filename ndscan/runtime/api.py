@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 
 from ..scan.mapping import ParameterMapping, ScanVariable
+from ..scan.request import ExecutionPolicy, PreviewPolicy, ScanRequest
 from ..submission.host_scan_schema import (
     HostScanSchemaError,
     HostScanSpec,

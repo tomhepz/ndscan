@@ -6,6 +6,7 @@ It is written for the code as it exists now, after the split into:
 
 - `ndscan/define`
 - `ndscan/scan`
+- `ndscan/schema`
 - `ndscan/submission`
 - `ndscan/runtime`
 - `ndscan/legacy`
@@ -36,12 +37,14 @@ If you only want the fastest route to understanding, read these files in order:
 1. [`ndscan/define/fragment.py`](ndscan/define/fragment.py)
 2. [`ndscan/define/parameters.py`](ndscan/define/parameters.py)
 3. [`ndscan/define/result_channels.py`](ndscan/define/result_channels.py)
-4. [`ndscan/scan/mapping.py`](ndscan/scan/mapping.py)
-5. [`ndscan/scan/point_policy.py`](ndscan/scan/point_policy.py)
-6. [`ndscan/runtime/program.py`](ndscan/runtime/program.py)
-7. [`ndscan/runtime/executors.py`](ndscan/runtime/executors.py)
-8. [`ndscan/runtime/prepared.py`](ndscan/runtime/prepared.py)
-9. [`ndscan/runtime/adapters.py`](ndscan/runtime/adapters.py)
+4. [`ndscan/scan/request.py`](ndscan/scan/request.py)
+5. [`ndscan/scan/mapping.py`](ndscan/scan/mapping.py)
+6. [`ndscan/scan/point_policy.py`](ndscan/scan/point_policy.py)
+7. [`ndscan/schema/scan_site.py`](ndscan/schema/scan_site.py)
+8. [`ndscan/runtime/program.py`](ndscan/runtime/program.py)
+9. [`ndscan/runtime/executors.py`](ndscan/runtime/executors.py)
+10. [`ndscan/runtime/prepared.py`](ndscan/runtime/prepared.py)
+11. [`ndscan/runtime/adapters.py`](ndscan/runtime/adapters.py)
 
 Read these later:
 
@@ -69,9 +72,14 @@ flowchart LR
     end
 
     subgraph SCAN[ndscan.scan]
+        REQMOD[request.py]
         MAP[mapping.py]
         POL[point_policy.py]
         OPT[optimisation.py]
+    end
+
+    subgraph SITEPKG[ndscan.schema]
+        SITE[scan_site.py]
     end
 
     subgraph SUBMIT[ndscan.submission]
@@ -97,8 +105,11 @@ flowchart LR
     end
 
     DEFINE --> SCAN
+    SITEPKG --> SCAN
     DEFINE --> SUBMIT
+    SITEPKG --> SUBMIT
     DEFINE --> RUNTIME
+    SITEPKG --> RUNTIME
     SCAN --> SUBMIT
     SCAN --> RUNTIME
     SUBMIT --> ADAPT
@@ -186,11 +197,15 @@ Why first:
 
 Read:
 
+- [`ndscan/scan/request.py`](ndscan/scan/request.py)
 - [`ndscan/scan/mapping.py`](ndscan/scan/mapping.py)
 - [`ndscan/scan/point_policy.py`](ndscan/scan/point_policy.py)
 
 Focus on:
 
+- `PreviewPolicy`
+- `ExecutionPolicy`
+- `ScanRequest`
 - `ScanVariable`
 - `FixedPseudoparam`
 - `ParameterMapping`
@@ -199,6 +214,7 @@ Focus on:
 
 This is where the runtime’s core semantic choices live:
 
+- request shape and preview/batch policy are scan-level concepts
 - logical scan variables are first-class
 - fragment-side rebinds and request-side mappings share one mapping object
 - adaptive scans are expressed as point policies, not legacy generators
@@ -207,7 +223,30 @@ This is one of the strongest parts of the new design. The runtime later executes
 these semantics; it does not define them.
 
 
-### 3. Request / Program Layer
+### 3. Persisted Schema Layer
+
+Read:
+
+- [`ndscan/schema/scan_site.py`](ndscan/schema/scan_site.py)
+
+Focus on:
+
+- `SCAN_SITE_SCHEMA_REVISION`
+- `ScanSite`
+- `make_scan_site_prefix()`
+
+This module matters outside the runtime itself. It is shared knowledge for:
+
+- dashboard plotting tools
+- matplotlib plotting tools
+- results readers
+- tests
+- runtime writers
+
+That is why it no longer lives only in the runtime writer module.
+
+
+### 4. Program Layer
 
 Read:
 
@@ -216,18 +255,16 @@ Read:
 Read it in this order:
 
 1. `ScanOutputs`
-2. `ExecutionPolicy`
-3. `ScanRequest`
-4. `PointObservation`
-5. `ScanInspection`
-6. `HostScanProgram`
-7. `_collect_parameter_mappings()`
-8. `_resolve_execution_point()`
+2. `PointObservation`
+3. `ScanInspection`
+4. `HostScanProgram`
+5. `_collect_parameter_mappings()`
+6. `_resolve_execution_point()`
 
 This file answers three questions:
 
 - what is the stable public scan result surface?
-- how does a `ScanRequest` become a validated bound program?
+- how does a request become a validated bound program?
 - how does one logical point become concrete parameter values?
 
 Important types:
@@ -272,7 +309,7 @@ This is important because it is one of the reasons the new structure is simpler
 than it first appears. There is only one real mapping execution path.
 
 
-### 4. Persistence and Analysis Sidecars
+### 5. Persistence and Analysis Sidecars
 
 Read:
 
@@ -283,8 +320,6 @@ These are sidecars, not the control loop itself.
 
 `persistence.py` owns:
 
-- `ScanSite`
-- `make_scan_site_prefix()`
 - `ScanSiteDatasetWriter`
 
 `analysis.py` owns:
@@ -301,7 +336,7 @@ This separation is cleaner than the legacy setup where sink wiring and runtime f
 were more entangled.
 
 
-### 5. Runtime Context
+### 6. Runtime Context
 
 Read:
 
@@ -310,7 +345,6 @@ Read:
 Focus on:
 
 - `ActiveScanContext`
-- `PreviewPolicy`
 - `RunContext`
 - `make_child_scan_site()`
 
@@ -327,7 +361,7 @@ This is why nested scans and preview HDF5 snapshots work without every executor
 having to reinvent the same bookkeeping.
 
 
-### 6. Execution Backends and Main Loop
+### 7. Execution Backends and Main Loop
 
 Read:
 
@@ -406,7 +440,7 @@ Why this design:
 This is better than a host runtime and a kernel runtime diverging semantically.
 
 
-### 7. Prepared Handles
+### 8. Prepared Handles
 
 Read:
 
@@ -476,7 +510,7 @@ This is where the new runtime is better than both old subscan styles:
 - without making nested scans a separate runtime
 
 
-### 8. Experiment / Dashboard Adapters
+### 9. Experiment / Dashboard Adapters
 
 Read:
 
@@ -537,7 +571,7 @@ The dashboard path is not a different runtime. It is just a different request
 construction path.
 
 
-### 9. Public Facades
+### 10. Public Facades
 
 Read last:
 
@@ -680,6 +714,9 @@ If you want to answer:
   - [`ndscan/runtime/persistence.py`](ndscan/runtime/persistence.py)
   - `ScanSiteDatasetWriter`
 
+- “Where is the persisted scan-site schema defined?”
+  - [`ndscan/schema/scan_site.py`](ndscan/schema/scan_site.py)
+
 
 ## What To Ignore On First Read
 
@@ -716,10 +753,8 @@ That is why the new runtime ended up split across `scan/`, `submission/`, and
 The runtime is now readable, but there are still a few structural oddities worth
 keeping in mind:
 
-- [`ndscan/runtime/program.py`](ndscan/runtime/program.py) still owns `ScanRequest`
-  even though conceptually it belongs to scan semantics
 - [`ndscan/runtime/persistence.py`](ndscan/runtime/persistence.py) still mixes the
-  structural `ScanSite` type with runtime writer logic
+  site writer with some schema-adjacent details like metadata-key conventions
 - [`ndscan/runtime/prepared.py`](ndscan/runtime/prepared.py) is still the largest
   “API plus machinery” file because child kernel acquisition is intrinsically awkward
 
@@ -750,7 +785,8 @@ if they read it by layers:
 
 - fragment definition
 - scan semantics
-- request/program binding
+- persisted schema
+- program binding
 - executors
 - prepared handles
 - adapters

@@ -9,7 +9,7 @@ try:
     from ndscan.define.fragment import ExpFragment
     from ndscan.define.parameters import FloatParam
     from ndscan.define.result_channels import FloatChannel
-    from ndscan.runtime.api import ExecutionPolicy, PreparedScan, ScanRequest
+    from ndscan.runtime.api import PreparedScan
     from ndscan.scan.optimisation import (
         ExplicitBatchExplorationStrategy,
         LocalLengthscaleExplorationStrategy,
@@ -23,6 +23,7 @@ try:
         AskTellOptimiserPointPolicy,
         OptimiserObservation,
     )
+    from ndscan.scan.request import ExecutionPolicy, ScanRequest
     from ndscan.submission.host_scan_schema import compile_host_scan_schema
 
     _OPTIMISATION_DEPS_AVAILABLE = True

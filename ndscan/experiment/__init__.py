@@ -32,6 +32,7 @@ from ..legacy import (
 )
 from ..scan import mapping as scan_mapping
 from ..scan import point_policy as scan_point_policy
+from ..scan import request as scan_request
 from ..submission import expression as submission_expression
 from ..submission import host_scan_schema as submission_host_scan_schema
 from ..runtime import api as runtime_api
@@ -46,6 +47,7 @@ from .scan_runner import *
 from .subscan import *
 from ..scan.mapping import *
 from ..scan.point_policy import *
+from ..scan.request import *
 from ..submission.expression import *
 from ..submission.host_scan_schema import *
 from ..runtime.api import *
@@ -60,6 +62,7 @@ __all__.extend(legacy_entry_point.__all__)
 __all__.extend(define_fragment.__all__)
 __all__.extend(define_parameters.__all__)
 __all__.extend(scan_point_policy.__all__)
+__all__.extend(scan_request.__all__)
 __all__.extend(define_result_channels.__all__)
 __all__.extend(scan_mapping.__all__)
 __all__.extend(submission_expression.__all__)

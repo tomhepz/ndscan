@@ -1,0 +1,169 @@
+"""Build a runtime site-tree snapshot from a live applet dataset view."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from ...results.scan_site_reader import HostRuntimeSiteData, HostRuntimeSnapshot
+
+_STRUCTURED_KEYS = {
+    "site.path",
+    "site.parent_path",
+    "scan.point_policy",
+    "scan.pseudoparams",
+    "scan.fixed_pseudoparams",
+    "scan.parameters",
+    "scan.fixed_parameters",
+    "scan.channels",
+    "scan.parameter_mappings",
+    "analysis.online",
+    "analysis.outputs",
+    "analysis.annotations",
+}
+
+
+def _decode_live_value(key: str, raw: Any) -> Any:
+    if isinstance(raw, np.ndarray):
+        if raw.dtype.kind == "S":
+            return [item.decode("utf-8") for item in raw.tolist()]
+        if raw.dtype.kind == "U":
+            return raw.tolist()
+        if raw.dtype.kind == "O":
+            decoded = []
+            changed = False
+            for item in raw.tolist():
+                if isinstance(item, bytes):
+                    decoded.append(item.decode("utf-8"))
+                    changed = True
+                elif isinstance(item, np.generic):
+                    decoded.append(item.item())
+                    changed = True
+                else:
+                    decoded.append(item)
+            return decoded if changed else raw
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    if isinstance(raw, np.generic):
+        raw = raw.item()
+    if isinstance(raw, tuple):
+        raw = list(raw)
+    if isinstance(raw, str):
+        if any(key.endswith(suffix) for suffix in _STRUCTURED_KEYS):
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return raw
+        if ".analysis.online_result." in key or ".analysis.online_annotation." in key:
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return raw
+    return raw
+
+
+def _find_site_prefixes(dataset_values: dict[str, Any]) -> list[str]:
+    suffix = "site.path"
+    prefixes = [
+        key[: -len(suffix)]
+        for key in dataset_values.keys()
+        if key.endswith(suffix)
+    ]
+    return sorted(prefixes, key=lambda prefix: (prefix.count("."), prefix))
+
+
+def _point_keys_for_prefix(dataset_values: dict[str, Any], prefix: str) -> dict[str, Any]:
+    point_prefix = prefix + "points."
+    return {
+        key[len(point_prefix) :]: value
+        for key, value in dataset_values.items()
+        if key.startswith(point_prefix)
+    }
+
+
+def _analysis_outputs_for_prefix(
+    dataset_values: dict[str, Any], prefix: str
+) -> dict[str, Any]:
+    analysis_prefix = prefix + "analysis.output."
+    return {
+        key[len(analysis_prefix) :]: value
+        for key, value in dataset_values.items()
+        if key.startswith(analysis_prefix)
+    }
+
+
+def _online_results_for_prefix(
+    dataset_values: dict[str, Any], prefix: str
+) -> dict[str, Any]:
+    analysis_prefix = prefix + "analysis.online_result."
+    return {
+        key[len(analysis_prefix) :]: value
+        for key, value in dataset_values.items()
+        if key.startswith(analysis_prefix)
+    }
+
+
+def _online_annotations_for_prefix(
+    dataset_values: dict[str, Any], prefix: str
+) -> dict[str, list[dict[str, Any]]]:
+    analysis_prefix = prefix + "analysis.online_annotation."
+    return {
+        key[len(analysis_prefix) :]: value
+        for key, value in dataset_values.items()
+        if key.startswith(analysis_prefix)
+    }
+
+
+def snapshot_from_live_values(
+    prefix: str, values: dict[str, Any]
+) -> HostRuntimeSnapshot:
+    datasets = {
+        key[len(prefix) :]: _decode_live_value(key[len(prefix) :], value)
+        for key, value in values.items()
+        if key.startswith(prefix)
+    }
+
+    sites = {}
+    for site_prefix in _find_site_prefixes(datasets):
+        path_value = tuple(datasets[site_prefix + "site.path"])
+        parent_path = datasets.get(site_prefix + "site.parent_path")
+        sites[path_value] = HostRuntimeSiteData(
+            prefix=prefix + site_prefix,
+            path=path_value,
+            parent_path=None if parent_path is None else tuple(parent_path),
+            fragment_fqn=datasets.get(site_prefix + "site.fragment_fqn", "<unknown>"),
+            pseudoparams=datasets.get(site_prefix + "scan.pseudoparams", {}),
+            fixed_pseudoparams=datasets.get(site_prefix + "scan.fixed_pseudoparams", {}),
+            parameters=datasets.get(site_prefix + "scan.parameters", {}),
+            fixed_parameters=datasets.get(site_prefix + "scan.fixed_parameters", {}),
+            channels=datasets.get(site_prefix + "scan.channels", {}),
+            point_data=_point_keys_for_prefix(datasets, site_prefix),
+            analysis_outputs_schema=datasets.get(site_prefix + "analysis.outputs", {}),
+            analysis_outputs=_analysis_outputs_for_prefix(datasets, site_prefix),
+            online_analysis_schema=datasets.get(site_prefix + "analysis.online", {}),
+            online_analysis_results=_online_results_for_prefix(datasets, site_prefix),
+            online_analysis_annotations=_online_annotations_for_prefix(
+                datasets, site_prefix
+            ),
+            annotations=datasets.get(site_prefix + "analysis.annotations", []),
+            segmented=(site_prefix + "segments.start_index") in datasets,
+            metadata={
+                key[len(site_prefix) :]: value
+                for key, value in datasets.items()
+                if key.startswith(site_prefix)
+                and not key.startswith(site_prefix + "points.")
+                and not key.startswith(site_prefix + "analysis.output.")
+                and not key.startswith(site_prefix + "analysis.online_result.")
+                and not key.startswith(site_prefix + "analysis.online_annotation.")
+            },
+        )
+
+    return HostRuntimeSnapshot(
+        path=Path("<live>"),
+        top_level_metadata={},
+        sites=sites,
+    )
+

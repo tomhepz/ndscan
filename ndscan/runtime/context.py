@@ -16,11 +16,12 @@ from sipyco import pyon
 from artiq import __version__ as artiq_version
 from artiq.language import HasEnvironment
 
-from .persistence import ScanSite, ScanSiteDatasetWriter
+from ..scan.request import PreviewPolicy
+from ..schema.scan_site import ScanSite
+from .persistence import ScanSiteDatasetWriter
 
 __all__ = [
     "ActiveScanContext",
-    "PreviewPolicy",
     "RunContext",
     "current_scan_context",
     "current_run_context",
@@ -54,27 +55,6 @@ _active_kernel_parent_scan_context: ContextVar[
     tuple[_KernelParentScanContextProvider, ...]
 ] = ContextVar("_active_kernel_parent_scan_context", default=())
 _persistent_kernel_parent_scan_context: list[_KernelParentScanContextProvider] = []
-
-
-@dataclass(frozen=True)
-class PreviewPolicy:
-    """Configuration for periodic preview HDF5 snapshots."""
-
-    path: str | None = None
-    min_interval_s: float = 120.0
-    write_on_completion: bool = False
-    remove_on_completion: bool = True
-
-    def __post_init__(self) -> None:
-        if self.min_interval_s < 0.0:
-            raise ValueError("min_interval_s must be non-negative")
-
-    def resolve_path(self, owner: HasEnvironment) -> str:
-        if self.path is not None:
-            return self.path
-        scheduler = owner.get_device("scheduler")
-        rid = getattr(scheduler, "rid", 0)
-        return f"{rid:09d}-{owner.__class__.__name__}.preview.h5"
 
 
 class PreviewCoordinator:

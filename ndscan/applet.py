@@ -13,9 +13,9 @@ from artiq.applets.simple import SimpleApplet
 from sipyco import common_args
 
 from ._qt import QtWidgets
-from .plots.container_widgets import PlotAreaWidget
-from .plots.model import Context
-from .plots.model.subscriber import SubscriberRoot
+from .plots.legacy.container_widgets import PlotAreaWidget
+from .plots.legacy.model import Context
+from .plots.legacy.model.subscriber import SubscriberRoot
 
 logger = logging.getLogger(__name__)
 

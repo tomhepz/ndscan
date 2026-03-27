@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from collections.abc import Mapping
 from typing import Any
 
+from artiq.language.core import TerminationRequested
 from artiq.language import EnvExperiment, HasEnvironment, PYONValue
 
 from .prepared import PreparedScan
-from .program import ScanRequest
 from ..define.fragment import ExpFragment
 from ..define.parameters import ParamStore
 from ..define.result_channels import ResultChannel
+from ..scan.request import ScanRequest
+from ..schema.scan_site import make_scan_site_prefix
 from ..submission.host_scan_schema import (
     HostScanGridModeSpec,
     HostScanSchemaError,
@@ -128,6 +131,7 @@ class PreparedScanExperiment(EnvExperiment):
         max_rtio_underflow_retries: int = 3,
         max_transitory_error_retries: int = 10,
     ) -> None:
+        self.setattr_device("ccb")
         self.fragment = fragment_init()
         self._request_spec = (
             request_factory(self.fragment) if callable(request_factory) else request_factory
@@ -135,9 +139,11 @@ class PreparedScanExperiment(EnvExperiment):
         self._max_rtio_underflow_retries = max_rtio_underflow_retries
         self._max_transitory_error_retries = max_transitory_error_retries
         self._session = None
+        self._plot_prefix = None
 
     def prepare(self) -> None:
         request, overrides = _resolve_code_request_spec(self._request_spec)
+        self._plot_prefix = make_scan_site_prefix(self, request.site)
         self._session = PreparedScan(
             self,
             self.fragment,
@@ -148,7 +154,13 @@ class PreparedScanExperiment(EnvExperiment):
         )
 
     def run(self) -> None:
-        self._session.execute()
+        _create_runtime_applet(
+            self.ccb,
+            prefix=self._plot_prefix,
+            title=f"{self.fragment.__class__.__name__} ({self.fragment.fqn})",
+        )
+        with suppress(TerminationRequested):
+            self._session.execute()
 
 
 class PreparedDashboardScanExperiment(EnvExperiment):
@@ -164,6 +176,7 @@ class PreparedDashboardScanExperiment(EnvExperiment):
         max_rtio_underflow_retries: int = 3,
         max_transitory_error_retries: int = 10,
     ) -> None:
+        self.setattr_device("ccb")
         self.fragment = fragment_init()
         if default_request_spec is None:
             default_request_spec = HostScanSpec(mode=HostScanGridModeSpec())
@@ -171,6 +184,7 @@ class PreparedDashboardScanExperiment(EnvExperiment):
         self._max_rtio_underflow_retries = max_rtio_underflow_retries
         self._max_transitory_error_retries = max_transitory_error_retries
         self._session = None
+        self._plot_prefix = None
         self.args = HostArgumentInterface(self, self.fragment, self._default_request_spec)
 
     def prepare(self) -> None:
@@ -178,6 +192,7 @@ class PreparedDashboardScanExperiment(EnvExperiment):
             self.fragment,
             self._default_request_spec,
         )
+        self._plot_prefix = make_scan_site_prefix(self, request.site)
         self._session = PreparedScan(
             self,
             self.fragment,
@@ -188,7 +203,13 @@ class PreparedDashboardScanExperiment(EnvExperiment):
         )
 
     def run(self) -> None:
-        self._session.execute()
+        _create_runtime_applet(
+            self.ccb,
+            prefix=self._plot_prefix,
+            title=f"{self.fragment.__class__.__name__} ({self.fragment.fqn})",
+        )
+        with suppress(TerminationRequested):
+            self._session.execute()
 
 
 def make_fragment_prepared_scan_exp(
@@ -295,3 +316,17 @@ def _merge_override_store_maps(
         fqn: list(path_map.items())
         for fqn, path_map in merged.items()
     }
+
+
+def _create_runtime_applet(ccb, *, prefix: str | None, title: str, group: str = "ndscan"):
+    if not prefix:
+        return
+    cmd = [
+        "${python}",
+        "-m ndscan.runtime_applet",
+        "--server=${server}",
+        "--port-notify=${port_notify}",
+        "--port-control=${port_control}",
+        f"--prefix={prefix}",
+    ]
+    ccb.issue("create_applet", title, " ".join(cmd), group=group)

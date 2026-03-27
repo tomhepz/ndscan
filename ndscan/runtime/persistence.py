@@ -1,10 +1,7 @@
-"""Scan-site dataset layout helpers for the new host-only runtime.
+"""Scan-site dataset writing helpers for the prepared runtime.
 
-The legacy runtime spreads scan dataset layout across several modules via sink setup.
-This module makes the dataset layout explicit instead:
-
-- ``ScanSite`` describes *where* a scan writes its data,
-- ``ScanSiteDatasetWriter`` is the sole owner of scan-site dataset keys.
+The persisted scan-site contract lives in ``ndscan.schema.scan_site``. This module
+owns only the runtime-side writer implementation.
 
 The writer is deliberately plain Python. It sits at the edge of the ARTIQ world by
 accepting a ``HasEnvironment`` owner, but the policy for *when* points are written is
@@ -13,83 +10,24 @@ kept in the host runtime.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from artiq.language import HasEnvironment
 
 from ..define.result_channels import AppendingDatasetSink, ScalarDatasetSink
+from ..schema.scan_site import (
+    SCAN_SITE_SCHEMA_REVISION,
+    ScanSite,
+    make_scan_site_prefix,
+)
 from ..define.utils import dump_json, to_metadata_broadcast_type
 from ..utils import SCHEMA_REVISION_KEY
 
 if TYPE_CHECKING:
     from .program import PointObservation
 
-__all__ = [
-    "ScanSite",
-    "make_scan_site_prefix",
-    "ScanSiteDatasetWriter",
-]
-
-
-# The legacy runtime still writes schema revision 2. The host-runtime scan-site schema
-# has diverged enough that readers should be able to distinguish it explicitly.
-SCAN_SITE_SCHEMA_REVISION = 4
-
-
-@dataclass(frozen=True)
-class ScanSite:
-    """Description of a scan site's place in the dataset tree.
-
-    ``path`` is structural, not cosmetic. The intention is that a top-level scan lives
-    at ``()`` and nested scan sites later use child paths like ``("cooling",)`` or
-    ``("cooling", "probe")``.
-
-    ``parent_path`` is optional metadata describing which other scan site this site is
-    nested under. Child scan sites still have their own full ``path``; the parent path
-    is kept separately so consumers do not need to reverse-engineer hierarchy from the
-    dataset prefix.
-
-    ``dataset_prefix`` is an escape hatch for callers that need an explicit prefix.
-    The first host-only runtime uses it rarely; most callers should rely on the
-    canonical ``ndscan.rid_<rid>.site.root...`` convention instead.
-    """
-
-    path: tuple[str, ...] = ()
-    parent_path: tuple[str, ...] | None = None
-    dataset_prefix: str | None = None
-    segmented: bool = False
-    extra_metadata: Mapping[str, Any] = field(default_factory=dict)
-
-
-def _normalise_site_component(name: str) -> str:
-    """Return a dataset-safe site path component.
-
-    Fragment paths are already identifier-like in normal ndscan usage, so this is a
-    conservative safety net rather than a naming scheme in its own right.
-    """
-
-    cleaned = re.sub(r"[^A-Za-z0-9_]+", "_", name).strip("_")
-    return cleaned or "unnamed"
-
-
-def make_scan_site_prefix(owner: HasEnvironment, site: ScanSite) -> str:
-    """Return the dataset prefix used by ``ScanSiteDatasetWriter``.
-
-    By default the new runtime writes under ``ndscan.rid_<rid>.site.root.`` and child
-    sites extend that path with structural site components.
-    """
-
-    if site.dataset_prefix is not None:
-        return site.dataset_prefix if site.dataset_prefix.endswith(".") else site.dataset_prefix + "."
-
-    scheduler = owner.get_device("scheduler")
-    rid = getattr(scheduler, "rid", 0)
-    parts = ["ndscan", f"rid_{rid}", "site", "root"]
-    parts.extend(_normalise_site_component(part) for part in site.path)
-    return ".".join(parts) + "."
+__all__ = ["ScanSiteDatasetWriter"]
 
 
 class ScanSiteDatasetWriter:

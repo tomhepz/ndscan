@@ -30,11 +30,9 @@ from .executors import (
     _execute_scan_request_inspection,
     _publish_completed_batch,
 )
-from .persistence import ScanSite
 from .program import (
     ScanInspection,
     ScanOutputs,
-    ScanRequest,
     _can_use_kernel_streaming_executor,
     _collect_parameter_mappings,
     _fragment_uses_kernel_execution,
@@ -46,6 +44,9 @@ from .program import (
 from ..define.fragment import ExpFragment, Fragment
 from ..define.parameters import ParamHandle, ParamStore
 from ..define.result_channels import FloatChannel, IntChannel, ResultChannel
+from ..scan.mapping import ParameterMapping
+from ..scan.request import ScanRequest
+from ..schema.scan_site import ScanSite
 from ..utils import merge_no_duplicates
 
 __all__ = [
@@ -239,6 +240,51 @@ def _clone_scan_request_for_execution(request: ScanRequest) -> ScanRequest:
         site=request.site,
         metadata=deepcopy(request.metadata),
         execution_policy=request.execution_policy,
+    )
+
+
+def _fragment_subtree_contains(root: Fragment, candidate: Fragment) -> bool:
+    if root is candidate:
+        return True
+    for child in root._subfragments:
+        if _fragment_subtree_contains(child, candidate):
+            return True
+    return False
+
+
+def _mapping_targets_belong_to_fragment(
+    mapping: ParameterMapping, fragment: ExpFragment
+) -> bool:
+    return all(_fragment_subtree_contains(fragment, target.owner) for target in mapping.targets)
+
+
+def _collect_prepared_child_owner_mappings(
+    owner: HasEnvironment, fragment: ExpFragment
+) -> tuple[ParameterMapping, ...]:
+    if not isinstance(owner, Fragment):
+        return ()
+    return tuple(
+        mapping
+        for mapping in owner._parameter_mappings
+        if _mapping_targets_belong_to_fragment(mapping, fragment)
+    )
+
+
+def _merge_child_inherited_parameter_mappings(
+    request: ScanRequest,
+    inherited_parameter_mappings: Sequence[ParameterMapping],
+) -> ScanRequest:
+    if not inherited_parameter_mappings:
+        return request
+    return ScanRequest(
+        axes=request.axes,
+        point_policy=request.point_policy,
+        site=request.site,
+        metadata=request.metadata,
+        execution_policy=request.execution_policy,
+        parameter_mappings=tuple(inherited_parameter_mappings)
+        + tuple(request.parameter_mappings),
+        fixed_pseudoparams=request.fixed_pseudoparams,
     )
 
 
@@ -607,6 +653,9 @@ class PreparedChildScan(_PreparedScanHandleBase):
 
     @host_only
     def _prepare_execution_request(self, request: ScanRequest) -> ScanRequest:
+        request = _merge_child_inherited_parameter_mappings(
+            request, self._current_inherited_parameter_mappings()
+        )
         return _prepare_child_scan_request(
             request,
             name=self._name,
@@ -696,14 +745,17 @@ class PreparedChildScan(_PreparedScanHandleBase):
                 overrides={} if self._overrides is None else self._overrides
             )
 
+        effective_request = _merge_child_inherited_parameter_mappings(
+            self._request, self._current_inherited_parameter_mappings()
+        )
         axis_handles = [
-            axis for axis in self._request.axes if isinstance(axis, ParamHandle)
+            axis for axis in effective_request.axes if isinstance(axis, ParamHandle)
         ]
         axis_bindings = _install_scan_axis_stores(axis_handles)
         try:
-            axes = _build_bound_axes(self._request.axes)
+            axes = _build_bound_axes(effective_request.axes)
             parameter_mappings = _collect_parameter_mappings(
-                self._fragment, self._request, axes
+                self._fragment, effective_request, axes
             )
             parameters = _build_bound_parameters(axes, parameter_mappings)
             if not _can_use_kernel_streaming_executor(
@@ -746,11 +798,8 @@ class PreparedChildScan(_PreparedScanHandleBase):
         if self._kernel_session is not None:
             raise RuntimeError("Prepared child scan kernel acquire is already active")
 
-        request = _prepare_child_scan_request(
+        request = self._prepare_execution_request(
             _clone_scan_request_for_execution(self._request),
-            name=self._name,
-            segmented=self._segmented,
-            extra_metadata=self._extra_metadata,
         )
         self._kernel_session = _PreparedChildKernelAcquireSession(
             self._owner,
@@ -762,6 +811,10 @@ class PreparedChildScan(_PreparedScanHandleBase):
         except BaseException:
             self._kernel_session = None
             raise
+
+    @host_only
+    def _current_inherited_parameter_mappings(self) -> tuple[ParameterMapping, ...]:
+        return _collect_prepared_child_owner_mappings(self._owner, self._fragment)
 
     @rpc(flags={"async"})
     def _record_kernel_executor_entry(self) -> None:

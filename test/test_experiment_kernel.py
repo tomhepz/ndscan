@@ -53,14 +53,12 @@ from ndscan.legacy.entry_point import make_fragment_scan_exp, run_fragment_once
 from ndscan.legacy.scan_generator import LinearGenerator, ListGenerator
 from ndscan.legacy.subscan import SubscanExpFragment, setattr_subscan
 from ndscan.runtime.api import (
-    ExecutionPolicy,
-    ParameterMapping,
     PreparedScan,
-    ScanRequest,
-    ScanVariable,
     prepare_child_scan,
     setattr_prepared_child_scan,
 )
+from ndscan.scan.mapping import ParameterMapping, ScanVariable
+from ndscan.scan.request import ExecutionPolicy, ScanRequest
 from ndscan.utils import SCHEMA_REVISION, SCHEMA_REVISION_KEY
 
 

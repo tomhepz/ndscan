@@ -12,9 +12,10 @@ from ndscan.define.fragment import ExpFragment
 from ndscan.define.parameters import FloatParam
 from ndscan.define.result_channels import FloatChannel
 from ndscan.results.scan_site_reader import read_host_runtime_snapshot
-from ndscan.runtime.api import PreparedScan, ScanRequest, prepare_child_scan
+from ndscan.runtime.api import PreparedScan, prepare_child_scan
 from ndscan.scan.mapping import ParameterMapping, ScanVariable
 from ndscan.scan.point_policy import BasePoint, ExplicitPointPolicy
+from ndscan.scan.request import ScanRequest
 from ndscan.submission.host_scan_schema import compile_host_scan_schema
 
 

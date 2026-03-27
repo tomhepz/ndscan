@@ -34,7 +34,6 @@ from .program import (
     HostScanProgram,
     PointObservation,
     ScanInspection,
-    ScanRequest,
     _BoundParameterMapping,
     _HostObservationTransport,
     _HostPointBatchSource,
@@ -55,6 +54,7 @@ from ..define.fragment import ExpFragment, RestartKernelTransitoryError, Transit
 from ..define.parameters import ParamHandle
 from ..define.result_channels import ResultChannel, SingleUseSink
 from ..define.utils import is_kernel
+from ..scan.request import ScanRequest
 
 logger = logging.getLogger(__name__)
 
