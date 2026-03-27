@@ -241,7 +241,7 @@ class LegacyManualAomWrapperFragment(ExpFragment):
         self.hardware.run_once()
 
 
-LegacyAomManualWrapperScan = make_fragment_scan_exp(LegacyManualAomWrapperFragment)
+# LegacyAomManualWrapperScan = make_fragment_scan_exp(LegacyManualAomWrapperFragment)
 
 
 """

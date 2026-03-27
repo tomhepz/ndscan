@@ -80,17 +80,30 @@ class RuntimeLiveSnapshotTest(unittest.TestCase):
             prefix + "scan.parameters": json.dumps(
                 {
                     "param_0": {
+                        "path": "",
                         "is_scanned": True,
                         "param": {
+                            "fqn": "demo.root.drive_frequency",
                             "description": "Drive Frequency",
                             "spec": {"unit": "kHz"},
                         },
                     }
+                    ,
+                    "param_1": {
+                        "path": "child",
+                        "is_scanned": False,
+                        "param": {
+                            "fqn": "demo.child.detuning",
+                            "description": "Mapped Detuning",
+                            "spec": {"unit": "MHz"},
+                        },
+                    },
                 }
             ),
             prefix + "scan.channels": json.dumps(
                 {
                     "channel_value": {
+                        "path": "detector/counts",
                         "description": "Detected Counts",
                         "type": "float",
                         "unit": "cts",
@@ -99,6 +112,7 @@ class RuntimeLiveSnapshotTest(unittest.TestCase):
             ),
             prefix + "points.pseudoparam_0": [0.0, 1.0],
             prefix + "points.param_0": [10.0, 11.0],
+            prefix + "points.param_1": [2.0, 3.0],
             prefix + "points.channel_value": [20.0, 21.0],
             prefix + "state.num_points": 2,
             prefix + "state.completed": False,
@@ -110,14 +124,22 @@ class RuntimeLiveSnapshotTest(unittest.TestCase):
         self.assertEqual(
             _default_x_choices(root),
             [
+                ("pseudoparam_0", "logical_x (Logical X / MHz)"),
+                ("param_0", "drive_frequency (Drive Frequency / kHz)"),
+                ("param_1", "child/detuning (Mapped Detuning / MHz)"),
+                ("channel_value", "detector/counts (Detected Counts / cts)"),
                 ("__point_index__", "point_index"),
-                ("pseudoparam_0", "Logical X / MHz"),
-                ("param_0", "Drive Frequency / kHz"),
             ],
         )
         self.assertEqual(
             _default_y_choices(root),
-            [("channel_value", "Detected Counts / cts")],
+            [
+                ("pseudoparam_0", "logical_x (Logical X / MHz)"),
+                ("param_0", "drive_frequency (Drive Frequency / kHz)"),
+                ("param_1", "child/detuning (Mapped Detuning / MHz)"),
+                ("channel_value", "detector/counts (Detected Counts / cts)"),
+                ("__point_index__", "point_index"),
+            ],
         )
 
 

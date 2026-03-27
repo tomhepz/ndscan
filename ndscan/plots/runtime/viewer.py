@@ -27,6 +27,16 @@ def _schema_description_label(description: str | None, fallback: str) -> str:
     return description if description else fallback
 
 
+def _machine_and_human_label(machine_label: str, human_label: str) -> str:
+    if machine_label == _POINT_INDEX_KEY:
+        return "point_index"
+    return (
+        machine_label
+        if human_label == machine_label
+        else f"{machine_label} ({human_label})"
+    )
+
+
 def _append_unit_label(label: str, unit: str | None) -> str:
     unit = (unit or "").strip()
     return f"{label} / {unit}" if unit else label
@@ -48,39 +58,95 @@ def _unique_choice_labels(choices: list[tuple[str, str]]) -> list[tuple[str, str
 
 def _pseudoparam_choice_label(key: str, schema: dict[str, Any]) -> str:
     variable = schema.get("variable", schema)
-    label = _schema_description_label(variable.get("description"), variable.get("name", key))
-    return _append_unit_label(label, variable.get("spec", {}).get("unit"))
+    machine_label = variable.get("name", key)
+    human_label = _schema_description_label(
+        variable.get("description"), variable.get("name", key)
+    )
+    human_label = _append_unit_label(human_label, variable.get("spec", {}).get("unit"))
+    return _machine_and_human_label(machine_label, human_label)
+
+
+def _parameter_machine_label(key: str, schema: dict[str, Any]) -> str:
+    param = schema.get("param", schema)
+    fqn = param.get("fqn", "")
+    local_name = fqn.rsplit(".", 1)[-1] if fqn else key
+    path = schema.get("path", "").strip("/")
+    return f"{path}/{local_name}" if path else local_name
 
 
 def _parameter_choice_label(key: str, schema: dict[str, Any]) -> str:
     param = schema.get("param", schema)
-    label = _schema_description_label(param.get("description"), key)
-    return _append_unit_label(label, param.get("spec", {}).get("unit"))
+    machine_label = _parameter_machine_label(key, schema)
+    human_label = _schema_description_label(param.get("description"), key)
+    human_label = _append_unit_label(human_label, param.get("spec", {}).get("unit"))
+    return _machine_and_human_label(machine_label, human_label)
 
 
 def _channel_choice_label(key: str, schema: dict[str, Any]) -> str:
-    label = _schema_description_label(schema.get("description"), key)
-    return _append_unit_label(label, schema.get("unit"))
+    machine_label = schema.get("path", key)
+    human_label = _schema_description_label(schema.get("description"), key)
+    human_label = _append_unit_label(human_label, schema.get("unit"))
+    return _machine_and_human_label(machine_label, human_label)
 
 
-def _default_x_choices(site: HostRuntimeSiteData) -> list[tuple[str, str]]:
-    choices = [(_POINT_INDEX_KEY, "point_index")]
-    seen = {_POINT_INDEX_KEY}
-    for key in site.pseudoparams.keys():
-        if key not in seen:
-            choices.append((key, _pseudoparam_choice_label(key, site.pseudoparams[key])))
-            seen.add(key)
+def _generic_point_stream_choice_label(key: str) -> str:
+    if key == "acquired_at_unix":
+        return _machine_and_human_label(key, "acquired at / s")
+    if key.startswith("metadata."):
+        return _machine_and_human_label(key, key.removeprefix("metadata."))
+    return key
+
+
+def _is_numeric_point_stream(values: Any) -> bool:
+    if len(values) == 0:
+        return False
+    try:
+        np.asarray(values, dtype=float)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _x_axis_choices(site: HostRuntimeSiteData) -> list[tuple[str, str]]:
+    choices = []
+    seen = set[str]()
+
+    def add_choice(key: str, label: str) -> None:
+        if key in seen:
+            return
+        values = site.point_data.get(key)
+        if values is None or not _is_numeric_point_stream(values):
+            return
+        choices.append((key, label))
+        seen.add(key)
+
+    for key, schema in site.pseudoparams.items():
+        add_choice(key, _pseudoparam_choice_label(key, schema))
+
     for key, schema in site.parameters.items():
-        if schema.get("is_scanned", False) and key not in seen:
-            choices.append((key, _parameter_choice_label(key, schema)))
-            seen.add(key)
+        if schema.get("is_scanned", False):
+            add_choice(key, _parameter_choice_label(key, schema))
+
+    for key, schema in site.parameters.items():
+        if not schema.get("is_scanned", False):
+            add_choice(key, _parameter_choice_label(key, schema))
+
+    for key, schema in site.channels.items():
+        add_choice(key, _channel_choice_label(key, schema))
+
+    for key in sorted(site.point_data.keys()):
+        add_choice(key, _generic_point_stream_choice_label(key))
+
+    choices.append((_POINT_INDEX_KEY, _machine_and_human_label(_POINT_INDEX_KEY, "point_index")))
     return _unique_choice_labels(choices)
 
 
+def _default_x_choices(site: HostRuntimeSiteData) -> list[tuple[str, str]]:
+    return _x_axis_choices(site)
+
+
 def _default_y_choices(site: HostRuntimeSiteData) -> list[tuple[str, str]]:
-    return _unique_choice_labels(
-        [(key, _channel_choice_label(key, schema)) for key, schema in site.channels.items()]
-    )
+    return _x_axis_choices(site)
 
 
 def _choice_label_map(choices: list[tuple[str, str]]) -> dict[str, str]:
@@ -310,8 +376,6 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         for key, label in x_choices:
             self._x_combo.addItem(label, key)
         x_index = self._x_combo.findData(selected_x_key) if selected_x_key is not None else -1
-        if x_index == -1 and self._x_combo.count() > 1:
-            x_index = 1
         if x_index == -1 and self._x_combo.count() > 0:
             x_index = 0
         if x_index != -1:
