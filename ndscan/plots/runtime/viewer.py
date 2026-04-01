@@ -23,6 +23,9 @@ from typing import Any
 import numpy as np
 import pyqtgraph as pg
 
+pg.setConfigOption('background', 'w')
+pg.setConfigOption('foreground', 'k')
+
 from ..._qt import QtCore, QtGui, QtWidgets
 from ...fits.sensible import artifact_summary, curve_points_for_artifact
 from ...utils import FIT_OBJECTS
