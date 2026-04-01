@@ -1,6 +1,7 @@
 """Tests for optional host-runtime optimiser backends."""
 
 import unittest
+from unittest.mock import patch
 
 try:
     import torch
@@ -186,6 +187,42 @@ class BayesianOptimisationBackendTest(unittest.TestCase):
         next_batch = backend.suggest(2)
         self.assertGreaterEqual(len(next_batch), 1)
         for suggestion in next_batch:
+            self.assertGreaterEqual(suggestion.point[0], -1.0)
+            self.assertLessEqual(suggestion.point[0], 1.0)
+
+    def test_backend_falls_back_when_duplicate_filter_removes_entire_batch(self):
+        backend = NuboBatchBayesianOptimisationBackend(
+            bounds=[[-1.0], [1.0]],
+            batch_size=2,
+            initial_points=[[-1.0], [1.0]],
+            random_seed=0,
+            fit_steps=2,
+            acquisition_num_starts=1,
+            surrogate_num_starts=1,
+            batch_mc_samples=8,
+            batch_acq_steps=2,
+            max_batches=1,
+            min_normalised_distance=10.0,
+        )
+
+        _ = backend.suggest(2)
+        backend.observe(
+            (
+                OptimiserObservation(point=(-1.0,), objective=1.0, noise_std=0.01),
+                OptimiserObservation(point=(1.0,), objective=1.0, noise_std=0.01),
+            )
+        )
+
+        duplicate_batch = torch.tensor([[-1.0], [1.0]], dtype=torch.get_default_dtype())
+        with patch(
+            "ndscan.scan.optimisation._propose_bo_batch",
+            return_value=duplicate_batch,
+        ):
+            next_batch = backend.suggest(2)
+
+        self.assertEqual(len(next_batch), 2)
+        for suggestion in next_batch:
+            self.assertEqual(suggestion.metadata["decision_source"], "fallback")
             self.assertGreaterEqual(suggestion.point[0], -1.0)
             self.assertLessEqual(suggestion.point[0], 1.0)
 

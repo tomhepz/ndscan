@@ -264,6 +264,26 @@ def _filter_near_duplicates(
     return torch.stack(kept)
 
 
+def _sample_random_points(
+    bounds: torch.Tensor,
+    *,
+    count: int,
+    generator: torch.Generator,
+) -> torch.Tensor:
+    if count <= 0:
+        dims = int(bounds.shape[1])
+        return torch.zeros((0, dims), dtype=bounds.dtype, device=bounds.device)
+
+    random_points = torch.rand(
+        (count, int(bounds.shape[1])),
+        dtype=bounds.dtype,
+        device=bounds.device,
+        generator=generator,
+    )
+    span = bounds[1] - bounds[0]
+    return bounds[0] + random_points * span
+
+
 def _normalise_points(points: torch.Tensor, bounds: torch.Tensor) -> torch.Tensor:
     span = bounds[1] - bounds[0]
     return (points - bounds[0]) / span
@@ -895,6 +915,49 @@ class NuboBatchBayesianOptimisationBackend:
         self._y_obs_err = torch.zeros((0,), dtype=self._bounds.dtype, device=self._bounds.device)
         self._num_bo_batches = 0
 
+    def _make_fallback_points(
+        self,
+        count: int,
+        existing_points: torch.Tensor,
+    ) -> torch.Tensor:
+        if count <= 0:
+            return existing_points[:0]
+
+        kept: list[torch.Tensor] = []
+        max_attempts = max(8, 32 * count)
+        working_existing = existing_points
+        for _ in range(max_attempts):
+            candidate = _sample_random_points(
+                self._bounds,
+                count=1,
+                generator=self._rng,
+            )
+            filtered = _filter_near_duplicates(
+                candidate,
+                working_existing,
+                self._bounds,
+                min_normalised_distance=self._min_normalised_distance,
+            )
+            if filtered.shape[0] == 0:
+                continue
+            kept.append(filtered[0])
+            working_existing = torch.vstack((working_existing, filtered))
+            if len(kept) >= count:
+                return torch.stack(kept)
+
+        # If the configured spacing threshold makes it impossible to find any new
+        # points, still return random in-bounds suggestions so the optimiser can
+        # continue instead of failing the runtime with an empty batch.
+        remaining = count - len(kept)
+        raw = _sample_random_points(
+            self._bounds,
+            count=remaining,
+            generator=self._rng,
+        )
+        if not kept:
+            return raw
+        return torch.vstack((torch.stack(kept), raw))
+
     @property
     def axis_count(self) -> int:
         return self._dims
@@ -999,6 +1062,15 @@ class NuboBatchBayesianOptimisationBackend:
             )
             for row in bo_points
         )
+        if not suggestions:
+            fallback_points = self._make_fallback_points(limit, self._x_obs)
+            suggestions.extend(
+                OptimiserSuggestion(
+                    point=tuple(map(float, row.tolist())),
+                    metadata={"decision_source": "fallback"},
+                )
+                for row in fallback_points
+            )
         return suggestions
 
     def observe(self, observations: Sequence[OptimiserObservation]) -> None:

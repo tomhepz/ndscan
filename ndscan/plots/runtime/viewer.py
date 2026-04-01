@@ -35,6 +35,7 @@ from ...results.scan_site_reader import (
     HostRuntimeSiteData,
     HostRuntimeSiteSegment,
 )
+from .bo_mpl import BoCornerPlotWidget, site_supports_bo_corner_plot
 from .fitting import FitBackend, FitRequest, FitResult, default_fit_backend
 from .live import snapshot_from_live_values
 
@@ -49,6 +50,7 @@ _FIT_TARGET_SELECTED_GROUP = "selected_group"
 _PLOT_MODE_1D = "1d"
 _PLOT_MODE_2D_SCATTER = "2d_scatter"
 _PLOT_MODE_2D_IMAGE = "2d_image"
+_PLOT_MODE_BO = "bo_dashboard"
 _PLOT_MODE_CHOICES = (
     (_PLOT_MODE_1D, "1D"),
     (_PLOT_MODE_2D_SCATTER, "2D scatter"),
@@ -489,6 +491,15 @@ def _repeat_combine_choices() -> list[tuple[str, str]]:
     """Return how repeated identical x-values should be combined in 1D."""
 
     return list(_REPEAT_COMBINE_CHOICES)
+
+
+def _plot_mode_choices(site: HostRuntimeSiteData) -> list[tuple[str, str]]:
+    """Return the plot modes available for one site."""
+
+    choices = list(_PLOT_MODE_CHOICES)
+    if site_supports_bo_corner_plot(site):
+        choices.append((_PLOT_MODE_BO, "BO dashboard"))
+    return choices
 
 
 def _choice_label_map(choices: list[tuple[str, str]]) -> dict[str, str]:
@@ -1374,9 +1385,13 @@ class _SiteColumnWidget(QtWidgets.QWidget):
 
         layout.addWidget(self._details_box)
 
+        self._plot_stack = QtWidgets.QStackedWidget()
+
+        self._pyqtgraph_panel = QtWidgets.QWidget()
         plot_row = QtWidgets.QHBoxLayout()
         plot_row.setContentsMargins(0, 0, 0, 0)
         plot_row.setSpacing(6)
+        self._pyqtgraph_panel.setLayout(plot_row)
 
         self._plot_widget = pg.PlotWidget()
         self._plot_item = self._plot_widget.getPlotItem()
@@ -1426,7 +1441,11 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         self._colorbar = _VerticalColorBarWidget()
         plot_row.addWidget(self._colorbar)
 
-        layout.addLayout(plot_row, 1)
+        self._bo_plot_widget = BoCornerPlotWidget()
+
+        self._plot_stack.addWidget(self._pyqtgraph_panel)
+        self._plot_stack.addWidget(self._bo_plot_widget)
+        layout.addWidget(self._plot_stack, 1)
 
         self.update_state(
             site=site,
@@ -1490,13 +1509,20 @@ class _SiteColumnWidget(QtWidgets.QWidget):
             return
         self._plot_mode_combo.blockSignals(True)
         self._plot_mode_combo.clear()
-        for key, label in _PLOT_MODE_CHOICES:
+        for key, label in _plot_mode_choices(self._site):
             self._plot_mode_combo.addItem(label, key)
         mode_index = (
             self._plot_mode_combo.findData(selected_plot_mode)
             if selected_plot_mode is not None
             else -1
         )
+        if mode_index == -1:
+            default_mode = (
+                _PLOT_MODE_BO
+                if site_supports_bo_corner_plot(self._site)
+                else _PLOT_MODE_1D
+            )
+            mode_index = self._plot_mode_combo.findData(default_mode)
         if mode_index == -1:
             mode_index = 0
         self._plot_mode_combo.setCurrentIndex(mode_index)
@@ -1690,15 +1716,22 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         )
 
     def _sync_control_visibility(self) -> None:
-        is_2d = self._selected_plot_mode() in {_PLOT_MODE_2D_SCATTER, _PLOT_MODE_2D_IMAGE}
-        show_group = not is_2d and self._group_combo.count() > 1
+        plot_mode = self._selected_plot_mode()
+        is_bo = plot_mode == _PLOT_MODE_BO
+        is_2d = plot_mode in {_PLOT_MODE_2D_SCATTER, _PLOT_MODE_2D_IMAGE}
+        show_group = not is_bo and not is_2d and self._group_combo.count() > 1
+        show_xy = not is_bo
         self._z_label.setVisible(is_2d)
         self._z_combo.setVisible(is_2d)
+        self._x_label.setVisible(show_xy)
+        self._x_combo.setVisible(show_xy)
+        self._y_label.setVisible(show_xy)
+        self._y_combo.setVisible(show_xy)
         self._group_label.setVisible(show_group)
         self._group_combo.setVisible(show_group)
-        self._show_lines_checkbox.setVisible(not is_2d)
-        self._repeat_combine_label.setVisible(not is_2d)
-        self._repeat_combine_combo.setVisible(not is_2d)
+        self._show_lines_checkbox.setVisible(show_xy and not is_2d)
+        self._repeat_combine_label.setVisible(show_xy and not is_2d)
+        self._repeat_combine_combo.setVisible(show_xy and not is_2d)
         layout = self.layout()
         if layout is not None:
             layout.invalidate()
@@ -2556,6 +2589,24 @@ class _SiteColumnWidget(QtWidgets.QWidget):
                     break
         self._highlight.setData(highlighted)
 
+    def _render_bo_plot(self) -> None:
+        """Render the embedded matplotlib BO dashboard for compatible root sites."""
+
+        self._plot_stack.setCurrentWidget(self._bo_plot_widget)
+        self._clear_plot_items()
+        status = self._bo_plot_widget.render_site(self._site)
+        self._status.setText(status)
+        self._current_plot_mode = _PLOT_MODE_BO
+        self._current_plot_arrays = None
+        self._current_source_indices = []
+        self._current_x_label = "x"
+        self._current_y_label = "y"
+        self._current_z_label = None
+        self._current_group_label = None
+        self._selected_readout.setText("selected: not available in BO dashboard")
+        self._cursor_readout.setText("cursor: not available in BO dashboard")
+        self._fit_readout.setText("fit: BO dashboard")
+
     def _render_plot(self) -> None:
         """Render the current site slice using the selected plot mode and axes."""
         if self._fit_active:
@@ -2570,6 +2621,10 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         y_label_map = _choice_label_map(y_choices)
         z_label_map = _choice_label_map(z_choices)
         plot_mode = self._selected_plot_mode()
+        if plot_mode == _PLOT_MODE_BO:
+            self._render_bo_plot()
+            return
+        self._plot_stack.setCurrentWidget(self._pyqtgraph_panel)
         x_key = self._selected_x_key()
         y_key = self._selected_y_key()
         group_key = self._selected_group_key()

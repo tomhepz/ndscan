@@ -17,6 +17,7 @@ from ndscan.plots.runtime.fitting import (
 from ndscan.plots.runtime.live import snapshot_from_live_values
 from ndscan.plots.runtime.viewer import (
     _NO_GROUP_KEY,
+    _PLOT_MODE_BO,
     _PLOT_MODE_1D,
     _PLOT_MODE_2D_IMAGE,
     _PLOT_MODE_2D_SCATTER,
@@ -265,10 +266,90 @@ class RuntimeLiveSnapshotTest(unittest.TestCase):
             ],
         )
 
+    def test_runtime_viewer_offers_bo_dashboard_mode_for_root_nubo_sites(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         app = QtWidgets.QApplication.instance()
         if app is None:
             app = QtWidgets.QApplication([])
+
+        prefix = "ndscan.rid_0.site.root."
+        values = {
+            prefix + "site.path": json.dumps([]),
+            prefix + "site.fragment_fqn": "BoRootFragment",
+            prefix + "scan.parameters": json.dumps(
+                {
+                    "param_0": {
+                        "path": "",
+                        "is_scanned": True,
+                        "param": {
+                            "fqn": "demo.root.x",
+                            "description": "X",
+                            "type": "float",
+                            "spec": {},
+                        },
+                    }
+                }
+            ),
+            prefix + "scan.channels": json.dumps(
+                {
+                    "channel_0": {
+                        "path": "objective",
+                        "description": "Objective",
+                        "type": "float",
+                    }
+                }
+            ),
+            prefix + "scan.point_policy": json.dumps(
+                {
+                    "kind": "ask_tell_optimiser",
+                    "backend": {
+                        "kind": "nubo_bayesian_optimisation",
+                        "dims": 1,
+                        "bounds": [[-1.0], [1.0]],
+                        "minimise": True,
+                        "fit_steps": 2,
+                        "fit_lr": 0.05,
+                        "surrogate_num_starts": 1,
+                        "observation_noise_floor": 1e-6,
+                    },
+                    "observation_extractor": {
+                        "kind": "scalar_channel",
+                        "channel_key": "channel_0",
+                        "noise_channel_key": None,
+                    },
+                }
+            ),
+            prefix + "points.param_0": [-1.0, 0.0, 1.0],
+            prefix + "points.channel_0": [1.0, 0.2, 0.8],
+            prefix + "points.metadata.decision_source": ["seed", "bo", "explore"],
+            prefix + "state.num_points": 3,
+            prefix + "state.completed": False,
+        }
+
+        snapshot = snapshot_from_live_values(prefix, values)
+        root = snapshot.get_site(())
+
+        widget = _SiteColumnWidget(
+            site=root,
+            child_site_options=[],
+            selected_child_path=None,
+            parent_point_index=None,
+            selected_point_index=None,
+            selected_plot_mode=None,
+            selected_x_key=None,
+            selected_y_key=None,
+            selected_z_key=None,
+            selected_group_key=None,
+            show_lines=True,
+        )
+
+        mode_values = [
+            widget._plot_mode_combo.itemData(index)
+            for index in range(widget._plot_mode_combo.count())
+        ]
+        self.assertIn(_PLOT_MODE_BO, mode_values)
+        self.assertEqual(widget._selected_plot_mode(), _PLOT_MODE_BO)
+        self.assertIs(widget._plot_stack.currentWidget(), widget._bo_plot_widget)
 
         widget = _SiteColumnWidget(
             site=root,
@@ -284,7 +365,7 @@ class RuntimeLiveSnapshotTest(unittest.TestCase):
             show_lines=False,
         )
         self.assertEqual(widget._x_combo.currentData(), "param_0")
-        self.assertEqual(widget._y_combo.currentData(), "channel_value")
+        self.assertEqual(widget._y_combo.currentData(), "channel_0")
 
     def test_repeated_site_defaults_x_to_time_when_parameter_is_constant(self):
         prefix = "ndscan.rid_0.site.root."
