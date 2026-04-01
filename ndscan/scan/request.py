@@ -9,7 +9,7 @@ These are scan-semantics objects, not runtime-internal program objects:
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -24,6 +24,7 @@ from .point_policy import (
     CartesianPointPolicy,
     ExplicitPointPolicy,
     PointPolicy,
+    RepeatPointPolicy,
     ShuffledPointPolicy,
     SinglePointPolicy,
     ZipPointPolicy,
@@ -129,6 +130,42 @@ class ScanRequest:
         return ScanRequest(
             axes=self.axes,
             point_policy=ShuffledPointPolicy(self.point_policy, random_seed=random_seed),
+            site=self.site,
+            metadata=self.metadata,
+            execution_policy=self.execution_policy,
+            parameter_mappings=self.parameter_mappings,
+            fixed_pseudoparams=self.fixed_pseudoparams,
+        )
+
+    def with_repeats(
+        self,
+        *,
+        repeats: int | None = None,
+        stop_predicate: Callable[[Any], bool] | None = None,
+        min_repeats: int = 1,
+        max_repeats: int | None = None,
+        predicate_description: str = "custom",
+        schedule: str = "serial",
+    ) -> "ScanRequest":
+        """Wrap this request's point policy in a RepeatPointPolicy.
+
+        This is convenience sugar for the common case where repetition is an execution
+        concern layered on top of an otherwise normal scan request. It keeps the base
+        scan shape expressed through the usual ``ScanRequest`` helpers, and then applies
+        repeated execution as a modifier afterwards.
+        """
+
+        return ScanRequest(
+            axes=self.axes,
+            point_policy=RepeatPointPolicy(
+                self.point_policy,
+                repeats=repeats,
+                stop_predicate=stop_predicate,
+                min_repeats=min_repeats,
+                max_repeats=max_repeats,
+                predicate_description=predicate_description,
+                schedule=schedule,
+            ),
             site=self.site,
             metadata=self.metadata,
             execution_policy=self.execution_policy,

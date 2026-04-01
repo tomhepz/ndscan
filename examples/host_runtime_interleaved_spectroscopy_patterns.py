@@ -24,6 +24,19 @@ If you need more freedom than nested scans make comfortable, the escape hatch is
 to flatten the problem into one explicit point list over all relevant coordinates and
 then use global randomisation. The new ``RepeatPointPolicy(schedule="interleaved")``
 added to ndscan covers the common nested cases without forcing that flatter style.
+
+Request-builder layout
+----------------------
+This file now shows the same interleaved-repeat patterns in two styles:
+
+- the "nice" style used by the exported demo experiments:
+  build the base ``ScanRequest`` first, then apply ``.with_repeats(...)``
+- the "terse" style:
+  build the same request directly from ``RepeatPointPolicy(...)``
+
+The higher-level form is what normal example readers should copy. The lower-level form
+is still kept nearby as a reference for people who want to see the underlying point-
+policy construction explicitly.
 """
 
 from __future__ import annotations
@@ -78,7 +91,9 @@ __all__ = [
     "InterleavedSpectroscopySubscanRootFragment",
     "BernoulliSpectroscopyLeafFragment",
     "build_interleaved_demo_request",
+    "build_interleaved_demo_request_terse",
     "build_chunked_demo_request",
+    "build_chunked_demo_request_terse",
     "HostRuntimeInterleavedSpectroscopy",
     "HostRuntimeInterleavedSpectroscopySubscan",
     "HostRuntimeChunkedInterleavedSpectroscopy",
@@ -194,6 +209,33 @@ def fit_gaussian_dip_artifact(
     return artifact.to_dict()
 
 
+def _interleaved_frequency_points() -> list[tuple[float]]:
+    """Return the base logical frequency points used by the interleaved demos."""
+
+    return [(value,) for value in DEMO_FREQUENCY_POINTS]
+
+
+def _build_repeat_chunk_request_terse() -> ScanRequest:
+    """Return the fixed-size repeat-chunk request in the low-level point-policy style."""
+
+    return ScanRequest(
+        axes=(),
+        point_policy=RepeatPointPolicy(
+            SinglePointPolicy(),
+            repeats=CHUNK_SHOTS_PER_POINT,
+        ),
+        execution_policy=ExecutionPolicy(max_points_per_batch=CHUNK_SHOTS_PER_POINT),
+    )
+
+
+def _build_repeat_chunk_request() -> ScanRequest:
+    """Return the fixed-size repeat-chunk request in the recommended request style."""
+
+    return ScanRequest.single(
+        execution_policy=ExecutionPolicy(max_points_per_batch=CHUNK_SHOTS_PER_POINT),
+    ).with_repeats(repeats=CHUNK_SHOTS_PER_POINT)
+
+
 class InterleavedSpectroscopyFragment(ExpFragment):
     """One flat scan over repeated raw Bernoulli probe-frequency shots."""
 
@@ -295,13 +337,15 @@ class InterleavedSpectroscopyFragment(ExpFragment):
         )
 
 
-def build_interleaved_demo_request(fragment: InterleavedSpectroscopyFragment) -> ScanRequest:
-    """Create the repeated-frequency scan request for the flat Bernoulli demo."""
+def build_interleaved_demo_request_terse(
+    fragment: InterleavedSpectroscopyFragment,
+) -> ScanRequest:
+    """Create the flat repeated-shot demo request in the low-level point-policy style."""
 
     return ScanRequest(
         axes=(fragment.probe_frequency,),
         point_policy=RepeatPointPolicy(
-            ExplicitPointPolicy(1, [(value,) for value in DEMO_FREQUENCY_POINTS]),
+            ExplicitPointPolicy(1, _interleaved_frequency_points()),
             stop_predicate=make_binomial_repeat_stop_predicate(
                 fragment.survived,
                 error_threshold=TARGET_PROBABILITY_ERROR,
@@ -314,6 +358,27 @@ def build_interleaved_demo_request(fragment: InterleavedSpectroscopyFragment) ->
         ),
         metadata={"demo_name": "host_runtime_interleaved_spectroscopy"},
         execution_policy=ExecutionPolicy(max_points_per_batch=1),
+    )
+
+
+def build_interleaved_demo_request(fragment: InterleavedSpectroscopyFragment) -> ScanRequest:
+    """Create the flat repeated-shot demo request in the recommended request style."""
+
+    return ScanRequest.explicit(
+        [fragment.probe_frequency],
+        _interleaved_frequency_points(),
+        metadata={"demo_name": "host_runtime_interleaved_spectroscopy"},
+        execution_policy=ExecutionPolicy(max_points_per_batch=1),
+    ).with_repeats(
+        stop_predicate=make_binomial_repeat_stop_predicate(
+            fragment.survived,
+            error_threshold=TARGET_PROBABILITY_ERROR,
+            min_shots=MIN_SHOTS_PER_FREQUENCY,
+            max_shots=MAX_SHOTS_PER_FREQUENCY,
+        ),
+        min_repeats=1,
+        predicate_description="binomial shot error <= threshold",
+        schedule="interleaved",
     )
 
 
@@ -382,14 +447,7 @@ class ChunkedInterleavedSpectroscopyFragment(ExpFragment):
         self.setattr_result("num_successes", IntChannel)
 
     def run_once(self):
-        repeat_request = ScanRequest(
-            axes=(),
-            point_policy=RepeatPointPolicy(
-                SinglePointPolicy(),
-                repeats=CHUNK_SHOTS_PER_POINT,
-            ),
-            execution_policy=ExecutionPolicy(max_points_per_batch=CHUNK_SHOTS_PER_POINT),
-        )
+        repeat_request = _build_repeat_chunk_request()
         self.repeat_scan.configure(repeat_request)
         repeat_outputs = self.repeat_scan.execute()
         self.survival_probability.push(repeat_outputs["survival_probability"])
@@ -495,13 +553,15 @@ class ChunkedInterleavedSpectroscopyFragment(ExpFragment):
         )
 
 
-def build_chunked_demo_request(fragment: ChunkedInterleavedSpectroscopyFragment) -> ScanRequest:
-    """Create the chunked interleaved frequency request for the demo."""
+def build_chunked_demo_request_terse(
+    fragment: ChunkedInterleavedSpectroscopyFragment,
+) -> ScanRequest:
+    """Create the chunked demo request in the low-level point-policy style."""
 
     return ScanRequest(
         axes=(fragment.probe_frequency,),
         point_policy=RepeatPointPolicy(
-            ExplicitPointPolicy(1, [(value,) for value in DEMO_FREQUENCY_POINTS]),
+            ExplicitPointPolicy(1, _interleaved_frequency_points()),
             stop_predicate=make_binomial_chunk_stop_predicate(
                 fragment.num_successes,
                 fragment.num_shots,
@@ -515,6 +575,28 @@ def build_chunked_demo_request(fragment: ChunkedInterleavedSpectroscopyFragment)
         ),
         metadata={"demo_name": "host_runtime_chunked_interleaved_spectroscopy"},
         execution_policy=ExecutionPolicy(max_points_per_batch=1),
+    )
+
+
+def build_chunked_demo_request(fragment: ChunkedInterleavedSpectroscopyFragment) -> ScanRequest:
+    """Create the chunked demo request in the recommended request style."""
+
+    return ScanRequest.explicit(
+        [fragment.probe_frequency],
+        _interleaved_frequency_points(),
+        metadata={"demo_name": "host_runtime_chunked_interleaved_spectroscopy"},
+        execution_policy=ExecutionPolicy(max_points_per_batch=1),
+    ).with_repeats(
+        stop_predicate=make_binomial_chunk_stop_predicate(
+            fragment.num_successes,
+            fragment.num_shots,
+            error_threshold=CHUNKED_TARGET_PROBABILITY_ERROR,
+            min_total_shots=MIN_TOTAL_SHOTS_PER_FREQUENCY,
+            max_total_shots=MAX_TOTAL_SHOTS_PER_FREQUENCY,
+        ),
+        min_repeats=1,
+        predicate_description="combined chunk statistics error <= threshold",
+        schedule="interleaved",
     )
 
 

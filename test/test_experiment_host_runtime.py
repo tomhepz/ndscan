@@ -1569,6 +1569,37 @@ class HostRuntimeCase(HasEnvironmentCase):
             [(-2.0,), (-1.0,), (0.0,), (1.0,), (2.0,)],
         )
 
+    def test_scan_request_with_repeats_wraps_fixed_repeat_policy(self):
+        fragment = self.create(LinearResponseFragment, [])
+        request = ScanRequest.explicit(
+            [fragment.x],
+            [[0.0], [1.0]],
+            metadata={"demo_name": "repeat_sugar"},
+            execution_policy=ExecutionPolicy(max_points_per_batch=3),
+        ).with_repeats(repeats=2)
+
+        self.assertEqual(request.axes, (fragment.x,))
+        self.assertEqual(request.metadata["demo_name"], "repeat_sugar")
+        self.assertEqual(request.execution_policy.max_points_per_batch, 3)
+        self.assertEqual(request.point_policy.describe()["kind"], "repeat")
+        self.assertEqual(
+            request.point_policy.materialise_points(),
+            [(0.0,), (0.0,), (1.0,), (1.0,)],
+        )
+
+    def test_scan_request_with_repeats_supports_interleaved_schedule(self):
+        fragment = self.create(LinearResponseFragment, [])
+        request = ScanRequest.explicit(
+            [fragment.x],
+            [[0.0], [1.0]],
+        ).with_repeats(repeats=3, schedule="interleaved")
+
+        self.assertEqual(request.point_policy.describe()["schedule"], "interleaved")
+        self.assertEqual(
+            request.point_policy.materialise_points(),
+            [(0.0,), (1.0,), (0.0,), (1.0,), (0.0,), (1.0,)],
+        )
+
     def test_host_scan_session_supports_ad_hoc_scan_variables_and_parameter_mappings(
         self,
     ):
