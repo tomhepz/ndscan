@@ -337,6 +337,10 @@ class InterleavedSpectroscopyFragment(ExpFragment):
         )
 
 
+# Nice vs terse:
+# - ``build_interleaved_demo_request()`` is the form normal users should copy.
+# - ``build_interleaved_demo_request_terse()`` shows the equivalent explicit
+#   ``RepeatPointPolicy(...)`` construction for readers who want the plumbing.
 def build_interleaved_demo_request_terse(
     fragment: InterleavedSpectroscopyFragment,
 ) -> ScanRequest:
@@ -553,6 +557,10 @@ class ChunkedInterleavedSpectroscopyFragment(ExpFragment):
         )
 
 
+# Nice vs terse:
+# - ``build_chunked_demo_request()`` is the form normal users should copy.
+# - ``build_chunked_demo_request_terse()`` shows the equivalent explicit
+#   ``RepeatPointPolicy(...)`` construction for readers who want the plumbing.
 def build_chunked_demo_request_terse(
     fragment: ChunkedInterleavedSpectroscopyFragment,
 ) -> ScanRequest:
