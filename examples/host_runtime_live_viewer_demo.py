@@ -32,8 +32,8 @@ from ndscan.runtime.api import *
 from ndscan.scan import *
 
 
-def fit_quadratic_peak(xs, ys) -> tuple[float, float, np.ndarray, np.ndarray]:
-    """Fit ``y = ax^2 + bx + c`` and return the vertex and a plotted curve."""
+def fit_quadratic_peak(xs, ys) -> tuple[float, float, float]:
+    """Fit ``y = ax^2 + bx + c`` and return vertex position, value, and scale."""
 
     xs = np.asarray(xs, dtype=float)
     ys = np.asarray(ys, dtype=float)
@@ -44,10 +44,7 @@ def fit_quadratic_peak(xs, ys) -> tuple[float, float, np.ndarray, np.ndarray]:
     else:
         peak_center = float(-b / (2.0 * a))
         peak_value = float(a * peak_center**2 + b * peak_center + c)
-
-    fit_xs = np.linspace(float(xs.min()), float(xs.max()), 120)
-    fit_ys = a * fit_xs**2 + b * fit_xs + c
-    return peak_center, peak_value, fit_xs, fit_ys
+    return peak_center, peak_value, float(a)
 
 
 class DelayedQuadraticPeakFragment(ExpFragment):
@@ -74,8 +71,6 @@ class DelayedQuadraticPeakFragment(ExpFragment):
                 [
                     FloatChannel("fit_center", "Quadratic-fit center"),
                     FloatChannel("fit_peak", "Quadratic-fit peak value"),
-                    OpaqueChannel("fit_xs", save_by_default=False),
-                    OpaqueChannel("fit_ys", save_by_default=False),
                 ],
             )
         ]
@@ -83,18 +78,19 @@ class DelayedQuadraticPeakFragment(ExpFragment):
     def _analyse_peak(self, axis_values, result_values, analysis_results):
         xs = np.asarray(axis_values[self.x], dtype=float)
         ys = np.asarray(result_values[self.y], dtype=float)
-        fit_center, fit_peak, fit_xs, fit_ys = fit_quadratic_peak(xs, ys)
+        fit_center, fit_peak, fit_scale = fit_quadratic_peak(xs, ys)
 
         analysis_results["fit_center"].push(fit_center)
         analysis_results["fit_peak"].push(fit_peak)
-        analysis_results["fit_xs"].push(fit_xs)
-        analysis_results["fit_ys"].push(fit_ys)
         return [
-            annotations.curve_1d(
-                x_axis=self.x,
-                x_values=fit_xs,
-                y_axis=self.y,
-                y_values=fit_ys,
+            annotations.computed_curve(
+                function_name="parabola",
+                parameters={
+                    "position": fit_center,
+                    "scale": fit_scale,
+                    "offset": fit_peak,
+                },
+                associated_channels=[self.y],
             )
         ]
 

@@ -209,6 +209,20 @@ class PointPolicy:
         """Return all points up front if this policy is fully materialisable."""
         raise TypeError(f"{type(self).__name__} cannot be materialised up front")
 
+    def materialise_base_points(self) -> list[BasePoint]:
+        """Return all points up front, preserving point metadata when available.
+
+        Most finite point policies only store axis tuples, so the default
+        implementation wraps :meth:`materialise_points` in metadata-free
+        :class:`BasePoint` instances. Policies that carry meaningful point-level
+        metadata can override this method.
+        """
+
+        return [
+            BasePoint(index=index, axis_values=axis_values)
+            for index, axis_values in enumerate(self.materialise_points())
+        ]
+
 
 class AskTellOptimiserPointPolicy(PointPolicy):
     """Wrap an ask/tell optimiser backend as a host-runtime point policy.
@@ -616,6 +630,12 @@ class RepeatPointPolicy(PointPolicy):
     smearing one point's error budget across later points. If a repeat index is
     scientifically meaningful, it should still be modelled explicitly as a
     ``ScanVariable`` instead.
+
+    ``schedule="serial"`` keeps the original behaviour: finish one logical point
+    before advancing to the next. ``schedule="interleaved"`` revisits a fully
+    materialisable finite inner point list round-robin, allowing many logical points
+    to improve together over time while still keeping each point's repeated-shot
+    statistics local.
     """
 
     def __init__(
@@ -627,6 +647,7 @@ class RepeatPointPolicy(PointPolicy):
         min_repeats: int = 1,
         max_repeats: int | None = None,
         predicate_description: str = "custom",
+        schedule: str = "serial",
     ):
         if repeats is not None and max_repeats is not None:
             raise ValueError("Specify either repeats or max_repeats, not both")
@@ -643,12 +664,15 @@ class RepeatPointPolicy(PointPolicy):
             )
         if max_repeats is not None and max_repeats < min_repeats:
             raise ValueError("max_repeats must be at least min_repeats")
+        if schedule not in {"serial", "interleaved"}:
+            raise ValueError("schedule must be 'serial' or 'interleaved'")
 
         self._inner = inner
         self._stop_predicate = stop_predicate
         self._predicate_description = predicate_description
         self._min_repeats = min_repeats
         self._max_repeats = max_repeats
+        self._schedule = schedule
 
         self._next_index = 0
         self._current_point: BasePoint | None = None
@@ -657,12 +681,28 @@ class RepeatPointPolicy(PointPolicy):
         self._current_axis_data = dict[Any, list[Any]]()
         self._current_parameter_data = dict[Any, list[Any]]()
         self._current_result_data = dict[Any, list[Any]]()
+        self._interleaved_points: list[BasePoint] = []
+        self._interleaved_repeats: list[int] = []
+        self._interleaved_axis_data: list[dict[Any, list[Any]]] = []
+        self._interleaved_parameter_data: list[dict[Any, list[Any]]] = []
+        self._interleaved_result_data: list[dict[Any, list[Any]]] = []
+        self._interleaved_active_slots: set[int] = set()
+        self._interleaved_round_queue: list[int] = []
+        self._interleaved_pending_slots: list[int] = []
+
+        if self._schedule == "interleaved":
+            self._initialise_interleaved_state()
 
     @property
     def axis_count(self) -> int:
         return self._inner.axis_count
 
     def next_batch(self, max_points: int) -> list[BasePoint]:
+        if self._schedule == "interleaved":
+            return self._next_batch_interleaved(max_points)
+        return self._next_batch_serial(max_points)
+
+    def _next_batch_serial(self, max_points: int) -> list[BasePoint]:
         if max_points <= 0:
             raise ValueError("max_points must be positive")
 
@@ -697,15 +737,59 @@ class RepeatPointPolicy(PointPolicy):
             self._next_index += 1
         return batch
 
+    def _next_batch_interleaved(self, max_points: int) -> list[BasePoint]:
+        if max_points <= 0:
+            raise ValueError("max_points must be positive")
+        if self._interleaved_pending_slots:
+            raise RuntimeError(
+                "RepeatPointPolicy cannot request a new interleaved batch before "
+                "observing the previous one"
+            )
+        if not self._interleaved_active_slots:
+            return []
+        if not self._interleaved_round_queue:
+            self._interleaved_round_queue = sorted(self._interleaved_active_slots)
+
+        num_points = min(max_points, len(self._interleaved_round_queue))
+        self._interleaved_pending_slots = [
+            self._interleaved_round_queue.pop(0) for _ in range(num_points)
+        ]
+        batch = []
+        for slot in self._interleaved_pending_slots:
+            logical_point = self._interleaved_points[slot]
+            batch.append(
+                BasePoint(
+                    index=self._next_index,
+                    axis_values=logical_point.axis_values,
+                    metadata=dict(logical_point.metadata),
+                )
+            )
+            self._next_index += 1
+        return batch
+
     def is_finished(self) -> bool:
+        if self._schedule == "interleaved":
+            return (
+                not self._interleaved_active_slots and not self._interleaved_pending_slots
+            )
         return self._current_point is None and self._inner.is_finished()
 
     def preferred_batch_size(self, default: int) -> int:
+        if self._schedule == "interleaved":
+            if not self._interleaved_active_slots:
+                return default
+            return min(default, len(self._interleaved_active_slots))
         if self._max_repeats is None:
             return default
         return min(default, self._max_repeats)
 
     def observe_batch(self, feedback: BatchFeedback) -> None:
+        if self._schedule == "interleaved":
+            self._observe_batch_interleaved(feedback)
+            return
+        self._observe_batch_serial(feedback)
+
+    def _observe_batch_serial(self, feedback: BatchFeedback) -> None:
         if self._current_point is None or self._pending_batch_size == 0:
             raise RuntimeError(
                 "Received batch feedback for RepeatPointPolicy before requesting a batch"
@@ -757,6 +841,82 @@ class RepeatPointPolicy(PointPolicy):
         self._current_point = None
         self._current_repeats = 0
 
+    def _observe_batch_interleaved(self, feedback: BatchFeedback) -> None:
+        if not self._interleaved_pending_slots:
+            raise RuntimeError(
+                "Received batch feedback for interleaved RepeatPointPolicy before "
+                "requesting a batch"
+            )
+        if len(feedback.observations) != len(self._interleaved_pending_slots):
+            raise ValueError(
+                "RepeatPointPolicy received the wrong number of observations for its "
+                f"interleaved batch: expected {len(self._interleaved_pending_slots)}, "
+                f"got {len(feedback.observations)}"
+            )
+
+        batch_size = len(feedback.observations)
+        batch_offset = {
+            key: len(values) - batch_size
+            for key, values in (
+                list(feedback.axis_data.items())
+                + list(feedback.parameter_data.items())
+                + list(feedback.result_data.items())
+            )
+        }
+
+        completed_slots: list[int] = []
+        for observation_index, (slot, observation) in enumerate(
+            zip(self._interleaved_pending_slots, feedback.observations, strict=True)
+        ):
+            self._append_interleaved_value_slices(
+                self._interleaved_axis_data[slot],
+                feedback.axis_data,
+                batch_offset,
+                observation_index,
+            )
+            self._append_interleaved_value_slices(
+                self._interleaved_parameter_data[slot],
+                feedback.parameter_data,
+                batch_offset,
+                observation_index,
+            )
+            self._append_interleaved_value_slices(
+                self._interleaved_result_data[slot],
+                feedback.result_data,
+                batch_offset,
+                observation_index,
+            )
+            self._interleaved_repeats[slot] += 1
+
+            point_feedback = BatchFeedback(
+                observations=(observation,),
+                axis_data={
+                    key: tuple(values)
+                    for key, values in self._interleaved_axis_data[slot].items()
+                },
+                parameter_data={
+                    key: tuple(values)
+                    for key, values in self._interleaved_parameter_data[slot].items()
+                },
+                result_data={
+                    key: tuple(values)
+                    for key, values in self._interleaved_result_data[slot].items()
+                },
+                online_analyses=feedback.online_analyses,
+            )
+            if self._interleaved_point_is_complete(slot, point_feedback):
+                completed_slots.append(slot)
+
+        for slot in completed_slots:
+            self._interleaved_active_slots.discard(slot)
+            if slot in self._interleaved_round_queue:
+                self._interleaved_round_queue = [
+                    queued_slot
+                    for queued_slot in self._interleaved_round_queue
+                    if queued_slot != slot
+                ]
+        self._interleaved_pending_slots = []
+
     def describe(self) -> dict[str, Any]:
         description = {
             "kind": "repeat",
@@ -764,6 +924,8 @@ class RepeatPointPolicy(PointPolicy):
             "min_repeats": self._min_repeats,
             "inner": self._inner.describe(),
         }
+        if self._schedule != "serial":
+            description["schedule"] = self._schedule
         if self._max_repeats is not None:
             description["max_repeats"] = self._max_repeats
         if self._stop_predicate is not None:
@@ -776,8 +938,13 @@ class RepeatPointPolicy(PointPolicy):
                 "RepeatPointPolicy can only be materialised when it has a fixed repeat count"
             )
         points = []
-        for point in self._inner.materialise_points():
-            points.extend([point] * self._max_repeats)
+        base_points = self._inner.materialise_points()
+        if self._schedule == "interleaved":
+            for _ in range(self._max_repeats):
+                points.extend(base_points)
+        else:
+            for point in base_points:
+                points.extend([point] * self._max_repeats)
         return points
 
     def _current_point_is_complete(self, feedback: BatchFeedback) -> bool:
@@ -786,6 +953,48 @@ class RepeatPointPolicy(PointPolicy):
         if self._stop_predicate is not None and self._stop_predicate(feedback):
             return True
         if self._max_repeats is not None and self._current_repeats >= self._max_repeats:
+            return True
+        return False
+
+    def _initialise_interleaved_state(self) -> None:
+        try:
+            self._interleaved_points = self._inner.materialise_base_points()
+        except TypeError as exc:
+            raise TypeError(
+                "RepeatPointPolicy(schedule='interleaved') requires a fully "
+                "materialisable inner point policy"
+            ) from exc
+
+        num_points = len(self._interleaved_points)
+        self._interleaved_repeats = [0] * num_points
+        self._interleaved_axis_data = [dict[Any, list[Any]]() for _ in range(num_points)]
+        self._interleaved_parameter_data = [
+            dict[Any, list[Any]]() for _ in range(num_points)
+        ]
+        self._interleaved_result_data = [dict[Any, list[Any]]() for _ in range(num_points)]
+        self._interleaved_active_slots = set(range(num_points))
+
+    @staticmethod
+    def _append_interleaved_value_slices(
+        target: dict[Any, list[Any]],
+        source: Mapping[Any, tuple[Any, ...]],
+        batch_offset: Mapping[Any, int],
+        observation_index: int,
+    ) -> None:
+        for key, values in source.items():
+            target.setdefault(key, []).append(values[batch_offset[key] + observation_index])
+
+    def _interleaved_point_is_complete(
+        self, slot: int, feedback: BatchFeedback
+    ) -> bool:
+        if self._interleaved_repeats[slot] < self._min_repeats:
+            return False
+        if self._stop_predicate is not None and self._stop_predicate(feedback):
+            return True
+        if (
+            self._max_repeats is not None
+            and self._interleaved_repeats[slot] >= self._max_repeats
+        ):
             return True
         return False
 

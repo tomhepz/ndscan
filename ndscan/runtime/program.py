@@ -198,7 +198,9 @@ class ScanInspection:
     parameters: OrderedDict[str, list[Any]]
     values: dict[ResultChannel, list[Any]]
     analysis_results: dict[str, Any]
+    analysis_artifacts: dict[str, Any]
     online_analysis_results: dict[str, dict[str, Any]]
+    online_analysis_artifacts: dict[str, dict[str, Any]]
     annotations: list[dict[str, Any]]
     online_analysis_annotations: dict[str, list[dict[str, Any]]]
     runtime_stats: HostScanRuntimeStats
@@ -220,7 +222,9 @@ class ScanInspection:
             parameters=OrderedDict((parameter.identity, []) for parameter in parameters),
             values={binding.channel: [] for binding in channels},
             analysis_results={},
+            analysis_artifacts={},
             online_analysis_results={},
+            online_analysis_artifacts={},
             annotations=list(initial_annotations),
             online_analysis_annotations={},
             runtime_stats=HostScanRuntimeStats(),

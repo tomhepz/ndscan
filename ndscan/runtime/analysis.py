@@ -154,21 +154,43 @@ class HostScanAnalysisEngine:
         result_data = dict(run_result.values)
 
         with _TemporaryAnalysisResultSinks(self._analysis_results) as sinks:
+            explicit_outputs = {}
+            artifacts = {}
             annotations = []
             for analysis in self._analyses:
-                annotations.extend(
+                feedback = self._normalise_final_feedback(
                     analysis.execute(axis_data, result_data, self._annotation_context)
                 )
+                explicit_outputs = merge_no_duplicates(
+                    explicit_outputs,
+                    feedback.outputs,
+                    kind="analysis result",
+                )
+                artifacts = merge_no_duplicates(
+                    artifacts,
+                    feedback.artifacts,
+                    kind="analysis artifact",
+                )
+                annotations.extend(feedback.annotations)
             analysis_results = {name: sink.get_last() for name, sink in sinks.items()}
 
         feedback = AnalysisFeedback(
-            outputs=analysis_results,
+            outputs={**analysis_results, **explicit_outputs},
+            artifacts=artifacts,
             annotations=annotations,
         )
 
         for name, value in feedback.outputs.items():
             site_writer.set_analysis_result(name, value)
         run_result.analysis_results = dict(feedback.outputs)
+        for name, artifact in feedback.artifacts.items():
+            site_writer.set_analysis_artifact(name, artifact)
+        run_result.analysis_artifacts = dict(feedback.artifacts)
+        site_writer.append_segment_final_feedback(
+            outputs=feedback.outputs,
+            artifacts=feedback.artifacts,
+            annotations=feedback.annotations,
+        )
 
         if feedback.annotations:
             site_writer.set_annotations(feedback.annotations)
@@ -203,17 +225,32 @@ class HostScanAnalysisEngine:
         }
         for name, feedback in online_results.items():
             site_writer.set_online_analysis_result(name, feedback.outputs)
+            site_writer.set_online_analysis_artifact(name, feedback.artifacts)
             site_writer.set_online_analysis_annotations(name, feedback.annotations)
         run_result.online_analysis_results = {
             name: feedback.outputs for name, feedback in online_results.items()
+        }
+        run_result.online_analysis_artifacts = {
+            name: dict(feedback.artifacts) for name, feedback in online_results.items()
         }
         run_result.online_analysis_annotations = {
             name: list(feedback.annotations) for name, feedback in online_results.items()
         }
         return online_results
 
+    def _normalise_final_feedback(
+        self, value: AnalysisFeedback | list[dict[str, Any]] | None
+    ) -> AnalysisFeedback:
+        """Return a structured final-analysis payload."""
+
+        if isinstance(value, AnalysisFeedback):
+            return value
+        if value is None:
+            return AnalysisFeedback()
+        return AnalysisFeedback(annotations=list(value))
+
     def _normalise_online_feedback(
-        self, value: AnalysisFeedback | dict[str, Any]
+        self, value: AnalysisFeedback | dict[str, Any] | None
     ) -> AnalysisFeedback:
         """Return a structured online-analysis payload.
 
@@ -224,4 +261,6 @@ class HostScanAnalysisEngine:
 
         if isinstance(value, AnalysisFeedback):
             return value
+        if value is None:
+            return AnalysisFeedback()
         return AnalysisFeedback(outputs=dict(value))

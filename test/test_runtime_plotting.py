@@ -9,13 +9,19 @@ from mock_environment import HasEnvironmentCase
 
 from ndscan.define.fragment import ExpFragment
 from ndscan.define.result_channels import FloatChannel
-from ndscan.plots.runtime.fitting import BuiltinFitBackend, FitRequest
+from ndscan.plots.runtime.fitting import (
+    BuiltinFitBackend,
+    FitRequest,
+    default_fit_backend,
+)
 from ndscan.plots.runtime.live import snapshot_from_live_values
 from ndscan.plots.runtime.viewer import (
     _NO_GROUP_KEY,
     _PLOT_MODE_1D,
     _PLOT_MODE_2D_IMAGE,
     _PLOT_MODE_2D_SCATTER,
+    _REPEAT_COMBINE_SEM,
+    _REPEAT_COMBINE_STD,
     _SiteColumnWidget,
     RuntimePlotViewer,
     _default_x_choices,
@@ -24,7 +30,7 @@ from ndscan.plots.runtime.viewer import (
 )
 from ndscan.runtime.api import make_fragment_prepared_scan_exp
 from ndscan.scan.request import ScanRequest
-from ndscan._qt import QtWidgets
+from ndscan._qt import QtGui, QtWidgets
 
 
 class AppletLaunchFragment(ExpFragment):
@@ -207,6 +213,731 @@ class RuntimeLiveSnapshotTest(unittest.TestCase):
             ],
         )
 
+    def test_runtime_choices_use_declared_schema_before_points_exist(self):
+        prefix = "ndscan.rid_0.site.root."
+        values = {
+            prefix + "site.path": json.dumps([]),
+            prefix + "site.fragment_fqn": "RootFragment",
+            prefix + "scan.parameters": json.dumps(
+                {
+                    "param_0": {
+                        "path": "",
+                        "is_scanned": True,
+                        "param": {
+                            "fqn": "demo.root.frequency",
+                            "description": "Probe Frequency",
+                            "type": "float",
+                            "spec": {"unit": "MHz"},
+                        },
+                    }
+                }
+            ),
+            prefix + "scan.channels": json.dumps(
+                {
+                    "channel_value": {
+                        "path": "detector/probability",
+                        "description": "Survival Probability",
+                        "type": "float",
+                    }
+                }
+            ),
+            prefix + "state.num_points": 0,
+            prefix + "state.completed": False,
+        }
+
+        snapshot = snapshot_from_live_values(prefix, values)
+        root = snapshot.get_site(())
+
+        self.assertEqual(
+            _default_x_choices(root),
+            [
+                ("param_0", "frequency (Probe Frequency / MHz)"),
+                ("channel_value", "detector/probability (Survival Probability)"),
+                ("__point_index__", "point_index"),
+            ],
+        )
+        self.assertEqual(
+            _default_y_choices(root),
+            [
+                ("param_0", "frequency (Probe Frequency / MHz)"),
+                ("channel_value", "detector/probability (Survival Probability)"),
+                ("__point_index__", "point_index"),
+            ],
+        )
+
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication([])
+
+        widget = _SiteColumnWidget(
+            site=root,
+            child_site_options=[],
+            selected_child_path=None,
+            parent_point_index=None,
+            selected_point_index=None,
+            selected_plot_mode=_PLOT_MODE_1D,
+            selected_x_key=None,
+            selected_y_key=None,
+            selected_z_key=None,
+            selected_group_key=None,
+            show_lines=False,
+        )
+        self.assertEqual(widget._x_combo.currentData(), "param_0")
+        self.assertEqual(widget._y_combo.currentData(), "channel_value")
+
+    def test_repeated_site_defaults_x_to_time_when_parameter_is_constant(self):
+        prefix = "ndscan.rid_0.site.root."
+        values = {
+            prefix + "site.path": json.dumps([]),
+            prefix + "site.fragment_fqn": "RepeatFragment",
+            prefix + "scan.parameters": json.dumps(
+                {
+                    "param_0": {
+                        "path": "",
+                        "is_scanned": False,
+                        "param": {
+                            "fqn": "demo.repeat.probe_frequency",
+                            "description": "Probe Frequency",
+                            "type": "float",
+                            "spec": {"unit": "MHz"},
+                        },
+                    }
+                }
+            ),
+            prefix + "scan.channels": json.dumps(
+                {
+                    "channel_value": {
+                        "path": "detector/survived",
+                        "description": "Survived",
+                        "type": "float",
+                    }
+                }
+            ),
+            prefix + "points.param_0": [0.2, 0.2, 0.2],
+            prefix + "points.channel_value": [1.0, 0.0, 1.0],
+            prefix + "points.acquired_at_unix": [10.0, 11.0, 12.0],
+            prefix + "state.num_points": 3,
+            prefix + "state.completed": False,
+        }
+
+        snapshot = snapshot_from_live_values(prefix, values)
+        root = snapshot.get_site(())
+
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication([])
+
+        widget = _SiteColumnWidget(
+            site=root,
+            child_site_options=[],
+            selected_child_path=None,
+            parent_point_index=None,
+            selected_point_index=None,
+            selected_plot_mode=_PLOT_MODE_1D,
+            selected_x_key=None,
+            selected_y_key=None,
+            selected_z_key=None,
+            selected_group_key=None,
+            show_lines=False,
+        )
+
+        self.assertEqual(widget._x_combo.currentData(), "acquired_at_unix")
+        self.assertEqual(widget._y_combo.currentData(), "channel_value")
+
+    def test_repeated_site_defaults_x_to_point_index_without_time_stream(self):
+        prefix = "ndscan.rid_0.site.root."
+        values = {
+            prefix + "site.path": json.dumps([]),
+            prefix + "site.fragment_fqn": "RepeatFragment",
+            prefix + "scan.parameters": json.dumps(
+                {
+                    "param_0": {
+                        "path": "",
+                        "is_scanned": False,
+                        "param": {
+                            "fqn": "demo.repeat.probe_frequency",
+                            "description": "Probe Frequency",
+                            "type": "float",
+                            "spec": {"unit": "MHz"},
+                        },
+                    }
+                }
+            ),
+            prefix + "scan.channels": json.dumps(
+                {
+                    "channel_value": {
+                        "path": "detector/survived",
+                        "description": "Survived",
+                        "type": "float",
+                    }
+                }
+            ),
+            prefix + "points.param_0": [0.2, 0.2, 0.2],
+            prefix + "points.channel_value": [1.0, 0.0, 1.0],
+            prefix + "state.num_points": 3,
+            prefix + "state.completed": False,
+        }
+
+        snapshot = snapshot_from_live_values(prefix, values)
+        root = snapshot.get_site(())
+
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication([])
+
+        widget = _SiteColumnWidget(
+            site=root,
+            child_site_options=[],
+            selected_child_path=None,
+            parent_point_index=None,
+            selected_point_index=None,
+            selected_plot_mode=_PLOT_MODE_1D,
+            selected_x_key=None,
+            selected_y_key=None,
+            selected_z_key=None,
+            selected_group_key=None,
+            show_lines=False,
+        )
+
+        self.assertEqual(widget._x_combo.currentData(), "__point_index__")
+        self.assertEqual(widget._y_combo.currentData(), "channel_value")
+
+    def test_snapshot_from_live_values_decodes_analysis_artifacts(self):
+        prefix = "ndscan.rid_0.site.root."
+        values = self._make_basic_root_values()
+        values[prefix + "analysis.artifact.line_fit"] = json.dumps(
+            {
+                "kind": "model_fit",
+                "provider": "sensible_fitting",
+                "model_id": "straight_line",
+                "parameters": {
+                    "slope": {"value": 2.0, "stderr": 0.1},
+                },
+            }
+        )
+        values[prefix + "analysis.online_artifact.running_fit"] = json.dumps(
+            {
+                "kind": "model_fit",
+                "provider": "sensible_fitting",
+                "model_id": "straight_line",
+                "parameters": {
+                    "slope": {"value": 2.1, "stderr": 0.2},
+                },
+            }
+        )
+
+        snapshot = snapshot_from_live_values(prefix, values)
+        root = snapshot.get_site(())
+
+        self.assertEqual(root.analysis_artifacts["line_fit"]["model_id"], "straight_line")
+        self.assertAlmostEqual(
+            root.online_analysis_artifacts["running_fit"]["parameters"]["slope"]["value"],
+            2.1,
+            places=6,
+        )
+
+    def test_site_column_widget_renders_final_curve_annotations(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication([])
+
+        values = self._make_basic_root_values()
+        values["ndscan.rid_0.site.root.analysis.annotations"] = json.dumps(
+            [
+                {
+                    "kind": "curve",
+                    "coordinates": {
+                        "param_0": {"kind": "fixed", "value": [0.0, 1.0]},
+                        "channel_value": {
+                            "kind": "fixed",
+                            "value": [19.5, 21.5],
+                        },
+                    },
+                    "parameters": {},
+                    "data": {},
+                }
+            ]
+        )
+
+        snapshot = snapshot_from_live_values("ndscan.rid_0.site.root.", values)
+        root = snapshot.get_site(())
+        widget = _SiteColumnWidget(
+            site=root,
+            child_site_options=[],
+            selected_child_path=None,
+            parent_point_index=None,
+            selected_point_index=None,
+            selected_plot_mode=_PLOT_MODE_1D,
+            selected_x_key="param_0",
+            selected_y_key="channel_value",
+            selected_z_key="channel_value",
+            selected_group_key=None,
+            show_lines=False,
+        )
+
+        self.assertEqual(len(widget._annotation_items), 1)
+        x_data, y_data = widget._annotation_items[0].getData()
+        np.testing.assert_allclose(x_data, [0.0, 1.0])
+        np.testing.assert_allclose(y_data, [19.5, 21.5])
+
+    def test_site_column_widget_renders_error_bars_from_channel_display_hints(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication([])
+
+        values = self._make_basic_root_values()
+        prefix = "ndscan.rid_0.site.root."
+        values[prefix + "scan.channels"] = json.dumps(
+            {
+                "channel_value": {
+                    "path": "detector/probability",
+                    "description": "Survival Probability",
+                    "type": "float",
+                },
+                "channel_error": {
+                    "path": "detector/probability_error",
+                    "description": "Survival Probability Error",
+                    "type": "float",
+                    "display_hints": {
+                        "error_bar_for": "detector/probability",
+                    },
+                },
+            }
+        )
+        values[prefix + "points.channel_value"] = [0.3, 0.6]
+        values[prefix + "points.channel_error"] = [0.05, 0.08]
+
+        snapshot = snapshot_from_live_values(prefix, values)
+        root = snapshot.get_site(())
+        widget = _SiteColumnWidget(
+            site=root,
+            child_site_options=[],
+            selected_child_path=None,
+            parent_point_index=None,
+            selected_point_index=None,
+            selected_plot_mode=_PLOT_MODE_1D,
+            selected_x_key="param_0",
+            selected_y_key="channel_value",
+            selected_z_key="channel_value",
+            selected_group_key=None,
+            show_lines=False,
+        )
+
+        np.testing.assert_allclose(widget._error_bar_item.opts["x"], [0.0, 1.0])
+        np.testing.assert_allclose(widget._error_bar_item.opts["y"], [0.3, 0.6])
+        np.testing.assert_allclose(widget._error_bar_item.opts["top"], [0.05, 0.08])
+        np.testing.assert_allclose(widget._error_bar_item.opts["bottom"], [0.05, 0.08])
+        expected_color = QtGui.QColor("#1f77b4").darker(145)
+        expected_color.setAlpha(220)
+        self.assertEqual(
+            widget._error_bar_item.opts["pen"].color().getRgb(),
+            expected_color.getRgb(),
+        )
+
+    def test_site_column_widget_renders_final_artifact_curve_annotations(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication([])
+
+        values = self._make_basic_root_values()
+        prefix = "ndscan.rid_0.site.root."
+        values[prefix + "state.completed"] = True
+        values[prefix + "analysis.artifact.line_fit"] = json.dumps(
+            {
+                "kind": "model_fit",
+                "provider": "sensible_fitting",
+                "model_id": "straight_line",
+                "model_name": "straight line",
+                "parameters": {
+                    "m": {"value": 2.0},
+                    "b": {"value": 19.5},
+                },
+                "stats": {"success": True},
+            }
+        )
+        values[prefix + "analysis.annotations"] = json.dumps(
+            [
+                {
+                    "kind": "artifact_curve",
+                    "coordinates": {},
+                    "parameters": {
+                        "artifact": "line_fit",
+                        "x_axis": "param_0",
+                        "y_axis": "channel_value",
+                    },
+                    "data": {},
+                }
+            ]
+        )
+
+        snapshot = snapshot_from_live_values(prefix, values)
+        root = snapshot.get_site(())
+        widget = _SiteColumnWidget(
+            site=root,
+            child_site_options=[],
+            selected_child_path=None,
+            parent_point_index=None,
+            selected_point_index=None,
+            selected_plot_mode=_PLOT_MODE_1D,
+            selected_x_key="param_0",
+            selected_y_key="channel_value",
+            selected_z_key="channel_value",
+            selected_group_key=None,
+            show_lines=False,
+        )
+
+        self.assertEqual(len(widget._annotation_items), 1)
+        x_data, y_data = widget._annotation_items[0].getData()
+        self.assertEqual(len(x_data), 200)
+        self.assertAlmostEqual(float(x_data[0]), 0.0)
+        self.assertAlmostEqual(float(x_data[-1]), 1.0)
+        self.assertAlmostEqual(float(y_data[0]), 19.5)
+        self.assertAlmostEqual(float(y_data[-1]), 21.5)
+        self.assertIn("analysis (final):", widget._artifact_readout.text())
+        self.assertIn("line_fit:", widget._artifact_readout.text())
+        self.assertIn("status: ok", widget._artifact_readout.text())
+
+    def test_site_column_widget_renders_artifact_location_annotations(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication([])
+
+        values = self._make_basic_root_values()
+        prefix = "ndscan.rid_0.site.root."
+        values[prefix + "state.completed"] = True
+        values[prefix + "analysis.artifact.line_fit"] = json.dumps(
+            {
+                "kind": "model_fit",
+                "provider": "sensible_fitting",
+                "model_id": "straight_line",
+                "model_name": "straight line",
+                "parameters": {
+                    "m": {"value": 2.0},
+                    "b": {"value": 19.5},
+                    "x0": {"value": 0.5, "stderr": 0.1},
+                },
+                "stats": {"success": True},
+            }
+        )
+        values[prefix + "analysis.annotations"] = json.dumps(
+            [
+                {
+                    "kind": "artifact_location",
+                    "coordinates": {},
+                    "parameters": {
+                        "artifact": "line_fit",
+                        "axis": "param_0",
+                        "parameter": "x0",
+                        "associated_channels": ["channel_value"],
+                    },
+                    "data": {},
+                }
+            ]
+        )
+
+        snapshot = snapshot_from_live_values(prefix, values)
+        root = snapshot.get_site(())
+        widget = _SiteColumnWidget(
+            site=root,
+            child_site_options=[],
+            selected_child_path=None,
+            parent_point_index=None,
+            selected_point_index=None,
+            selected_plot_mode=_PLOT_MODE_1D,
+            selected_x_key="param_0",
+            selected_y_key="channel_value",
+            selected_z_key="channel_value",
+            selected_group_key=None,
+            show_lines=False,
+        )
+
+        self.assertEqual(len(widget._annotation_items), 3)
+        positions = sorted(float(item.value()) for item in widget._annotation_items)
+        np.testing.assert_allclose(positions, [0.4, 0.5, 0.6])
+
+    def test_site_column_widget_prefers_online_annotations_for_active_child_slice(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication([])
+
+        prefix = "ndscan.rid_0.site.root."
+        values = {
+            prefix + "site.path": json.dumps([]),
+            prefix + "site.fragment_fqn": "RootFragment",
+            prefix + "state.num_points": 2,
+            prefix + "scan_x.site.path": json.dumps(["scan_x"]),
+            prefix + "scan_x.site.parent_path": json.dumps([]),
+            prefix + "scan_x.site.fragment_fqn": "ChildFragment",
+            prefix + "scan_x.scan.parameters": json.dumps(
+                {
+                    "child_x": {
+                        "path": "",
+                        "is_scanned": True,
+                        "param": {
+                            "fqn": "demo.child.x",
+                            "description": "Child X",
+                            "spec": {"unit": "Hz"},
+                        },
+                    }
+                }
+            ),
+            prefix + "scan_x.scan.channels": json.dumps(
+                {
+                    "child_value": {
+                        "path": "child/value",
+                        "description": "Child Value",
+                        "type": "float",
+                    }
+                }
+            ),
+            prefix + "scan_x.points.child_x": [0.0, 1.0, 2.0, 3.0],
+            prefix + "scan_x.points.child_value": [10.0, 11.0, 20.0, 21.0],
+            prefix + "scan_x.segments.start_index": [0, 2],
+            prefix + "scan_x.segments.parent_point_index": [0, 1],
+            prefix + "scan_x.state.current_segment": 1,
+            prefix + "scan_x.state.num_points": 4,
+            prefix + "scan_x.state.completed": False,
+            prefix + "scan_x.segments.analysis.final_feedback": [
+                json.dumps(
+                    {
+                        "outputs": {},
+                        "artifacts": {
+                            "line_fit": {
+                                "kind": "model_fit",
+                                "provider": "sensible_fitting",
+                                "model_id": "straight_line",
+                                "parameters": {
+                                    "m": {"value": 2.0},
+                                    "b": {"value": 9.5},
+                                },
+                            }
+                        },
+                        "annotations": [
+                            {
+                                "kind": "artifact_curve",
+                                "coordinates": {},
+                                "parameters": {
+                                    "artifact": "line_fit",
+                                    "x_axis": "child_x",
+                                    "y_axis": "child_value",
+                                },
+                                "data": {},
+                            }
+                        ],
+                    }
+                ),
+                json.dumps(
+                    {
+                        "outputs": {},
+                        "artifacts": {
+                            "line_fit": {
+                                "kind": "model_fit",
+                                "provider": "sensible_fitting",
+                                "model_id": "straight_line",
+                                "parameters": {
+                                    "m": {"value": 2.0},
+                                    "b": {"value": 15.0},
+                                },
+                            }
+                        },
+                        "annotations": [
+                            {
+                                "kind": "artifact_curve",
+                                "coordinates": {},
+                                "parameters": {
+                                    "artifact": "line_fit",
+                                    "x_axis": "child_x",
+                                    "y_axis": "child_value",
+                                },
+                                "data": {},
+                            }
+                        ],
+                    }
+                ),
+            ],
+            prefix + "scan_x.analysis.online_annotation.running_summary": json.dumps(
+                [
+                    {
+                        "kind": "curve",
+                        "coordinates": {
+                            "child_x": {"kind": "fixed", "value": [2.0, 3.0]},
+                            "child_value": {
+                                "kind": "fixed",
+                                "value": [19.5, 21.5],
+                            },
+                        },
+                        "parameters": {},
+                        "data": {},
+                    }
+                ]
+            ),
+        }
+
+        snapshot = snapshot_from_live_values(prefix, values)
+        child = snapshot.get_site(("scan_x",))
+        self.assertEqual(len(child.segment_final_analysis), 2)
+        self.assertEqual(
+            child.final_analysis_for_segment(0).annotations[0]["kind"],
+            "artifact_curve",
+        )
+
+        widget = _SiteColumnWidget(
+            site=child,
+            child_site_options=[],
+            selected_child_path=None,
+            parent_point_index=None,
+            selected_point_index=None,
+            selected_plot_mode=_PLOT_MODE_1D,
+            selected_x_key="child_x",
+            selected_y_key="child_value",
+            selected_z_key="child_value",
+            selected_group_key=None,
+            show_lines=False,
+        )
+
+        self.assertEqual(len(widget._annotation_items), 1)
+        x_data, y_data = widget._annotation_items[0].getData()
+        np.testing.assert_allclose(x_data, [2.0, 3.0])
+        np.testing.assert_allclose(y_data, [19.5, 21.5])
+
+        widget.update_state(
+            site=child,
+            child_site_options=[],
+            selected_child_path=None,
+            parent_point_index=0,
+            selected_point_index=None,
+            selected_plot_mode=_PLOT_MODE_1D,
+            selected_x_key="child_x",
+            selected_y_key="child_value",
+            selected_z_key="child_value",
+            selected_group_key=None,
+            show_lines=False,
+        )
+
+        self.assertEqual(len(widget._annotation_items), 1)
+        x_data, y_data = widget._annotation_items[0].getData()
+        self.assertEqual(len(x_data), 200)
+        self.assertAlmostEqual(float(x_data[0]), 0.0)
+        self.assertAlmostEqual(float(x_data[-1]), 1.0)
+        self.assertAlmostEqual(float(y_data[0]), 9.5)
+        self.assertAlmostEqual(float(y_data[-1]), 11.5)
+
+    def test_active_child_segment_does_not_reuse_previous_final_annotation(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication([])
+
+        prefix = "ndscan.rid_0.site.root."
+        values = {
+            prefix + "site.path": json.dumps([]),
+            prefix + "site.fragment_fqn": "RootFragment",
+            prefix + "state.num_points": 2,
+            prefix + "scan_x.site.path": json.dumps(["scan_x"]),
+            prefix + "scan_x.site.parent_path": json.dumps([]),
+            prefix + "scan_x.site.fragment_fqn": "ChildFragment",
+            prefix + "scan_x.scan.parameters": json.dumps(
+                {
+                    "child_x": {
+                        "path": "",
+                        "is_scanned": True,
+                        "param": {
+                            "fqn": "demo.child.x",
+                            "description": "Child X",
+                            "spec": {"unit": "Hz"},
+                        },
+                    }
+                }
+            ),
+            prefix + "scan_x.scan.channels": json.dumps(
+                {
+                    "child_value": {
+                        "path": "child/value",
+                        "description": "Child Value",
+                        "type": "float",
+                    }
+                }
+            ),
+            prefix + "scan_x.points.child_x": [0.0, 1.0, 2.0],
+            prefix + "scan_x.points.child_value": [10.0, 11.0, 20.0],
+            prefix + "scan_x.segments.start_index": [0, 2],
+            prefix + "scan_x.segments.parent_point_index": [0, 1],
+            prefix + "scan_x.state.current_segment": 1,
+            prefix + "scan_x.state.num_points": 3,
+            prefix + "scan_x.state.completed": False,
+            prefix + "scan_x.segments.analysis.final_feedback": [
+                json.dumps(
+                    {
+                        "outputs": {},
+                        "artifacts": {
+                            "line_fit": {
+                                "kind": "model_fit",
+                                "provider": "sensible_fitting",
+                                "model_id": "straight_line",
+                                "parameters": {
+                                    "m": {"value": 1.0},
+                                    "b": {"value": 10.0},
+                                },
+                            }
+                        },
+                        "annotations": [
+                            {
+                                "kind": "artifact_curve",
+                                "coordinates": {},
+                                "parameters": {
+                                    "artifact": "line_fit",
+                                    "x_axis": "child_x",
+                                    "y_axis": "child_value",
+                                },
+                                "data": {},
+                            }
+                        ],
+                    }
+                ),
+            ],
+        }
+
+        snapshot = snapshot_from_live_values(prefix, values)
+        child = snapshot.get_site(("scan_x",))
+        widget = _SiteColumnWidget(
+            site=child,
+            child_site_options=[],
+            selected_child_path=None,
+            parent_point_index=None,
+            selected_point_index=None,
+            selected_plot_mode=_PLOT_MODE_1D,
+            selected_x_key="child_x",
+            selected_y_key="child_value",
+            selected_z_key="child_value",
+            selected_group_key=None,
+            show_lines=False,
+        )
+
+        self.assertEqual(widget._annotation_items, [])
+
+        widget.update_state(
+            site=child,
+            child_site_options=[],
+            selected_child_path=None,
+            parent_point_index=0,
+            selected_point_index=None,
+            selected_plot_mode=_PLOT_MODE_1D,
+            selected_x_key="child_x",
+            selected_y_key="child_value",
+            selected_z_key="child_value",
+            selected_group_key=None,
+            show_lines=False,
+        )
+        self.assertEqual(len(widget._annotation_items), 1)
+
     def test_site_column_widget_switches_controls_for_2d_scatter_mode(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         app = QtWidgets.QApplication.instance()
@@ -233,6 +964,7 @@ class RuntimeLiveSnapshotTest(unittest.TestCase):
         self.assertFalse(widget._z_combo.isHidden())
         self.assertTrue(widget._show_lines_checkbox.isHidden())
         self.assertTrue(widget._group_combo.isHidden())
+        self.assertTrue(widget._repeat_combine_combo.isHidden())
 
         widget.update_state(
             site=root,
@@ -250,6 +982,7 @@ class RuntimeLiveSnapshotTest(unittest.TestCase):
         self.assertTrue(widget._z_combo.isHidden())
         self.assertFalse(widget._show_lines_checkbox.isHidden())
         self.assertFalse(widget._group_combo.isHidden())
+        self.assertFalse(widget._repeat_combine_combo.isHidden())
 
         widget.update_state(
             site=root,
@@ -267,6 +1000,7 @@ class RuntimeLiveSnapshotTest(unittest.TestCase):
         self.assertFalse(widget._z_combo.isHidden())
         self.assertTrue(widget._show_lines_checkbox.isHidden())
         self.assertTrue(widget._group_combo.isHidden())
+        self.assertTrue(widget._repeat_combine_combo.isHidden())
         self.assertTrue(widget._image_item.isVisible())
         self.assertFalse(widget._colorbar.isHidden())
         self.assertTrue(widget._crosshair_x.isVisible())
@@ -401,6 +1135,67 @@ class RuntimeLiveSnapshotTest(unittest.TestCase):
         self.assertIsNone(viewer._pending_values)
         self.assertEqual(viewer._snapshot.get_site(()).num_points, 3)
         self.assertEqual(viewer._status.text(), "Live prepared-runtime scan")
+
+    def test_runtime_viewer_preserves_child_axis_selection_when_parent_point_changes(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication([])
+
+        prefix = "ndscan.rid_0.site.root."
+        values = {
+            prefix + "site.path": json.dumps([]),
+            prefix + "site.fragment_fqn": "RootFragment",
+            prefix + "points.param_0": [0.0, 1.0],
+            prefix + "state.num_points": 2,
+            prefix + "state.completed": False,
+            prefix + "scan_x.site.path": json.dumps(["scan_x"]),
+            prefix + "scan_x.site.parent_path": json.dumps([]),
+            prefix + "scan_x.site.fragment_fqn": "ChildFragment",
+            prefix + "scan_x.scan.parameters": json.dumps(
+                {
+                    "child_param": {
+                        "path": "",
+                        "is_scanned": False,
+                        "param": {
+                            "fqn": "demo.child.probe_frequency",
+                            "description": "Probe Frequency",
+                            "spec": {"unit": "MHz"},
+                        },
+                    }
+                }
+            ),
+            prefix + "scan_x.scan.channels": json.dumps(
+                {
+                    "child_value": {
+                        "path": "child/survived",
+                        "description": "Survived",
+                        "type": "float",
+                    }
+                }
+            ),
+            prefix + "scan_x.points.child_param": [0.2, 0.2, 0.3, 0.3],
+            prefix + "scan_x.points.child_value": [1.0, 0.0, 0.0, 1.0],
+            prefix + "scan_x.points.acquired_at_unix": [10.0, 11.0, 12.0, 13.0],
+            prefix + "scan_x.segments.start_index": [0, 2],
+            prefix + "scan_x.segments.parent_point_index": [0, 1],
+            prefix + "scan_x.state.current_segment": 1,
+            prefix + "scan_x.state.num_points": 4,
+            prefix + "scan_x.state.completed": False,
+        }
+
+        viewer = RuntimePlotViewer(prefix)
+        viewer.data_changed(values)
+
+        child_path = ("scan_x",)
+        viewer._on_x_key_changed(child_path, "__point_index__")
+        viewer._on_y_key_changed(child_path, "child_value")
+        viewer._on_point_selected((), 0)
+
+        self.assertEqual(viewer._selected_x_keys[child_path], "__point_index__")
+        self.assertEqual(viewer._selected_y_keys[child_path], "child_value")
+        self.assertEqual(viewer._columns[1]._x_combo.currentData(), "__point_index__")
+        self.assertEqual(viewer._columns[1]._y_combo.currentData(), "child_value")
 
     def test_site_column_widget_supports_point_index_on_y_axis(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -542,6 +1337,125 @@ class RuntimeLiveSnapshotTest(unittest.TestCase):
         extra_pen = widget._extra_line_items[0].opts["pen"]
         self.assertNotEqual(line_pen.color().getRgb(), extra_pen.color().getRgb())
 
+    def test_site_column_widget_can_combine_repeated_x_points_with_std(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication([])
+
+        values = self._make_basic_root_values()
+        values["ndscan.rid_0.site.root.points.param_0"] = [0.0, 0.0, 1.0, 1.0]
+        values["ndscan.rid_0.site.root.points.channel_value"] = [10.0, 14.0, 20.0, 24.0]
+        values["ndscan.rid_0.site.root.state.num_points"] = 4
+
+        snapshot = snapshot_from_live_values("ndscan.rid_0.site.root.", values)
+        root = snapshot.get_site(())
+        widget = _SiteColumnWidget(
+            site=root,
+            child_site_options=[],
+            selected_child_path=None,
+            parent_point_index=None,
+            selected_point_index=1,
+            selected_plot_mode=_PLOT_MODE_1D,
+            selected_x_key="param_0",
+            selected_y_key="channel_value",
+            selected_z_key="channel_value",
+            selected_group_key=None,
+            show_lines=True,
+            selected_repeat_combine_mode=_REPEAT_COMBINE_STD,
+        )
+
+        self.assertEqual(len(widget._scatter.points()), 4)
+        self.assertEqual(len(widget._summary_scatter.points()), 2)
+        np.testing.assert_allclose(
+            [point.pos().x() for point in widget._summary_scatter.points()],
+            [0.0, 1.0],
+        )
+        np.testing.assert_allclose(
+            [point.pos().y() for point in widget._summary_scatter.points()],
+            [12.0, 22.0],
+        )
+        np.testing.assert_allclose(widget._error_bar_item.opts["x"], [0.0, 1.0])
+        np.testing.assert_allclose(widget._error_bar_item.opts["y"], [12.0, 22.0])
+        np.testing.assert_allclose(widget._error_bar_item.opts["top"], [2.0, 2.0])
+        self.assertIn("repeated x: mean ± std", widget._status.text())
+        self.assertLess(
+            widget._scatter.points()[0].brush().color().alpha(),
+            widget._summary_scatter.points()[0].brush().color().alpha(),
+        )
+        self.assertEqual(widget._highlight.points()[0].data(), 1)
+
+    def test_site_column_widget_can_combine_repeated_x_points_with_sem(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication([])
+
+        values = self._make_basic_root_values()
+        values["ndscan.rid_0.site.root.points.param_0"] = [0.0, 0.0, 1.0, 1.0]
+        values["ndscan.rid_0.site.root.points.channel_value"] = [10.0, 14.0, 20.0, 24.0]
+        values["ndscan.rid_0.site.root.state.num_points"] = 4
+
+        snapshot = snapshot_from_live_values("ndscan.rid_0.site.root.", values)
+        root = snapshot.get_site(())
+        widget = _SiteColumnWidget(
+            site=root,
+            child_site_options=[],
+            selected_child_path=None,
+            parent_point_index=None,
+            selected_point_index=None,
+            selected_plot_mode=_PLOT_MODE_1D,
+            selected_x_key="param_0",
+            selected_y_key="channel_value",
+            selected_z_key="channel_value",
+            selected_group_key=None,
+            show_lines=True,
+            selected_repeat_combine_mode=_REPEAT_COMBINE_SEM,
+        )
+
+        np.testing.assert_allclose(widget._error_bar_item.opts["x"], [0.0, 1.0])
+        np.testing.assert_allclose(widget._error_bar_item.opts["y"], [12.0, 22.0])
+        np.testing.assert_allclose(
+            widget._error_bar_item.opts["top"],
+            [np.sqrt(2.0), np.sqrt(2.0)],
+        )
+        self.assertIn("repeated x: mean ± sem", widget._status.text())
+
+    def test_site_column_widget_can_combine_repeated_points_with_grouping(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication([])
+
+        values = self._make_basic_root_values()
+        values["ndscan.rid_0.site.root.points.param_0"] = [0.0, 0.0, 1.0, 1.0] * 2
+        values["ndscan.rid_0.site.root.points.param_1"] = [2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 3.0]
+        values["ndscan.rid_0.site.root.points.channel_value"] = [10.0, 14.0, 20.0, 24.0, 30.0, 34.0, 40.0, 44.0]
+        values["ndscan.rid_0.site.root.state.num_points"] = 8
+
+        snapshot = snapshot_from_live_values("ndscan.rid_0.site.root.", values)
+        root = snapshot.get_site(())
+        widget = _SiteColumnWidget(
+            site=root,
+            child_site_options=[],
+            selected_child_path=None,
+            parent_point_index=None,
+            selected_point_index=5,
+            selected_plot_mode=_PLOT_MODE_1D,
+            selected_x_key="param_0",
+            selected_y_key="channel_value",
+            selected_z_key="channel_value",
+            selected_group_key="param_1",
+            show_lines=True,
+            selected_repeat_combine_mode=_REPEAT_COMBINE_STD,
+        )
+
+        self.assertEqual(len(widget._scatter.points()), 8)
+        self.assertEqual(len(widget._summary_scatter.points()), 4)
+        self.assertTrue(widget._legend.isVisible())
+        self.assertIn("grouped by y (Y Axis / kHz)", widget._status.text())
+        self.assertIn("repeated x: mean ± std", widget._status.text())
+
     def test_builtin_fit_backend_linear_model(self):
         backend = BuiltinFitBackend()
         result = backend.fit(
@@ -557,6 +1471,22 @@ class RuntimeLiveSnapshotTest(unittest.TestCase):
         self.assertEqual(result.model_id, "linear")
         self.assertEqual(len(result.curve_x), 200)
         self.assertEqual(len(result.curve_y), 200)
+
+    def test_default_fit_backend_can_return_model_fit_artifact(self):
+        backend = default_fit_backend()
+        if not any(model.model_id == "straight_line" for model in backend.models()):
+            self.skipTest("sensible-fitting backend not available")
+        result = backend.fit(
+            "straight_line",
+            FitRequest(
+                x=np.asarray([0.0, 1.0, 2.0, 3.0], dtype=float),
+                y=np.asarray([1.0, 3.0, 5.0, 7.0], dtype=float),
+            ),
+        )
+
+        self.assertIsNotNone(result.artifact)
+        self.assertEqual(result.artifact.model_id, "straight_line")
+        self.assertIn("m=", result.summary())
 
     def test_site_column_widget_can_fit_visible_1d_data(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

@@ -77,17 +77,14 @@ class KernelLineWithOnlineFitFragment(ExpFragment):
         ys = np.asarray(result_values[self.y], dtype=float)
 
         slope, intercept = fit_line(xs, ys)
-        fit_xs = np.linspace(float(xs.min()), float(xs.max()), 50)
-        fit_ys = slope * fit_xs + intercept
 
         analysis_results["fit_slope"].push(slope)
         analysis_results["fit_intercept"].push(intercept)
         return [
-            annotations.curve_1d(
-                x_axis=self.x,
-                x_values=fit_xs,
-                y_axis=self.y,
-                y_values=fit_ys,
+            annotations.computed_curve(
+                function_name="line",
+                parameters={"a": intercept, "b": slope},
+                associated_channels=[self.y],
             )
         ]
 

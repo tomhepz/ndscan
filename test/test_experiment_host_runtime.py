@@ -12,6 +12,12 @@ import ndscan.experiment as experiment_facade
 from artiq.experiment import kernel
 from artiq.language.core import TerminationRequested
 from examples.host_runtime_grouped_line_family import HostRuntimeGroupedLineFamily
+import examples.host_runtime_interleaved_spectroscopy_patterns as interleaved_patterns
+from examples.host_runtime_field_shift_spectroscopy import (
+    HostRuntimeFieldShiftSpectroscopy,
+    TRUE_CENTER_AT_ZERO,
+    TRUE_SHIFT_PER_FIELD,
+)
 from examples.host_runtime_prepared_root_linear_scan import (
     HostRuntimePreparedRootLinearScan,
 )
@@ -25,6 +31,12 @@ from ndscan.define.default_analysis import AnalysisFeedback, CustomAnalysis, Onl
 from ndscan.define.fragment import ExpFragment, RestartKernelTransitoryError
 from ndscan.define.parameters import FloatParam
 from ndscan.define.result_channels import FloatChannel, IntChannel
+from ndscan.fits import (
+    artifact_parameter_value,
+    build_builtin_model,
+    fit_data_with_model,
+    import_sensible_fitting,
+)
 from ndscan.runtime.api import (
     PointObservation,
     PreparedScan,
@@ -267,6 +279,39 @@ class PointPolicyTest(unittest.TestCase):
             [(0,), (0,), (0,), (1,), (1,), (1,)],
         )
 
+    def test_repeat_point_policy_can_interleave_fixed_repeats_over_finite_points(self):
+        source = RepeatPointPolicy(
+            ExplicitPointPolicy(1, [(0,), (1,)]),
+            repeats=3,
+            schedule="interleaved",
+        )
+
+        emitted = []
+        while not source.is_finished():
+            batch = source.next_batch(2)
+            emitted.extend(point.axis_values for point in batch)
+            source.observe_batch(
+                BatchFeedback(
+                    observations=tuple(
+                        PointObservation(
+                            point_index=point.index,
+                            axis_values={"axis_0": point.axis_values[0]},
+                            channel_values={"channel_0": point.axis_values[0]},
+                        )
+                        for point in batch
+                    ),
+                    axis_data={"axis_0": tuple(point.axis_values[0] for point in batch)},
+                    result_data={
+                        "channel_0": tuple(point.axis_values[0] for point in batch)
+                    },
+                )
+            )
+
+        self.assertEqual(
+            emitted,
+            [(0,), (1,), (0,), (1,), (0,), (1,)],
+        )
+
 
     def test_repeat_point_policy_can_stop_current_point_from_batch_feedback(self):
         source = RepeatPointPolicy(
@@ -297,6 +342,37 @@ class PointPolicyTest(unittest.TestCase):
             )
 
         self.assertEqual(num_observations, 3)
+
+    def test_repeat_point_policy_interleaved_stop_predicate_stays_local_to_one_point(self):
+        source = RepeatPointPolicy(
+            ExplicitPointPolicy(1, [(5.0,), (9.0,)]),
+            stop_predicate=lambda feedback: len(feedback.result_data["channel_0"]) >= 2,
+            min_repeats=1,
+            max_repeats=4,
+            predicate_description="two repeats seen",
+            schedule="interleaved",
+        )
+
+        emitted = []
+        while not source.is_finished():
+            batch = source.next_batch(2)
+            emitted.extend(point.axis_values for point in batch)
+            source.observe_batch(
+                BatchFeedback(
+                    observations=tuple(
+                        PointObservation(
+                            point_index=point.index,
+                            axis_values={"axis_0": point.axis_values[0]},
+                            channel_values={"channel_0": 1.0},
+                        )
+                        for point in batch
+                    ),
+                    axis_data={"axis_0": tuple(point.axis_values[0] for point in batch)},
+                    result_data={"channel_0": (1.0,) * len(batch)},
+                )
+            )
+
+        self.assertEqual(emitted, [(5.0,), (9.0,), (5.0,), (9.0,)])
 
 
 class HostScanSchemaCompilationTest(HasEnvironmentCase):
@@ -1265,18 +1341,31 @@ class FixedParameterSubscanParent(ExpFragment):
         self.total.push(self.multiplier.get() * sum(child_result.values[self.child.y]))
 
 
-def _fit_line_through_origin(xs, ys) -> float:
-    xs = np.asarray(xs, dtype=float)
-    ys = np.asarray(ys, dtype=float)
-    return float(np.dot(xs, ys) / np.dot(xs, xs))
-
-
 def _fit_power_law_exponent(ps, ms) -> float:
     ps = np.asarray(ps, dtype=float)
     ms = np.asarray(ms, dtype=float)
     log_p = np.log(ps)
     log_m = np.log(ms)
     return float(np.dot(log_p, log_m) / np.dot(log_p, log_p))
+
+
+def _line_fit_artifact(xs, ys) -> dict[str, object]:
+    sensible = import_sensible_fitting()
+    model = build_builtin_model("straight_line")
+    data = sensible.FitData.normal(
+        x=np.asarray(xs, dtype=float),
+        y=np.asarray(ys, dtype=float),
+        x_label="x",
+        y_label="y",
+        label="line",
+    )
+    _, artifact = fit_data_with_model(
+        model,
+        data,
+        model_id="straight_line",
+        source={"x_key": "axis_0", "y_key": "channel_0"},
+    )
+    return artifact.to_dict()
 
 
 class AnalysedLineFragment(ExpFragment):
@@ -1298,23 +1387,22 @@ class AnalysedLineFragment(ExpFragment):
             )
         ]
 
-    def _analyse_gradient(self, axis_values, result_values, analysis_results):
+    def _analyse_gradient(self, axis_values, result_values):
         xs = axis_values[self.x]
         ys = result_values[self.y]
-
-        m = _fit_line_through_origin(xs, ys)
-        fit_xs = np.linspace(min(xs), max(xs), 20)
-        fit_ys = m * fit_xs
-
-        analysis_results["m"].push(m)
-        return [
-            annotations.curve_1d(
-                x_axis=self.x,
-                x_values=fit_xs,
-                y_axis=self.y,
-                y_values=fit_ys,
-            )
-        ]
+        artifact = _line_fit_artifact(xs, ys)
+        m = float(artifact_parameter_value(artifact, "m"))
+        return AnalysisFeedback(
+            outputs={"m": m},
+            artifacts={"line_fit": artifact},
+            annotations=[
+                annotations.artifact_curve(
+                    artifact="line_fit",
+                    x_axis=self.x,
+                    y_axis=self.y,
+                )
+            ],
+        )
 
 
 class AnalysedScanXFragment(ExpFragment):
@@ -2332,9 +2420,17 @@ class HostRuntimeCase(HasEnvironmentCase):
         self.assertIn("m", metadata)
         self.assertEqual(metadata["m"]["path"], "m")
 
+        artifact = self.j(prefix, "analysis.artifact.line_fit")
+        self.assertEqual(artifact["kind"], "model_fit")
+        self.assertEqual(artifact["provider"], "sensible_fitting")
+        self.assertEqual(artifact["model_id"], "straight_line")
+        self.assertAlmostEqual(artifact["parameters"]["m"]["value"], 4.0, places=6)
+        self.assertEqual(result.analysis_artifacts["line_fit"], artifact)
+
         annotations_data = self.j(prefix, "analysis.annotations")
         self.assertEqual(len(annotations_data), 1)
-        self.assertEqual(annotations_data[0]["kind"], "curve")
+        self.assertEqual(annotations_data[0]["kind"], "artifact_curve")
+        self.assertEqual(annotations_data[0]["parameters"]["artifact"], "line_fit")
         self.assertEqual(result.annotations, annotations_data)
 
     def test_host_scan_session_execute_returns_scan_outputs(self):
@@ -2426,6 +2522,131 @@ class HostRuntimeCase(HasEnvironmentCase):
             sorted(set(self.d(prefix, "points.param_1"))),
             [-2.0, -1.0, 0.0, 1.0, 2.0],
         )
+
+    def test_field_shift_spectroscopy_example_runs(self):
+        exp = self.create(HostRuntimeFieldShiftSpectroscopy)
+        exp.prepare()
+        exp.run()
+
+        field_prefix = "ndscan.rid_0.site.root.scan_field."
+        freq_prefix = field_prefix + "scan_frequency."
+
+        self.assertEqual(len(self.d(field_prefix, "points.param_0")), 5)
+        self.assertAlmostEqual(
+            self.d(field_prefix, "analysis.output.fit_shift_per_field"),
+            TRUE_SHIFT_PER_FIELD,
+            delta=0.08,
+        )
+        self.assertAlmostEqual(
+            self.d(field_prefix, "analysis.output.fit_centre_at_zero_field"),
+            TRUE_CENTER_AT_ZERO,
+            delta=0.1,
+        )
+        segment_feedback = [
+            json.loads(item)
+            for item in self.d(freq_prefix, "segments.analysis.final_feedback")
+        ]
+        self.assertEqual(segment_feedback[0]["annotations"][0]["kind"], "artifact_curve")
+        self.assertEqual(
+            segment_feedback[0]["annotations"][1]["kind"], "artifact_location"
+        )
+
+    def test_interleaved_spectroscopy_example_runs(self):
+        with (
+            patch.object(interleaved_patterns, "POINT_DELAY_S", 0.0),
+            patch.object(
+                interleaved_patterns,
+                "DEMO_FREQUENCY_POINTS",
+                _REAL_NP_LINSPACE(-0.35, 0.75, 7).tolist(),
+            ),
+            patch.object(interleaved_patterns, "TARGET_PROBABILITY_ERROR", 0.22),
+            patch.object(interleaved_patterns, "MIN_SHOTS_PER_FREQUENCY", 3),
+            patch.object(interleaved_patterns, "MAX_SHOTS_PER_FREQUENCY", 8),
+        ):
+            exp = self.create(interleaved_patterns.HostRuntimeInterleavedSpectroscopy)
+            exp.prepare()
+            exp.run()
+
+        prefix = "ndscan.rid_0.site.root."
+        probe_frequencies = self.d(prefix, "points.param_0")
+        self.assertGreater(len(probe_frequencies), len(set(probe_frequencies)))
+        self.assertAlmostEqual(
+            self.d(prefix, "analysis.output.fit_center"),
+            interleaved_patterns.TRUE_LINE_CENTER,
+            delta=0.18,
+        )
+        self.assertEqual(self.d(prefix, "analysis.output.num_unique_frequencies"), 7)
+        annotations_data = self.j(prefix, "analysis.annotations")
+        self.assertEqual([item["kind"] for item in annotations_data], ["artifact_curve"])
+
+    def test_interleaved_spectroscopy_subscan_example_runs(self):
+        with (
+            patch.object(interleaved_patterns, "POINT_DELAY_S", 0.0),
+            patch.object(
+                interleaved_patterns,
+                "DEMO_FREQUENCY_POINTS",
+                _REAL_NP_LINSPACE(-0.35, 0.75, 7).tolist(),
+            ),
+            patch.object(interleaved_patterns, "TARGET_PROBABILITY_ERROR", 0.22),
+            patch.object(interleaved_patterns, "MIN_SHOTS_PER_FREQUENCY", 3),
+            patch.object(interleaved_patterns, "MAX_SHOTS_PER_FREQUENCY", 8),
+        ):
+            exp = self.create(interleaved_patterns.HostRuntimeInterleavedSpectroscopySubscan)
+            exp.prepare()
+            exp.run()
+
+        root_prefix = "ndscan.rid_0.site.root."
+        child_prefix = root_prefix + "scan_frequency."
+        self.assertEqual(len(self.d(root_prefix, "points.channel_0")), 1)
+        self.assertAlmostEqual(
+            self.d(root_prefix, "points.channel_0")[0],
+            interleaved_patterns.TRUE_LINE_CENTER,
+            delta=0.18,
+        )
+        probe_frequencies = self.d(child_prefix, "points.param_0")
+        self.assertGreater(len(probe_frequencies), len(set(probe_frequencies)))
+        annotations_data = self.j(child_prefix, "analysis.annotations")
+        self.assertEqual([item["kind"] for item in annotations_data], ["artifact_curve"])
+
+    def test_chunked_interleaved_spectroscopy_example_runs(self):
+        with (
+            patch.object(interleaved_patterns, "POINT_DELAY_S", 0.0),
+            patch.object(
+                interleaved_patterns,
+                "DEMO_FREQUENCY_POINTS",
+                _REAL_NP_LINSPACE(-0.35, 0.75, 7).tolist(),
+            ),
+            patch.object(interleaved_patterns, "CHUNK_SHOTS_PER_POINT", 3),
+            patch.object(interleaved_patterns, "CHUNKED_TARGET_PROBABILITY_ERROR", 0.22),
+            patch.object(
+                interleaved_patterns,
+                "MIN_TOTAL_SHOTS_PER_FREQUENCY",
+                6,
+            ),
+            patch.object(
+                interleaved_patterns,
+                "MAX_TOTAL_SHOTS_PER_FREQUENCY",
+                12,
+            ),
+        ):
+            exp = self.create(interleaved_patterns.HostRuntimeChunkedInterleavedSpectroscopy)
+            exp.prepare()
+            exp.run()
+
+        prefix = "ndscan.rid_0.site.root."
+        probe_frequencies = self.d(prefix, "points.param_0")
+        self.assertGreater(len(probe_frequencies), len(set(probe_frequencies)))
+        self.assertIn(prefix + "points.channel_0", self.dataset_db.data)
+        self.assertIn(prefix + "points.channel_1", self.dataset_db.data)
+        self.assertIn(prefix + "points.channel_2", self.dataset_db.data)
+        self.assertIn(prefix + "points.channel_3", self.dataset_db.data)
+        self.assertAlmostEqual(
+            self.d(prefix, "analysis.output.fit_center"),
+            interleaved_patterns.TRUE_LINE_CENTER,
+            delta=0.18,
+        )
+        annotations_data = self.j(prefix, "analysis.annotations")
+        self.assertEqual([item["kind"] for item in annotations_data], ["artifact_curve"])
 
     @patch("examples.host_runtime_rabi_flop_2d.np.linspace")
     @patch("examples.host_runtime_rabi_flop_2d.time.sleep", return_value=None)
@@ -2957,11 +3178,23 @@ class HostRuntimeCase(HasEnvironmentCase):
             self.d(p_prefix, "points.param_0"),
             [1.0, 2.0, 3.0, 4.0, 5.0],
         )
-        self.assertEqual(
+        np.testing.assert_allclose(
             self.d(p_prefix, "points.channel_0"),
             [1.0, 4.0, 9.0, 16.0, 25.0],
+            rtol=0.0,
+            atol=1e-7,
         )
         self.assertEqual(self.d(x_prefix, "segments.start_index"), [0, 6, 12, 18, 24])
+        segment_feedback = [
+            json.loads(item)
+            for item in self.d(x_prefix, "segments.analysis.final_feedback")
+        ]
+        self.assertEqual(len(segment_feedback), 5)
+        self.assertAlmostEqual(segment_feedback[0]["outputs"]["m"], 1.0, places=6)
+        self.assertAlmostEqual(segment_feedback[-1]["outputs"]["m"], 25.0, places=6)
+        self.assertEqual(
+            segment_feedback[0]["annotations"][0]["kind"], "artifact_curve"
+        )
         self.assertAlmostEqual(result.values[parent.fit_e][0], 2.0, places=6)
         self.assertAlmostEqual(self.d(p_prefix, "analysis.output.fit_e"), 2.0)
         self.assertAlmostEqual(self.d(x_prefix, "analysis.output.m"), 25.0)

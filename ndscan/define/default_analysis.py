@@ -56,15 +56,17 @@ AxisIdentity = tuple[str, str]
 
 @dataclass(frozen=True)
 class AnalysisFeedback:
-    """Latest outputs and annotations for one analysis execution mode.
+    """Latest outputs, artifacts, and annotations for one analysis execution mode.
 
     The host runtime uses the same shape for online feedback that point policies see
     and for the online datasets that are published at each completed batch boundary.
     Keeping the payload structured here avoids a second round of ad-hoc dict wrapping
-    in the runtime.
+    in the runtime, and gives runtime analyses and viewer-side ad hoc analyses one
+    common object model.
     """
 
     outputs: dict[str, Any] = field(default_factory=dict)
+    artifacts: dict[str, Any] = field(default_factory=dict)
     annotations: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -102,15 +104,14 @@ class DefaultAnalysis:
         axis_data: dict[AxisIdentity, list],
         result_data: dict[ResultChannel, list],
         context: AnnotationContext,
-    ) -> list[dict[str, Any]]:
-        """Exceute analysis and serialise information about resulting annotations to
-        stringly typed metadata.
+    ) -> AnalysisFeedback | list[dict[str, Any]]:
+        """Execute analysis and return structured feedback.
 
         :param context: The AnnotationContext to use to describe the coordinate axes/
             result channels in the resulting metadata.
 
-        :return: A list of string dictionary representations for the resulting
-            annotations, if any.
+        :return: Either a structured :class:`AnalysisFeedback` or a legacy list of
+            string dictionary representations for the resulting annotations.
         """
         raise NotImplementedError
 
@@ -179,8 +180,9 @@ class CustomAnalysis(DefaultAnalysis):
             3. channels for each of the optional analysis results specified in\
                ``analysis_results``, given as a dictionary indexed by channel name.
 
-        For backwards-compatibility, the third parameter can be omitted. Optionally, a
-        list of annotations to broadcast can be returned.
+        For backwards-compatibility, the third parameter can be omitted. The function
+        can either return a legacy list of annotations to broadcast, or a structured
+        :class:`AnalysisFeedback`.
     :param analysis_results: Optionally, a number of result channels for analysis
         results. They are later passed to ``analyze_fn``.
     :param online_fn: Optional online-analysis variant executed after each completed
@@ -200,7 +202,7 @@ class CustomAnalysis(DefaultAnalysis):
                 dict[ResultChannel, list],
                 dict[str, ResultChannel],
             ],
-            list[Annotation] | None,
+            list[Annotation] | AnalysisFeedback | None,
         ],
         analysis_results: Iterable[ResultChannel] = [],
         *,
@@ -210,7 +212,7 @@ class CustomAnalysis(DefaultAnalysis):
                 dict[ResultChannel, list],
                 dict[str, ResultChannel],
             ],
-            list[Annotation] | None,
+            list[Annotation] | AnalysisFeedback | None,
         ]
         | None = None,
         online_analysis_identifier: str | None = None,
@@ -263,14 +265,16 @@ class CustomAnalysis(DefaultAnalysis):
         axis_data: dict[AxisIdentity, list],
         result_data: dict[ResultChannel, list],
         context: AnnotationContext,
-    ) -> list[dict[str, Any]]:
+    ) -> AnalysisFeedback:
         ""
         feedback = self._run_analysis_fn(
             self._analyze_fn, axis_data, result_data, context
         )
         for name, value in feedback.outputs.items():
-            self._result_channels[name].push(value)
-        return feedback.annotations
+            channel = self._result_channels.get(name, None)
+            if channel is not None:
+                channel.push(value)
+        return feedback
 
     def execute_online(
         self,
@@ -307,27 +311,59 @@ class CustomAnalysis(DefaultAnalysis):
 
         with _TemporaryAnalysisResultSinks(self._result_channels) as sinks:
             try:
-                annotations = analysis_fn(
+                result = analysis_fn(
                     user_axis_data, result_data, self._result_channels
                 )
             except TypeError as original_exception:
                 try:
-                    annotations = analysis_fn(user_axis_data, result_data)
+                    result = analysis_fn(user_axis_data, result_data)
                 except TypeError:
                     raise original_exception from None
 
-            outputs = {
+            sink_outputs = {
                 name: sink.get_last()
                 for name, sink in sinks.items()
                 if sink.get_last() is not None
             }
 
-        if annotations is None:
-            annotations = []
+        feedback = self._normalise_analysis_result(result, context)
+        outputs = dict(sink_outputs)
+        outputs.update(feedback.outputs)
         return AnalysisFeedback(
             outputs=outputs,
-            annotations=[a.describe(context) for a in annotations],
+            artifacts=dict(feedback.artifacts),
+            annotations=list(feedback.annotations),
         )
+
+    def _normalise_analysis_result(
+        self,
+        result: list[Annotation] | list[dict[str, Any]] | AnalysisFeedback | None,
+        context: AnnotationContext,
+    ) -> AnalysisFeedback:
+        if isinstance(result, AnalysisFeedback):
+            return AnalysisFeedback(
+                outputs=dict(result.outputs),
+                artifacts=dict(result.artifacts),
+                annotations=self._normalise_annotations(result.annotations, context),
+            )
+        return AnalysisFeedback(
+            annotations=self._normalise_annotations(result, context),
+        )
+
+    def _normalise_annotations(
+        self,
+        annotations_data: list[Annotation] | list[dict[str, Any]] | None,
+        context: AnnotationContext,
+    ) -> list[dict[str, Any]]:
+        if annotations_data is None:
+            return []
+        annotations = []
+        for annotation in annotations_data:
+            if isinstance(annotation, Annotation):
+                annotations.append(annotation.describe(context))
+            else:
+                annotations.append(dict(annotation))
+        return annotations
 
 
 #: Default points of interest for various fit types (e.g. highlighting the π time for a

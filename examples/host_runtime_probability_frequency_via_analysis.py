@@ -23,6 +23,12 @@ import numpy as np
 from artiq.experiment import *
 from ndscan.define import *
 from ndscan.define import annotations
+from ndscan.fits import (
+    artifact_parameter_value,
+    build_builtin_model,
+    fit_data_with_model,
+    import_sensible_fitting,
+)
 from ndscan.scan import *
 from ndscan.runtime.api import *
 
@@ -50,41 +56,38 @@ def estimate_probability_from_shots(shots: list[float]) -> tuple[float, float]:
     return probability, probability_error
 
 
-def fit_sine_frequency(ts, probabilities) -> tuple[float, np.ndarray, np.ndarray]:
-    """Fit a sine-wave frequency by grid-searching a linearised sinusoid model."""
+def fit_sine_frequency_artifact(ts, probabilities, probability_errors) -> dict[str, object]:
+    """Fit a sinusoid with sensible-fitting and return the serializable artifact."""
 
+    sensible = import_sensible_fitting()
     ts = np.asarray(ts, dtype=float)
     probabilities = np.asarray(probabilities, dtype=float)
+    probability_errors = np.asarray(probability_errors, dtype=float)
 
-    candidate_frequencies = np.linspace(0.05, 0.5, 600)
-    best_frequency = float(candidate_frequencies[0])
-    best_coefficients = np.zeros(3)
-    best_residual = float("inf")
-
-    for frequency in candidate_frequencies:
-        omega_t = 2.0 * math.pi * frequency * ts
-        design = np.column_stack(
-            [
-                np.ones_like(ts),
-                np.sin(omega_t),
-                np.cos(omega_t),
-            ]
-        )
-        coefficients, _, _, _ = np.linalg.lstsq(design, probabilities, rcond=None)
-        residual = np.linalg.norm(design @ coefficients - probabilities)
-        if residual < best_residual:
-            best_residual = float(residual)
-            best_frequency = float(frequency)
-            best_coefficients = coefficients
-
-    fit_ts = np.linspace(float(ts.min()), float(ts.max()), 200)
-    fit_omega_t = 2.0 * math.pi * best_frequency * fit_ts
-    fit_probabilities = (
-        best_coefficients[0]
-        + best_coefficients[1] * np.sin(fit_omega_t)
-        + best_coefficients[2] * np.cos(fit_omega_t)
+    model = build_builtin_model("sinusoid").bound(
+        amplitude=(0.0, 1.0),
+        offset=(0.0, 1.0),
+        frequency=(0.01, 1.0),
+        phase=(-math.pi, math.pi),
     )
-    return best_frequency, fit_ts, fit_probabilities
+    data = sensible.FitData.normal(
+        x=ts,
+        y=probabilities,
+        yerr=probability_errors,
+        x_label="t",
+        y_label="probability",
+        label="probability_trace",
+    )
+    _, artifact = fit_data_with_model(
+        model,
+        data,
+        model_id="sinusoid",
+        source={
+            "x_key": "axis_0",
+            "y_key": "channel_probability",
+        },
+    )
+    return artifact.to_dict()
 
 
 def make_online_precision_stopper(*, error_threshold: float, min_shots: int):
@@ -126,14 +129,17 @@ class YesNoAtTimeWithAnalysisFragment(ExpFragment):
             )
         ]
 
-    def _analyse_repeat_statistics(self, axis_values, result_values, analysis_results):
+    def _analyse_repeat_statistics(self, axis_values, result_values):
         del axis_values
         shots = list(result_values[self.hit])
         probability, probability_error = estimate_probability_from_shots(shots)
-        analysis_results["probability"].push(probability)
-        analysis_results["probability_error"].push(probability_error)
-        analysis_results["num_shots"].push(len(shots))
-        return []
+        return AnalysisFeedback(
+            outputs={
+                "probability": probability,
+                "probability_error": probability_error,
+                "num_shots": len(shots),
+            }
+        )
 
 
 class ProbabilityAtTimeViaAnalysisFragment(ExpFragment):
@@ -184,28 +190,32 @@ class ProbabilityAtTimeViaAnalysisFragment(ExpFragment):
                 self._analyse_frequency,
                 [
                     FloatChannel("fit_frequency", "Extracted sine frequency"),
-                    OpaqueChannel("fit_ts", save_by_default=False),
-                    OpaqueChannel("fit_probabilities", save_by_default=False),
                 ],
             )
         ]
 
-    def _analyse_frequency(self, axis_values, result_values, analysis_results):
+    def _analyse_frequency(self, axis_values, result_values):
         ts = np.asarray(axis_values[self.detector.t], dtype=float)
         probabilities = np.asarray(result_values[self.probability], dtype=float)
+        probability_errors = np.asarray(
+            result_values[self.probability_error], dtype=float
+        )
 
-        fit_frequency, fit_ts, fit_probabilities = fit_sine_frequency(ts, probabilities)
-        analysis_results["fit_frequency"].push(fit_frequency)
-        analysis_results["fit_ts"].push(fit_ts)
-        analysis_results["fit_probabilities"].push(fit_probabilities)
-        return [
-            annotations.curve_1d(
-                x_axis=self.detector.t,
-                x_values=fit_ts,
-                y_axis=self.probability,
-                y_values=fit_probabilities,
-            )
-        ]
+        fit_artifact = fit_sine_frequency_artifact(
+            ts, probabilities, probability_errors
+        )
+        fit_frequency = float(artifact_parameter_value(fit_artifact, "frequency"))
+        return AnalysisFeedback(
+            outputs={"fit_frequency": fit_frequency},
+            artifacts={"frequency_fit": fit_artifact},
+            annotations=[
+                annotations.artifact_curve(
+                    artifact="frequency_fit",
+                    x_axis=self.detector.t,
+                    y_axis=self.probability,
+                )
+            ],
+        )
 
 
 class FrequencyFromProbabilityViaAnalysisFragment(ExpFragment):

@@ -20,7 +20,15 @@ from ..utils import FIT_OBJECTS
 from .parameters import ParamHandle
 from .result_channels import ResultChannel
 
-__all__ = ["Annotation", "curve_1d", "curve", "computed_curve", "axis_location"]
+__all__ = [
+    "Annotation",
+    "curve_1d",
+    "curve",
+    "computed_curve",
+    "artifact_curve",
+    "artifact_location",
+    "axis_location",
+]
 
 
 class AnnotationValueRef:
@@ -107,7 +115,8 @@ class Annotation:
     """An annotation to be displayed alongside scan result data, recording derived
     quantities (e.g. a fit minimizer).
 
-    See :func:`curve`, :func:`curve_1d`, :func:`computed_curve`, :func:`axis_location`.
+    See :func:`curve`, :func:`curve_1d`, :func:`computed_curve`,
+    :func:`artifact_curve`, :func:`artifact_location`, :func:`axis_location`.
     """
 
     def __init__(
@@ -131,10 +140,23 @@ class Annotation:
                 result[keyspec] = valuespec
             return result
 
+        def describe_parameter_value(value):
+            if isinstance(value, (ParamHandle, ResultChannel, AxisAssociatedKeyRef)):
+                return context.describe_coordinate(value)
+            if isinstance(value, list):
+                return [describe_parameter_value(item) for item in value]
+            if isinstance(value, tuple):
+                return [describe_parameter_value(item) for item in value]
+            if isinstance(value, dict):
+                return {
+                    str(key): describe_parameter_value(item)
+                    for key, item in value.items()
+                }
+            return value
+
         spec = {"kind": self.kind}
         spec["coordinates"] = to_spec_map(self.coordinates)
-        # FIXME: to_spec_map() on parameters as well for associated_channels?
-        spec["parameters"] = self.parameters
+        spec["parameters"] = describe_parameter_value(self.parameters)
         spec["data"] = to_spec_map(self.data)
         return spec
 
@@ -252,6 +274,72 @@ def computed_curve(
     if associated_channels:
         params["associated_channels"] = associated_channels
     return Annotation("computed_curve", parameters=params, data=parameters)
+
+
+def artifact_curve(
+    artifact: str,
+    *,
+    x_axis: ParamHandle,
+    y_axis: ResultChannel,
+    associated_channels: list | None = None,
+) -> Annotation:
+    """Create a curve annotation backed by a named analysis artifact.
+
+    This is the preferred way to annotate parametric fits whose canonical result is a
+    structured artifact (for example a ``model_fit`` produced by sensible-fitting).
+    The artifact stays the source of truth; viewers evaluate it on demand instead of
+    requiring densely sampled ``fit_xs`` / ``fit_ys`` arrays to be stored.
+
+    :param artifact: Name of the artifact in :class:`AnalysisFeedback.artifacts`.
+    :param x_axis: Parameter corresponding to the x axis for plotting.
+    :param y_axis: Result channel corresponding to the y axis for plotting.
+    :param associated_channels: Optional explicit channel association, following the
+        same convention as :func:`computed_curve`.
+    """
+
+    params = {
+        "artifact": artifact,
+        "x_axis": x_axis,
+        "y_axis": y_axis,
+    }
+    if associated_channels:
+        params["associated_channels"] = associated_channels
+    return Annotation("artifact_curve", parameters=params)
+
+
+def artifact_location(
+    artifact: str,
+    *,
+    axis: ParamHandle | ResultChannel,
+    parameter: str,
+    error_parameter: str | None = None,
+    associated_channels: list | None = None,
+) -> Annotation:
+    """Create a location annotation backed by a named analysis artifact.
+
+    This is the marker equivalent of :func:`artifact_curve`: the annotation references
+    one structured artifact and one named parameter inside it. The viewer can then
+    render a vertical/horizontal marker and, when available, uncertainty bounds.
+
+    :param artifact: Name of the artifact in :class:`AnalysisFeedback.artifacts`.
+    :param axis: Parameter or result-channel axis where the marker should be drawn.
+    :param parameter: Name of the artifact parameter to read as the marker position.
+    :param error_parameter: Optional alternate artifact parameter to read as the marker
+        error. If omitted, viewers may use the ``stderr`` attached to ``parameter``.
+    :param associated_channels: Optional explicit channel association, following the
+        same convention as :func:`axis_location`.
+    """
+
+    params = {
+        "artifact": artifact,
+        "axis": axis,
+        "parameter": parameter,
+    }
+    if error_parameter is not None:
+        params["error_parameter"] = error_parameter
+    if associated_channels:
+        params["associated_channels"] = associated_channels
+    return Annotation("artifact_location", parameters=params)
 
 
 def axis_location(

@@ -18,6 +18,7 @@ import numpy as np
 __all__ = [
     "HostRuntimeSnapshot",
     "HostRuntimeSiteSegment",
+    "HostRuntimeSegmentFinalAnalysis",
     "HostRuntimeSiteData",
     "read_host_runtime_snapshot",
 ]
@@ -37,14 +38,35 @@ _STRUCTURED_KEYS = {
     "analysis.outputs",
     "analysis.annotations",
 }
+_STRUCTURED_ARRAY_KEYS = {
+    "segments.analysis.final_feedback",
+}
+
+
+def _decode_json_string_list(values: list[Any]) -> list[Any]:
+    decoded = []
+    for value in values:
+        if isinstance(value, bytes):
+            value = value.decode("utf-8")
+        if isinstance(value, str):
+            decoded.append(json.loads(value))
+        else:
+            decoded.append(value)
+    return decoded
 
 
 def _decode_dataset_value(key: str, raw: Any) -> Any:
     if isinstance(raw, np.ndarray):
         if raw.dtype.kind == "S":
-            return [item.decode("utf-8") for item in raw.tolist()]
+            decoded = [item.decode("utf-8") for item in raw.tolist()]
+            if any(key.endswith(suffix) for suffix in _STRUCTURED_ARRAY_KEYS):
+                return _decode_json_string_list(decoded)
+            return decoded
         if raw.dtype.kind == "U":
-            return raw.tolist()
+            decoded = raw.tolist()
+            if any(key.endswith(suffix) for suffix in _STRUCTURED_ARRAY_KEYS):
+                return _decode_json_string_list(decoded)
+            return decoded
         if raw.dtype.kind == "O":
             decoded = []
             changed = False
@@ -57,15 +79,25 @@ def _decode_dataset_value(key: str, raw: Any) -> Any:
                     changed = True
                 else:
                     decoded.append(item)
+            if any(key.endswith(suffix) for suffix in _STRUCTURED_ARRAY_KEYS):
+                return _decode_json_string_list(decoded if changed else raw.tolist())
             return decoded if changed else raw
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8")
     if isinstance(raw, np.generic):
         raw = raw.item()
     if isinstance(raw, str):
-        if any(key.endswith(suffix) for suffix in _STRUCTURED_KEYS) or ".analysis.online_result." in key:
+        if (
+            any(key.endswith(suffix) for suffix in _STRUCTURED_KEYS)
+            or key.startswith("analysis.online_result.")
+            or key.startswith("analysis.artifact.")
+            or key.startswith("analysis.online_artifact.")
+            or ".analysis.online_result." in key
+            or ".analysis.artifact." in key
+            or ".analysis.online_artifact." in key
+        ):
             return json.loads(raw)
-        if ".analysis.online_annotation." in key:
+        if key.startswith("analysis.online_annotation.") or ".analysis.online_annotation." in key:
             return json.loads(raw)
     return raw
 
@@ -118,6 +150,28 @@ def _online_results_for_prefix(
     }
 
 
+def _analysis_artifacts_for_prefix(
+    dataset_values: dict[str, Any], prefix: str
+) -> dict[str, Any]:
+    analysis_prefix = prefix + "analysis.artifact."
+    return {
+        key[len(analysis_prefix) :]: value
+        for key, value in dataset_values.items()
+        if key.startswith(analysis_prefix)
+    }
+
+
+def _online_artifacts_for_prefix(
+    dataset_values: dict[str, Any], prefix: str
+) -> dict[str, Any]:
+    analysis_prefix = prefix + "analysis.online_artifact."
+    return {
+        key[len(analysis_prefix) :]: value
+        for key, value in dataset_values.items()
+        if key.startswith(analysis_prefix)
+    }
+
+
 def _online_annotations_for_prefix(
     dataset_values: dict[str, Any], prefix: str
 ) -> dict[str, list[dict[str, Any]]]:
@@ -127,6 +181,13 @@ def _online_annotations_for_prefix(
         for key, value in dataset_values.items()
         if key.startswith(analysis_prefix)
     }
+
+
+def _segment_final_analysis_for_prefix(
+    dataset_values: dict[str, Any], prefix: str
+) -> list["HostRuntimeSegmentFinalAnalysis"]:
+    raw_feedback = dataset_values.get(prefix + "segments.analysis.final_feedback", [])
+    return [HostRuntimeSegmentFinalAnalysis.from_dict(item) for item in raw_feedback]
 
 
 @dataclass(frozen=True)
@@ -145,6 +206,27 @@ class HostRuntimeSiteSegment:
 
 
 @dataclass(frozen=True)
+class HostRuntimeSegmentFinalAnalysis:
+    """Final analysis payload attached to one finished site segment."""
+
+    outputs: dict[str, Any]
+    artifacts: dict[str, Any]
+    annotations: list[dict[str, Any]]
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any] | str | bytes) -> "HostRuntimeSegmentFinalAnalysis":
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        return cls(
+            outputs=dict(raw.get("outputs", {})),
+            artifacts=dict(raw.get("artifacts", {})),
+            annotations=list(raw.get("annotations", [])),
+        )
+
+
+@dataclass(frozen=True)
 class HostRuntimeSiteData:
     """Offline view of one host-runtime scan site."""
 
@@ -160,10 +242,13 @@ class HostRuntimeSiteData:
     point_data: dict[str, Any]
     analysis_outputs_schema: dict[str, Any]
     analysis_outputs: dict[str, Any]
+    analysis_artifacts: dict[str, Any]
     online_analysis_schema: dict[str, Any]
     online_analysis_results: dict[str, Any]
+    online_analysis_artifacts: dict[str, Any]
     online_analysis_annotations: dict[str, list[dict[str, Any]]]
     annotations: list[dict[str, Any]]
+    segment_final_analysis: list[HostRuntimeSegmentFinalAnalysis]
     segmented: bool
     metadata: dict[str, Any]
 
@@ -240,6 +325,15 @@ class HostRuntimeSiteData:
             if segment.parent_point_index == parent_point_index
         ]
 
+    def final_analysis_for_segment(
+        self, segment_index: int
+    ) -> HostRuntimeSegmentFinalAnalysis | None:
+        """Return the persisted final analysis payload for one segment, if present."""
+
+        if 0 <= segment_index < len(self.segment_final_analysis):
+            return self.segment_final_analysis[segment_index]
+        return None
+
     def slice_point_data(
         self, start_index: int, stop_index: int
     ) -> dict[str, list[Any]]:
@@ -304,10 +398,13 @@ def read_host_runtime_snapshot(path: str | Path) -> HostRuntimeSnapshot:
             point_data=_point_keys_for_prefix(datasets, prefix),
             analysis_outputs_schema=datasets.get(prefix + "analysis.outputs", {}),
             analysis_outputs=_analysis_outputs_for_prefix(datasets, prefix),
+            analysis_artifacts=_analysis_artifacts_for_prefix(datasets, prefix),
             online_analysis_schema=datasets.get(prefix + "analysis.online", {}),
             online_analysis_results=_online_results_for_prefix(datasets, prefix),
+            online_analysis_artifacts=_online_artifacts_for_prefix(datasets, prefix),
             online_analysis_annotations=_online_annotations_for_prefix(datasets, prefix),
             annotations=datasets.get(prefix + "analysis.annotations", []),
+            segment_final_analysis=_segment_final_analysis_for_prefix(datasets, prefix),
             segmented=(prefix + "segments.start_index") in datasets,
             metadata={
                 key[len(prefix) :]: value
@@ -315,8 +412,11 @@ def read_host_runtime_snapshot(path: str | Path) -> HostRuntimeSnapshot:
                 if key.startswith(prefix)
                 and not key.startswith(prefix + "points.")
                 and not key.startswith(prefix + "analysis.output.")
+                and not key.startswith(prefix + "analysis.artifact.")
                 and not key.startswith(prefix + "analysis.online_result.")
+                and not key.startswith(prefix + "analysis.online_artifact.")
                 and not key.startswith(prefix + "analysis.online_annotation.")
+                and not key.startswith(prefix + "segments.analysis.final_feedback")
             },
         )
 

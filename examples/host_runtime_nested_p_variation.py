@@ -75,11 +75,7 @@ class LineFragment(ExpFragment):
             CustomAnalysis(
                 [self.x],
                 self._analyse_gradient,
-                [
-                    FloatChannel("m", "Extracted slope"),
-                    OpaqueChannel("fit_xs", save_by_default=False),
-                    OpaqueChannel("fit_ys", save_by_default=False),
-                ],
+                [FloatChannel("m", "Extracted slope")],
             )
         ]
 
@@ -88,18 +84,12 @@ class LineFragment(ExpFragment):
         ys = np.asarray(result_values[self.y], dtype=float)
 
         m = fit_line_through_origin(xs, ys)
-        fit_xs = np.linspace(xs.min(), xs.max(), 50)
-        fit_ys = m * fit_xs
-
         analysis_results["m"].push(m)
-        analysis_results["fit_xs"].push(fit_xs)
-        analysis_results["fit_ys"].push(fit_ys)
         return [
-            annotations.curve_1d(
-                x_axis=self.x,
-                x_values=fit_xs,
-                y_axis=self.y,
-                y_values=fit_ys,
+            annotations.computed_curve(
+                function_name="line",
+                parameters={"a": 0.0, "b": m},
+                associated_channels=[self.y],
             )
         ]
 
@@ -128,11 +118,7 @@ class ScanXFragment(ExpFragment):
             CustomAnalysis(
                 [self.line.p],
                 self._analyse_exponent,
-                [
-                    FloatChannel("fit_e", "Extracted exponent"),
-                    OpaqueChannel("fit_ps", save_by_default=False),
-                    OpaqueChannel("fit_ms", save_by_default=False),
-                ],
+                [FloatChannel("fit_e", "Extracted exponent")],
             )
         ]
 
@@ -145,9 +131,14 @@ class ScanXFragment(ExpFragment):
         fit_ms = fit_ps**fit_e
 
         analysis_results["fit_e"].push(fit_e)
-        analysis_results["fit_ps"].push(fit_ps)
-        analysis_results["fit_ms"].push(fit_ms)
-        return []
+        return [
+            annotations.curve_1d(
+                x_axis=self.line.p,
+                x_values=fit_ps,
+                y_axis=self.m,
+                y_values=fit_ms,
+            )
+        ]
 
 
 class HowDoesPVaryFragment(ExpFragment):

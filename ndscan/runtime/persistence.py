@@ -74,6 +74,11 @@ class ScanSiteDatasetWriter:
             if site.segmented
             else None
         )
+        self._segment_final_feedback_sink = (
+            self._make_json_appending_sink("segments.analysis.final_feedback")
+            if site.segmented
+            else None
+        )
 
         self._next_point_index = self._get_existing_scalar(
             ("state.num_points", "num_points"), 0
@@ -87,6 +92,12 @@ class ScanSiteDatasetWriter:
             self._get_existing_scalar(("state.current_segment", "current_segment"), -1)
             if site.segmented
             else -1
+        )
+        self._last_finished_segment = None
+        self._segment_feedback_count = (
+            len(self._get_existing_array("segments.analysis.final_feedback"))
+            if site.segmented
+            else 0
         )
 
     def publish_metadata(
@@ -178,6 +189,7 @@ class ScanSiteDatasetWriter:
 
         if not self._site.segmented:
             return
+        self._last_finished_segment = self._current_segment
         self._current_segment = -1
         self._current_segment_sink.push(-1)
 
@@ -233,6 +245,50 @@ class ScanSiteDatasetWriter:
             self._analysis_result_sinks[key] = sink
         sink.push(value)
 
+    def set_analysis_artifact(self, key: str, value: Any) -> None:
+        """Publish the latest final-analysis artifact for one site."""
+
+        self._push_scalar("analysis.artifact." + key, value)
+
+    def append_segment_final_feedback(
+        self,
+        *,
+        outputs: Mapping[str, Any],
+        artifacts: Mapping[str, Any],
+        annotations: Sequence[dict[str, Any]],
+    ) -> None:
+        """Append one finished segment's final analysis payload.
+
+        Segmented child sites reuse one site prefix across many parent-point launches.
+        Keeping one final ``AnalysisFeedback`` payload per segment preserves the
+        historical child fit/annotation state so a viewer can later show the correct
+        overlay for an older selected parent point.
+        """
+
+        if self._segment_final_feedback_sink is None:
+            return
+
+        target_segment = (
+            self._current_segment
+            if self._current_segment != -1
+            else self._last_finished_segment
+        )
+        if target_segment is None:
+            return
+        if target_segment != self._segment_feedback_count:
+            raise RuntimeError(
+                "Segment final analysis feedback is out of sync with segment order"
+            )
+
+        self._segment_final_feedback_sink.push(
+            {
+                "outputs": dict(outputs),
+                "artifacts": dict(artifacts),
+                "annotations": list(annotations),
+            }
+        )
+        self._segment_feedback_count += 1
+
     def set_online_analysis_result(self, key: str, value: Any) -> None:
         """Publish the latest value for one online analysis.
 
@@ -242,6 +298,11 @@ class ScanSiteDatasetWriter:
         """
 
         self._push_scalar("analysis.online_result." + key, value)
+
+    def set_online_analysis_artifact(self, key: str, value: Any) -> None:
+        """Publish the latest artifacts for one online analysis."""
+
+        self._push_scalar("analysis.online_artifact." + key, value)
 
     def set_online_analysis_annotations(
         self, key: str, annotations: list[dict[str, Any]]
@@ -286,6 +347,16 @@ class ScanSiteDatasetWriter:
         existing = self._get_existing_array(relative_key)
         if existing:
             sink.last_value = existing[-1]
+        return sink
+
+    def _make_json_appending_sink(self, relative_key: str) -> AppendingDatasetSink:
+        sink = self._make_appending_sink(relative_key)
+        original_push = sink.push
+
+        def push_json(value: Any) -> None:
+            original_push(dump_json(value))
+
+        sink.push = push_json  # type: ignore[method-assign]
         return sink
 
     def _get_existing_array(self, relative_keys: str | tuple[str, ...]) -> list[Any]:

@@ -18,7 +18,7 @@ __all__ = [
 
 # The legacy runtime still writes schema revision 2. The prepared-runtime scan-site
 # schema has diverged enough that readers should be able to distinguish it explicitly.
-SCAN_SITE_SCHEMA_REVISION = 4
+SCAN_SITE_SCHEMA_REVISION = 5
 
 
 @dataclass(frozen=True)
