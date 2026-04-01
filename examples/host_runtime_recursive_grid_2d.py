@@ -42,8 +42,8 @@ HostRuntimeRecursiveGrid2D = make_fragment_prepared_scan_exp(
         axes=(fragment.x, fragment.y),
         point_policy=ProductPointPolicy(
             [
-                RecursiveMidpointPointPolicy1D(-2.0, 2.0, max_depth=2),
-                RecursiveMidpointPointPolicy1D(-3.0, 1.0, max_depth=2),
+                RecursiveMidpointPointPolicy1D(-2.0, 2.0, max_depth=5),
+                RecursiveMidpointPointPolicy1D(-3.0, 1.0, max_depth=4),
             ]
         ),
         execution_policy=ExecutionPolicy(max_points_per_batch=8),

@@ -367,19 +367,26 @@ class HostScanNuboBackendSpec:
 class HostScanGridModeSpec:
     """Cartesian/zipped grid mode."""
 
+    randomise_order_globally: bool = False
     type: ClassVar[str] = "grid"
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any], *, name: str) -> "HostScanGridModeSpec":
         mapping = _schema_mapping(data, name)
-        _reject_unknown_keys(mapping, allowed={"type"}, name=name)
+        _reject_unknown_keys(mapping, allowed={"type", "randomise_order_globally"}, name=name)
         mode_type = _schema_string(mapping, "type")
         if mode_type != cls.type:
             raise HostScanSchemaError(f"{name}.type must be {cls.type!r}, got {mode_type!r}")
-        return cls()
+        randomise_order_globally = mapping.get("randomise_order_globally", False)
+        if not isinstance(randomise_order_globally, bool):
+            raise HostScanSchemaError(f"{name}.randomise_order_globally must be a boolean")
+        return cls(randomise_order_globally=randomise_order_globally)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"type": self.type}
+        data = {"type": self.type}
+        if self.randomise_order_globally:
+            data["randomise_order_globally"] = True
+        return data
 
     def validate(self, *, name: str) -> None:
         del name
@@ -750,6 +757,7 @@ def compile_host_scan_spec(
     if isinstance(spec.mode, HostScanGridModeSpec):
         return _compile_grid_schema_request(
             compiled_entries,
+            spec.mode,
             metadata=spec.metadata,
             execution_policy=execution_policy,
         )
@@ -1070,6 +1078,7 @@ def _attach_rebind_mapping(
 
 def _compile_grid_schema_request(
     compiled_entries: Sequence[_CompiledSchemaEntry],
+    mode: HostScanGridModeSpec,
     *,
     metadata: Mapping[str, Any],
     execution_policy: "ExecutionPolicy",
@@ -1121,17 +1130,18 @@ def _compile_grid_schema_request(
     else:
         point_policy = ProductPointPolicy(child_policies)
 
-    return (
-        ScanRequest(
-            axes=axes,
-            point_policy=point_policy,
-            metadata=metadata,
-            execution_policy=execution_policy,
-            parameter_mappings=parameter_mappings,
-            fixed_pseudoparams=fixed_pseudoparams,
-        ),
-        overrides,
+    request = ScanRequest(
+        axes=axes,
+        point_policy=point_policy,
+        metadata=metadata,
+        execution_policy=execution_policy,
+        parameter_mappings=parameter_mappings,
+        fixed_pseudoparams=fixed_pseudoparams,
     )
+    if mode.randomise_order_globally:
+        request = request.with_global_randomisation(random_seed=random.getrandbits(32))
+
+    return (request, overrides)
 
 
 def _compile_group_point_policy(

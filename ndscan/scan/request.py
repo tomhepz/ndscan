@@ -24,6 +24,7 @@ from .point_policy import (
     CartesianPointPolicy,
     ExplicitPointPolicy,
     PointPolicy,
+    ShuffledPointPolicy,
     SinglePointPolicy,
     ZipPointPolicy,
 )
@@ -122,6 +123,19 @@ class ScanRequest:
             fixed_pseudoparams=self.fixed_pseudoparams,
         )
 
+    def with_global_randomisation(
+        self, *, random_seed: int | None = None
+    ) -> "ScanRequest":
+        return ScanRequest(
+            axes=self.axes,
+            point_policy=ShuffledPointPolicy(self.point_policy, random_seed=random_seed),
+            site=self.site,
+            metadata=self.metadata,
+            execution_policy=self.execution_policy,
+            parameter_mappings=self.parameter_mappings,
+            fixed_pseudoparams=self.fixed_pseudoparams,
+        )
+
     @classmethod
     def single(
         cls,
@@ -129,8 +143,10 @@ class ScanRequest:
         site: ScanSite | None = None,
         metadata: Mapping[str, Any] | None = None,
         execution_policy: ExecutionPolicy | None = None,
+        randomise_order_globally: bool = False,
+        random_seed: int | None = None,
     ) -> "ScanRequest":
-        return cls(
+        request = cls(
             axes=(),
             point_policy=SinglePointPolicy(),
             site=ScanSite() if site is None else site,
@@ -139,6 +155,9 @@ class ScanRequest:
             if execution_policy is None
             else execution_policy,
         )
+        if randomise_order_globally:
+            return request.with_global_randomisation(random_seed=random_seed)
+        return request
 
     @classmethod
     def linear(
@@ -151,6 +170,8 @@ class ScanRequest:
         site: ScanSite | None = None,
         metadata: Mapping[str, Any] | None = None,
         execution_policy: ExecutionPolicy | None = None,
+        randomise_order_globally: bool = False,
+        random_seed: int | None = None,
     ) -> "ScanRequest":
         if num_points < 2:
             raise ValueError("linear scans require at least 2 points")
@@ -160,6 +181,8 @@ class ScanRequest:
             site=site,
             metadata=metadata,
             execution_policy=execution_policy,
+            randomise_order_globally=randomise_order_globally,
+            random_seed=random_seed,
         )
 
     @classmethod
@@ -170,8 +193,10 @@ class ScanRequest:
         site: ScanSite | None = None,
         metadata: Mapping[str, Any] | None = None,
         execution_policy: ExecutionPolicy | None = None,
+        randomise_order_globally: bool = False,
+        random_seed: int | None = None,
     ) -> "ScanRequest":
-        return cls(
+        request = cls(
             axes=tuple(handle for handle, _ in axes),
             point_policy=CartesianPointPolicy([values for _, values in axes]),
             site=ScanSite() if site is None else site,
@@ -180,6 +205,9 @@ class ScanRequest:
             if execution_policy is None
             else execution_policy,
         )
+        if randomise_order_globally:
+            return request.with_global_randomisation(random_seed=random_seed)
+        return request
 
     @classmethod
     def zipped(
@@ -189,8 +217,10 @@ class ScanRequest:
         site: ScanSite | None = None,
         metadata: Mapping[str, Any] | None = None,
         execution_policy: ExecutionPolicy | None = None,
+        randomise_order_globally: bool = False,
+        random_seed: int | None = None,
     ) -> "ScanRequest":
-        return cls(
+        request = cls(
             axes=tuple(handle for handle, _ in axes),
             point_policy=ZipPointPolicy([values for _, values in axes]),
             site=ScanSite() if site is None else site,
@@ -199,6 +229,9 @@ class ScanRequest:
             if execution_policy is None
             else execution_policy,
         )
+        if randomise_order_globally:
+            return request.with_global_randomisation(random_seed=random_seed)
+        return request
 
     @classmethod
     def explicit(
@@ -209,8 +242,10 @@ class ScanRequest:
         site: ScanSite | None = None,
         metadata: Mapping[str, Any] | None = None,
         execution_policy: ExecutionPolicy | None = None,
+        randomise_order_globally: bool = False,
+        random_seed: int | None = None,
     ) -> "ScanRequest":
-        return cls(
+        request = cls(
             axes=tuple(axes),
             point_policy=ExplicitPointPolicy(len(axes), points),
             site=ScanSite() if site is None else site,
@@ -219,3 +254,6 @@ class ScanRequest:
             if execution_policy is None
             else execution_policy,
         )
+        if randomise_order_globally:
+            return request.with_global_randomisation(random_seed=random_seed)
+        return request

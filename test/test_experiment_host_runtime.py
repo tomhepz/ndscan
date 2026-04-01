@@ -11,9 +11,11 @@ import numpy as np
 import ndscan.experiment as experiment_facade
 from artiq.experiment import kernel
 from artiq.language.core import TerminationRequested
+from examples.host_runtime_grouped_line_family import HostRuntimeGroupedLineFamily
 from examples.host_runtime_prepared_root_linear_scan import (
     HostRuntimePreparedRootLinearScan,
 )
+from examples.host_runtime_rabi_flop_2d import HostRuntimeRabiFlop2D
 from mock_environment import HasEnvironmentCase
 from sipyco import pyon
 
@@ -44,6 +46,7 @@ from ndscan.scan.point_policy import (
     ProductPointPolicy,
     RecursiveMidpointPointPolicy1D,
     RepeatPointPolicy,
+    ShuffledPointPolicy,
     SinglePointPolicy,
     UntilConditionPointPolicy,
     ZipPointPolicy,
@@ -57,6 +60,8 @@ from ndscan.submission.host_scan_schema import (
 )
 from ndscan.utils import PARAMS_ARG_KEY
 from ndscan.utils import FIT_OBJECTS
+
+_REAL_NP_LINSPACE = np.linspace
 
 
 def _execute_and_inspect(scan):
@@ -117,6 +122,16 @@ class PointPolicyTest(unittest.TestCase):
             [(4, 14)],
         )
         self.assertTrue(source.is_finished())
+
+    def test_shuffled_point_policy_randomises_materialised_order_deterministically(self):
+        source = ShuffledPointPolicy(
+            CartesianPointPolicy([[0, 1], [10, 20]]),
+            random_seed=123,
+        )
+        self.assertEqual(
+            [point.axis_values for point in source],
+            [(1, 10), (1, 20), (0, 20), (0, 10)],
+        )
 
     def test_concat_point_policy_runs_children_in_sequence(self):
         source = ConcatPointPolicy(
@@ -538,6 +553,56 @@ class HostScanSchemaCompilationTest(HasEnvironmentCase):
         self.assertEqual(
             request.parameter_mappings[0].expression,
             "logical_drive + offset",
+        )
+
+    @patch("ndscan.submission.host_scan_schema.random.getrandbits", return_value=123)
+    def test_compile_grid_schema_can_randomise_order_globally(self, _seed):
+        fragment = self.create(GridSchemaFragment, [])
+        request, overrides = compile_host_scan_schema(
+            fragment,
+            {
+                "version": 1,
+                "mode": {"type": "grid", "randomise_order_globally": True},
+                "entries": [
+                    {
+                        "id": "x",
+                        "kind": "param",
+                        "target": {"fqn": fragment.x.parameter.fqn, "path": "*"},
+                        "mode": {
+                            "type": "scan",
+                            "generator": {
+                                "type": "list",
+                                "range": {
+                                    "values": [0.0, 1.0],
+                                    "randomise_order": False,
+                                },
+                            },
+                        },
+                    },
+                    {
+                        "id": "y",
+                        "kind": "param",
+                        "target": {"fqn": fragment.y.parameter.fqn, "path": "*"},
+                        "mode": {
+                            "type": "scan",
+                            "generator": {
+                                "type": "list",
+                                "range": {
+                                    "values": [10.0, 20.0],
+                                    "randomise_order": False,
+                                },
+                            },
+                        },
+                    },
+                ],
+                "execution": {},
+            },
+        )
+
+        self.assertEqual(overrides, {})
+        self.assertEqual(
+            [point.axis_values for point in request.point_policy],
+            [(1.0, 10.0), (1.0, 20.0), (0.0, 20.0), (0.0, 10.0)],
         )
 
     def test_make_fragment_prepared_scan_exp_accepts_compiled_schema_tuple(self):
@@ -2346,6 +2411,45 @@ class HostRuntimeCase(HasEnvironmentCase):
         self.assertAlmostEqual(self.d(prefix, "analysis.output.m"), 2.0, places=6)
         self.assertEqual(exp.scan.get_outputs(), (2.0,))
         self.assertAlmostEqual(exp.fit_slope, 2.0, places=6)
+
+    @patch("examples.host_runtime_grouped_line_family.time.sleep", return_value=None)
+    def test_grouped_line_family_example_runs(self, _sleep):
+        exp = self.create(HostRuntimeGroupedLineFamily)
+        exp.prepare()
+        exp.run()
+
+        prefix = "ndscan.rid_0.site.root."
+        self.assertEqual(len(self.d(prefix, "points.param_0")), 36 * 5)
+        self.assertEqual(len(self.d(prefix, "points.param_1")), 36 * 5)
+        self.assertEqual(len(self.d(prefix, "points.channel_0")), 36 * 5)
+        self.assertEqual(
+            sorted(set(self.d(prefix, "points.param_1"))),
+            [-2.0, -1.0, 0.0, 1.0, 2.0],
+        )
+
+    @patch("examples.host_runtime_rabi_flop_2d.np.linspace")
+    @patch("examples.host_runtime_rabi_flop_2d.time.sleep", return_value=None)
+    def test_prepared_rabi_flop_2d_example_runs(self, _sleep, mock_linspace):
+        def _small_linspace(start, stop, num, *args, **kwargs):
+            if (float(start), float(stop), int(num)) == (0.2, 1.8, 90):
+                return _REAL_NP_LINSPACE(start, stop, 4, *args, **kwargs)
+            if (float(start), float(stop), int(num)) == (0.0, 2.5, 130):
+                return _REAL_NP_LINSPACE(start, stop, 5, *args, **kwargs)
+            return _REAL_NP_LINSPACE(start, stop, num, *args, **kwargs)
+
+        mock_linspace.side_effect = _small_linspace
+
+        exp = self.create(HostRuntimeRabiFlop2D)
+        exp.prepare()
+        exp.run()
+
+        prefix = "ndscan.rid_0.site.root."
+        self.assertEqual(len(self.d(prefix, "points.param_0")), 4 * 5)
+        self.assertEqual(len(self.d(prefix, "points.param_1")), 4 * 5)
+        self.assertEqual(len(self.d(prefix, "points.channel_1")), 4 * 5)
+        self.assertTrue(
+            all(0.0 <= value <= 1.0 for value in self.d(prefix, "points.channel_1"))
+        )
 
     def test_code_defined_prepared_scan_experiment_does_not_publish_ndscan_arguments(self):
         HostAddOneScan = make_fragment_prepared_scan_exp(

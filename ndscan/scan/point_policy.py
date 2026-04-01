@@ -17,6 +17,7 @@ future optimiser backends need a slightly richer contract:
 
 from __future__ import annotations
 
+import random
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -36,6 +37,7 @@ __all__ = [
     "CartesianPointPolicy",
     "ZipPointPolicy",
     "ExplicitPointPolicy",
+    "ShuffledPointPolicy",
     "ConcatPointPolicy",
     "ProductPointPolicy",
     "RecursiveMidpointPointPolicy1D",
@@ -203,6 +205,10 @@ class PointPolicy:
         """Return a small serialisable description of the point strategy."""
         raise NotImplementedError
 
+    def materialise_points(self) -> list[tuple[Any, ...]]:
+        """Return all points up front if this policy is fully materialisable."""
+        raise TypeError(f"{type(self).__name__} cannot be materialised up front")
+
 
 class AskTellOptimiserPointPolicy(PointPolicy):
     """Wrap an ask/tell optimiser backend as a host-runtime point policy.
@@ -351,6 +357,9 @@ class _FinitePointPolicy(PointPolicy):
     def is_finished(self) -> bool:
         return self._next_index >= len(self._points)
 
+    def materialise_points(self) -> list[tuple[Any, ...]]:
+        return list(self._points)
+
 
 class SinglePointPolicy(_FinitePointPolicy):
     """Point policy for a single empty point.
@@ -418,6 +427,27 @@ class ExplicitPointPolicy(_FinitePointPolicy):
             "axis_count": self.axis_count,
             "num_points": len(self._explicit_points),
         }
+
+
+class ShuffledPointPolicy(_FinitePointPolicy):
+    """Globally randomise the order of a fully materialisable point policy."""
+
+    def __init__(self, inner: PointPolicy, *, random_seed: int | None = None):
+        self._inner = inner
+        self._random_seed = random_seed
+        points = inner.materialise_points()
+        random.Random(random_seed).shuffle(points)
+        super().__init__(inner.axis_count, points)
+
+    def describe(self) -> dict[str, Any]:
+        description = {
+            "kind": "shuffled",
+            "axis_count": self.axis_count,
+            "inner": self._inner.describe(),
+        }
+        if self._random_seed is not None:
+            description["random_seed"] = self._random_seed
+        return description
 
 
 class ConcatPointPolicy(PointPolicy):
@@ -531,6 +561,12 @@ class ConcatPointPolicy(PointPolicy):
             "axis_count": self.axis_count,
             "children": [source.describe() for source in self._sources],
         }
+
+    def materialise_points(self) -> list[tuple[Any, ...]]:
+        points = []
+        for source in self._sources:
+            points.extend(source.materialise_points())
+        return points
 
 
 class ProductPointPolicy(_FinitePointPolicy):
@@ -733,6 +769,16 @@ class RepeatPointPolicy(PointPolicy):
         if self._stop_predicate is not None:
             description["predicate"] = self._predicate_description
         return description
+
+    def materialise_points(self) -> list[tuple[Any, ...]]:
+        if self._stop_predicate is not None or self._max_repeats is None:
+            raise TypeError(
+                "RepeatPointPolicy can only be materialised when it has a fixed repeat count"
+            )
+        points = []
+        for point in self._inner.materialise_points():
+            points.extend([point] * self._max_repeats)
+        return points
 
     def _current_point_is_complete(self, feedback: BatchFeedback) -> bool:
         if self._current_repeats < self._min_repeats:

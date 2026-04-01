@@ -3,38 +3,28 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable
-from typing import Any
 
 import pyqtgraph
 from artiq.applets.simple import SimpleApplet
 from sipyco import common_args
 
-from ._qt import QtWidgets
 from .plots.runtime import RuntimePlotViewer
 
 
 class _MainWidget(RuntimePlotViewer):
+    """Top-level window used by the prepared-runtime applet."""
+
     def __init__(self, args, ctl):
         common_args.init_logger_from_args(args)
-        super().__init__(args.prefix, ctl.set_dataset)
+        del ctl
+        super().__init__(args.prefix)
         self.resize(1600, 900)
         self.setWindowTitle("ndscan prepared-runtime plot")
 
-    def close(self):
-        QtWidgets.QWidget.close(self)
-
-    def data_changed(
-        self,
-        values: dict[str, Any],
-        metadata: dict[str, Any],
-        persist: dict[str, bool],
-        mods: Iterable[dict[str, Any]],
-    ):
-        super().data_changed(values, metadata, persist, mods)
-
 
 class NdscanRuntimeApplet(SimpleApplet):
+    """SimpleApplet wrapper that subscribes to one prepared-runtime dataset subtree."""
+
     def __init__(self):
         super().__init__(
             _MainWidget,
@@ -62,6 +52,7 @@ class NdscanRuntimeApplet(SimpleApplet):
 
 
 def main():
+    """Run the prepared-runtime live plot applet."""
     pyqtgraph.setConfigOptions(antialias=True)
     NdscanRuntimeApplet().run()
 

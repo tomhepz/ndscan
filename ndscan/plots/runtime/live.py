@@ -27,6 +27,12 @@ _STRUCTURED_KEYS = {
 
 
 def _decode_live_value(key: str, raw: Any) -> Any:
+    """Convert raw applet dataset values into plain Python objects.
+
+    Live applet updates can arrive as NumPy scalars/arrays, byte strings, or JSON-encoded
+    structured payloads. The snapshot builder works with normal Python containers, so
+    this function normalises the common ARTIQ transport forms in one place.
+    """
     if isinstance(raw, np.ndarray):
         if raw.dtype.kind == "S":
             return [item.decode("utf-8") for item in raw.tolist()]
@@ -66,6 +72,7 @@ def _decode_live_value(key: str, raw: Any) -> Any:
 
 
 def _find_site_prefixes(dataset_values: dict[str, Any]) -> list[str]:
+    """Return site prefixes in parent-before-child order."""
     suffix = "site.path"
     prefixes = [
         key[: -len(suffix)]
@@ -76,6 +83,7 @@ def _find_site_prefixes(dataset_values: dict[str, Any]) -> list[str]:
 
 
 def _point_keys_for_prefix(dataset_values: dict[str, Any], prefix: str) -> dict[str, Any]:
+    """Extract one site's point streams from the live dataset mapping."""
     point_prefix = prefix + "points."
     return {
         key[len(point_prefix) :]: value
@@ -87,6 +95,7 @@ def _point_keys_for_prefix(dataset_values: dict[str, Any], prefix: str) -> dict[
 def _analysis_outputs_for_prefix(
     dataset_values: dict[str, Any], prefix: str
 ) -> dict[str, Any]:
+    """Extract final analysis outputs for one site prefix."""
     analysis_prefix = prefix + "analysis.output."
     return {
         key[len(analysis_prefix) :]: value
@@ -98,6 +107,7 @@ def _analysis_outputs_for_prefix(
 def _online_results_for_prefix(
     dataset_values: dict[str, Any], prefix: str
 ) -> dict[str, Any]:
+    """Extract live online-analysis scalar outputs for one site prefix."""
     analysis_prefix = prefix + "analysis.online_result."
     return {
         key[len(analysis_prefix) :]: value
@@ -109,6 +119,7 @@ def _online_results_for_prefix(
 def _online_annotations_for_prefix(
     dataset_values: dict[str, Any], prefix: str
 ) -> dict[str, list[dict[str, Any]]]:
+    """Extract live online-analysis annotations for one site prefix."""
     analysis_prefix = prefix + "analysis.online_annotation."
     return {
         key[len(analysis_prefix) :]: value
@@ -120,6 +131,12 @@ def _online_annotations_for_prefix(
 def snapshot_from_live_values(
     prefix: str, values: dict[str, Any]
 ) -> HostRuntimeSnapshot:
+    """Reconstruct a runtime site-tree snapshot from a live applet dataset view.
+
+    The applet receives a flat dataset mapping keyed by full dataset name. This function
+    filters that mapping to one prepared-runtime subtree, decodes the structured payloads,
+    and rebuilds the same site-tree shape used by the offline results reader.
+    """
     datasets = {
         key[len(prefix) :]: _decode_live_value(key[len(prefix) :], value)
         for key, value in values.items()
@@ -166,4 +183,3 @@ def snapshot_from_live_values(
         top_level_metadata={},
         sites=sites,
     )
-
