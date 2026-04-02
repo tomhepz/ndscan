@@ -207,6 +207,9 @@ def curve_1d(
     x_values: list[float] | np.ndarray | AnnotationValueRef,
     y_axis: ResultChannel,
     y_values: list[float] | np.ndarray | AnnotationValueRef,
+    *,
+    x_indices: list[int] | tuple[int, ...] | None = None,
+    y_indices: list[int] | tuple[int, ...] | None = None,
 ) -> Annotation:
     """Create a curve annotation from explicit lists of x and y coordinates.
 
@@ -225,9 +228,22 @@ def curve_1d(
     :param y_axis: The result channel corresponding to the y axis of the curve.
     :param y_values: A list of y coordinates for the curve points.
 
+    :param x_indices: Optional fixed indices selecting one scalar slice if ``x_axis``
+        refers to an array-valued channel.
+    :param y_indices: Optional fixed indices selecting one scalar slice if ``y_axis``
+        refers to an array-valued channel.
     :return: The :class:`Annotation` object describing the curve.
     """
-    return curve({x_axis: x_values, y_axis: y_values})
+    parameters = {}
+    if x_indices is not None:
+        parameters["x_indices"] = [int(index) for index in x_indices]
+    if y_indices is not None:
+        parameters["y_indices"] = [int(index) for index in y_indices]
+    return Annotation(
+        "curve",
+        coordinates={x_axis: x_values, y_axis: y_values},
+        parameters=parameters,
+    )
 
 
 def computed_curve(
@@ -282,6 +298,8 @@ def artifact_curve(
     x_axis: ParamHandle,
     y_axis: ResultChannel,
     associated_channels: list | None = None,
+    x_indices: list[int] | tuple[int, ...] | None = None,
+    y_indices: list[int] | tuple[int, ...] | None = None,
 ) -> Annotation:
     """Create a curve annotation backed by a named analysis artifact.
 
@@ -295,6 +313,10 @@ def artifact_curve(
     :param y_axis: Result channel corresponding to the y axis for plotting.
     :param associated_channels: Optional explicit channel association, following the
         same convention as :func:`computed_curve`.
+    :param x_indices: Optional fixed indices selecting one scalar slice if ``x_axis``
+        refers to an array-valued channel.
+    :param y_indices: Optional fixed indices selecting one scalar slice if ``y_axis``
+        refers to an array-valued channel.
     """
 
     params = {
@@ -304,6 +326,10 @@ def artifact_curve(
     }
     if associated_channels:
         params["associated_channels"] = associated_channels
+    if x_indices is not None:
+        params["x_indices"] = [int(index) for index in x_indices]
+    if y_indices is not None:
+        params["y_indices"] = [int(index) for index in y_indices]
     return Annotation("artifact_curve", parameters=params)
 
 
@@ -314,6 +340,7 @@ def artifact_location(
     parameter: str,
     error_parameter: str | None = None,
     associated_channels: list | None = None,
+    axis_indices: list[int] | tuple[int, ...] | None = None,
 ) -> Annotation:
     """Create a location annotation backed by a named analysis artifact.
 
@@ -328,6 +355,8 @@ def artifact_location(
         error. If omitted, viewers may use the ``stderr`` attached to ``parameter``.
     :param associated_channels: Optional explicit channel association, following the
         same convention as :func:`axis_location`.
+    :param axis_indices: Optional fixed indices selecting one scalar slice if ``axis``
+        refers to an array-valued channel.
     """
 
     params = {
@@ -339,6 +368,8 @@ def artifact_location(
         params["error_parameter"] = error_parameter
     if associated_channels:
         params["associated_channels"] = associated_channels
+    if axis_indices is not None:
+        params["axis_indices"] = [int(index) for index in axis_indices]
     return Annotation("artifact_location", parameters=params)
 
 
@@ -347,6 +378,7 @@ def axis_location(
     position: Any | AnnotationValueRef,
     position_error: float | AnnotationValueRef | None = None,
     associated_channels: list | None = None,
+    axis_indices: list[int] | tuple[int, ...] | None = None,
 ) -> Annotation:
     """Create an annotation marking a specific location on the given axis.
 
@@ -366,12 +398,16 @@ def axis_location(
         explicitly specifying this to avoid unexpected behaviour if e.g. additional
         result channels with different logical meanings (units, etc.) are added to the
         experiment later.
+    :param axis_indices: Optional fixed indices selecting one scalar slice if ``axis``
+        refers to an array-valued channel.
 
     :return: The :class:`Annotation` object describing the curve.
     """
     parameters = {}
     if associated_channels:
         parameters["associated_channels"] = associated_channels
+    if axis_indices is not None:
+        parameters["axis_indices"] = [int(index) for index in axis_indices]
     data = {}
     if position_error is not None:
         data[AxisAssociatedKeyRef(axis, "error")] = position_error

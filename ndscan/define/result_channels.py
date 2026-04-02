@@ -4,6 +4,8 @@ Result handling building blocks.
 
 from typing import Any
 
+import numpy as np
+
 import artiq.language.units
 from artiq.language import HasEnvironment, kernel, portable, rpc
 
@@ -21,6 +23,7 @@ __all__ = [
     "NumericChannel",
     "FloatChannel",
     "IntChannel",
+    "ArrayChannel",
     "OpaqueChannel",
 ]
 
@@ -393,6 +396,106 @@ class IntChannel(NumericChannel):
 
     def _coerce_to_type(self, value):
         return int(value)
+
+
+class ArrayChannel(ResultChannel):
+    """Fixed-shape numeric array results.
+
+    ``ArrayChannel`` is the structured counterpart to ``OpaqueChannel`` for channels
+    whose payload is a numeric array with a known constant shape for every point. The
+    runtime can persist these arrays directly, and viewers can later expose individual
+    scalar slices or simple line families without forcing experiments to flatten the
+    data into many separate scalar channels.
+
+    :param element_type: Numeric element type, currently ``"float"`` or ``"int"``.
+    :param shape: Constant array shape for each pushed value.
+    :param dim_names: Optional names for each array dimension, used by plotting UIs.
+    :param min: Optional lower limit for plotted scalar elements.
+    :param max: Optional upper limit for plotted scalar elements.
+    :param unit: Optional display unit for plotted scalar elements.
+    :param scale: Optional unit scaling, mirroring :class:`NumericChannel`.
+    """
+
+    def __init__(
+        self,
+        path: str,
+        description: str = "",
+        display_hints: dict[str, Any] | None = None,
+        save_by_default: bool = True,
+        *,
+        element_type: str = "float",
+        shape: tuple[int, ...] | list[int],
+        dim_names: tuple[str, ...] | list[str] | None = None,
+        min=None,
+        max=None,
+        unit: str = "",
+        scale=None,
+    ):
+        super().__init__(path, description, display_hints, save_by_default)
+        if element_type not in {"float", "int"}:
+            raise ValueError(
+                "ArrayChannel element_type must be 'float' or 'int', "
+                f"not {element_type!r}"
+            )
+        shape_tuple = tuple(int(size) for size in shape)
+        if not shape_tuple or any(size <= 0 for size in shape_tuple):
+            raise ValueError(
+                "ArrayChannel shape must contain one or more positive dimensions"
+            )
+        if dim_names is None:
+            dim_names_tuple = tuple(f"dim{index}" for index in range(len(shape_tuple)))
+        else:
+            dim_names_tuple = tuple(str(name) for name in dim_names)
+            if len(dim_names_tuple) != len(shape_tuple):
+                raise ValueError(
+                    "ArrayChannel dim_names length must match shape length"
+                )
+
+        if scale is None:
+            if unit == "":
+                scale = 1.0
+            else:
+                try:
+                    scale = getattr(artiq.language.units, unit)
+                except AttributeError:
+                    raise KeyError(
+                        "Unit {} is unknown, you must specify "
+                        "the scale manually".format(unit)
+                    )
+
+        self.element_type = element_type
+        self.shape = shape_tuple
+        self.dim_names = dim_names_tuple
+        self.min = min
+        self.max = max
+        self.unit = unit
+        self.scale = scale
+
+    def _get_type_string(self):
+        return "array"
+
+    def _coerce_to_type(self, value):
+        dtype = float if self.element_type == "float" else int
+        array = np.asarray(value, dtype=dtype)
+        if array.shape != self.shape:
+            raise ValueError(
+                f"Expected array with shape {self.shape}, got {tuple(array.shape)}"
+            )
+        return array
+
+    def describe(self) -> dict[str, Any]:
+        result = super().describe()
+        result["element_type"] = self.element_type
+        result["shape"] = list(self.shape)
+        result["dim_names"] = list(self.dim_names)
+        result["scale"] = self.scale
+        if self.min is not None:
+            result["min"] = self.min
+        if self.max is not None:
+            result["max"] = self.max
+        if self.unit is not None:
+            result["unit"] = self.unit
+        return result
 
 
 class OpaqueChannel(ResultChannel):

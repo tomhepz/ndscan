@@ -18,6 +18,7 @@ The code is organised in three layers:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import textwrap
 from typing import Any
 
 import numpy as np
@@ -41,6 +42,7 @@ from .live import snapshot_from_live_values
 
 _POINT_INDEX_KEY = "__point_index__"
 _NO_GROUP_KEY = "__no_group__"
+_ARRAY_SERIES_GROUP_KEY = "__array_series_group__"
 _NO_FIT_MODEL_KEY = "__no_fit_model__"
 _REPEAT_COMBINE_NONE = "none"
 _REPEAT_COMBINE_STD = "mean_std"
@@ -61,8 +63,10 @@ _REPEAT_COMBINE_CHOICES = (
     (_REPEAT_COMBINE_STD, "mean ± std"),
     (_REPEAT_COMBINE_SEM, "mean ± sem"),
 )
+_ARRAY_INDEX_ALL = "all"
 
 _COLORBAR_PIXMAP_CACHE: QtGui.QPixmap | None = None
+_DisplayPointKey = tuple[Any, ...]
 
 
 @dataclass(frozen=True)
@@ -123,6 +127,20 @@ class _Aggregated1DSeries:
 
 
 @dataclass(frozen=True)
+class _DisplayedPointSelection:
+    """One visible plot marker selected by the user.
+
+    ``source_index`` is the underlying logical scan point used for drilldown into child
+    sites. ``display_key`` identifies the exact visible marker inside the current plot,
+    which matters when one source point fans out into multiple plotted markers (for
+    example array-channel ``all`` selections).
+    """
+
+    source_index: int
+    display_key: _DisplayPointKey
+
+
+@dataclass(frozen=True)
 class _Rendered1DView:
     """1D data currently displayed by one column widget.
 
@@ -133,12 +151,95 @@ class _Rendered1DView:
 
     display_x: np.ndarray
     display_y: np.ndarray
+    display_point_keys: list[_DisplayPointKey]
     display_source_indices: list[int]
+    display_group_values: np.ndarray | None
     raw_x: np.ndarray
     raw_y: np.ndarray
+    raw_point_keys: list[_DisplayPointKey]
     raw_source_indices: list[int]
     raw_group_values: np.ndarray | None
     repeats_aggregated: bool
+
+
+@dataclass(frozen=True)
+class _PreparedPlotArrays:
+    """Numeric plot payload for one site after axis selection and masking."""
+
+    plot_mode: str
+    x_key: str
+    y_key: str
+    group_key: str | None
+    z_key: str | None
+    x: np.ndarray
+    y: np.ndarray
+    y_error: np.ndarray | None
+    point_keys: list[_DisplayPointKey]
+    source_indices: list[int]
+    group_values: np.ndarray | None
+    group_label_map: dict[float, str] | None
+    group_label_name: str | None
+    array_series_label_map: dict[float, str] | None
+    array_series_label_name: str | None
+    z: np.ndarray | None
+
+
+@dataclass
+class _SiteUiState:
+    """Viewer-side UI state for one site path."""
+
+    selected_point_index: int | None = None
+    selected_display_point_key: _DisplayPointKey | None = None
+    selected_child_path: tuple[str, ...] | None = None
+    plot_mode: str | None = None
+    x_key: str | None = None
+    x_index_tokens: tuple[str, ...] | None = None
+    y_key: str | None = None
+    y_index_tokens: tuple[str, ...] | None = None
+    z_key: str | None = None
+    z_index_tokens: tuple[str, ...] | None = None
+    group_key: str | None = None
+    show_lines: bool = False
+    repeat_combine_mode: str | None = None
+    series_states: tuple[_SeriesUiState, ...] | None = None
+
+
+@dataclass(frozen=True)
+class _SeriesUiState:
+    """One plotted dependent-series row in the 1D viewer."""
+
+    y_key: str | None = None
+    y_index_tokens: tuple[str, ...] | None = None
+    group_key: str | None = None
+    repeat_combine_mode: str | None = None
+
+
+@dataclass(frozen=True)
+class _VisibleFitSeries:
+    """Displayed 1D series data used by the compact fit controls."""
+
+    label: str
+    x: np.ndarray
+    y: np.ndarray
+    group_values: np.ndarray | None
+
+
+@dataclass(frozen=True)
+class _ParsedArrayIndexSelection:
+    """One parsed array-index selection for an ``ArrayChannel``."""
+
+    fixed_indices: tuple[int, ...]
+    ranged_dim: int | None
+    ranged_indices: tuple[int, ...]
+    series_labels: tuple[str, ...] | None
+
+
+@dataclass(frozen=True)
+class _AxisSeriesValues:
+    """Scalar series extracted from one selected point stream."""
+
+    series_values: list[np.ndarray]
+    series_labels: list[str] | None
 
 
 def _clear_error_bar_item(item: pg.ErrorBarItem) -> None:
@@ -312,6 +413,228 @@ def _channel_choice_label(key: str, schema: dict[str, Any]) -> str:
     return _machine_and_human_label(machine_label, human_label)
 
 
+def _array_channel_shape(schema: dict[str, Any]) -> tuple[int, ...] | None:
+    if schema.get("type") != "array":
+        return None
+    shape = schema.get("shape")
+    if not isinstance(shape, (list, tuple)) or len(shape) == 0:
+        return None
+    try:
+        return tuple(int(size) for size in shape)
+    except (TypeError, ValueError):
+        return None
+
+
+def _array_channel_dim_names(schema: dict[str, Any]) -> tuple[str, ...] | None:
+    shape = _array_channel_shape(schema)
+    if shape is None:
+        return None
+    raw = schema.get("dim_names")
+    if isinstance(raw, (list, tuple)) and len(raw) == len(shape):
+        return tuple(str(name) for name in raw)
+    return tuple(f"dim{index}" for index in range(len(shape)))
+
+
+def _is_numeric_array_channel_schema(schema: dict[str, Any]) -> bool:
+    return schema.get("type") == "array" and schema.get("element_type") in {"float", "int"}
+
+
+def _default_array_index_tokens(schema: dict[str, Any]) -> tuple[str, ...] | None:
+    shape = _array_channel_shape(schema)
+    if shape is None:
+        return None
+    return tuple("0" for _ in shape)
+
+
+def _normalise_array_index_tokens(
+    schema: dict[str, Any],
+    tokens: tuple[str, ...] | list[str] | None,
+) -> tuple[str, ...] | None:
+    default_tokens = _default_array_index_tokens(schema)
+    if default_tokens is None:
+        return None
+    if tokens is None:
+        return default_tokens
+    cleaned = [str(token).strip() for token in tokens[: len(default_tokens)]]
+    while len(cleaned) < len(default_tokens):
+        cleaned.append(default_tokens[len(cleaned)])
+    return tuple(token if token else default_tokens[index] for index, token in enumerate(cleaned))
+
+
+def _format_array_index_suffix(
+    schema: dict[str, Any],
+    tokens: tuple[str, ...] | list[str] | None,
+) -> str:
+    normalised = _normalise_array_index_tokens(schema, tokens)
+    dim_names = _array_channel_dim_names(schema)
+    if normalised is None or dim_names is None:
+        return ""
+    return "[" + ", ".join(
+        f"{dim_name}={token}" for dim_name, token in zip(dim_names, normalised, strict=True)
+    ) + "]"
+
+
+def _axis_label_with_indices(
+    label: str,
+    *,
+    site: HostRuntimeSiteData,
+    key: str,
+    index_tokens: tuple[str, ...] | None,
+) -> str:
+    schema = site.channels.get(key)
+    if not isinstance(schema, dict) or _array_channel_shape(schema) is None:
+        return label
+    return label + " " + _format_array_index_suffix(schema, index_tokens)
+
+
+def _parse_array_index_selection(
+    schema: dict[str, Any],
+    tokens: tuple[str, ...] | list[str] | None,
+) -> _ParsedArrayIndexSelection:
+    shape = _array_channel_shape(schema)
+    dim_names = _array_channel_dim_names(schema)
+    normalised = _normalise_array_index_tokens(schema, tokens)
+    if shape is None or dim_names is None or normalised is None:
+        raise ValueError("Array-channel selection requires an array schema")
+
+    fixed_indices = []
+    ranged_dim = None
+    ranged_indices = ()
+    ranged_labels = None
+    for dim_index, (size, dim_name, token) in enumerate(
+        zip(shape, dim_names, normalised, strict=True)
+    ):
+        token = token.strip()
+        if token in {"", "0"}:
+            fixed_indices.append(0)
+            continue
+        if token.lower() in {_ARRAY_INDEX_ALL, ":"}:
+            indices = tuple(range(size))
+        elif ":" in token:
+            start_text, stop_text = token.split(":", 1)
+            try:
+                start = 0 if start_text == "" else int(start_text)
+                stop = size if stop_text == "" else int(stop_text)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid {dim_name} index range {token!r}; use N, all, or start:stop"
+                ) from exc
+            if start < 0 or stop < 0 or start > size or stop > size or stop <= start:
+                raise ValueError(
+                    f"{dim_name} range {token!r} is outside 0:{size}"
+                )
+            indices = tuple(range(start, stop))
+        else:
+            try:
+                index = int(token)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid {dim_name} index {token!r}; use N, all, or start:stop"
+                ) from exc
+            if index < 0 or index >= size:
+                raise ValueError(f"{dim_name} index {index} is outside 0:{size - 1}")
+            fixed_indices.append(index)
+            continue
+
+        if ranged_dim is not None:
+            raise ValueError("Only one array index can be ranged at a time")
+        ranged_dim = dim_index
+        ranged_indices = indices
+        ranged_labels = tuple(f"{dim_name}={index}" for index in indices)
+        fixed_indices.append(0)
+
+    return _ParsedArrayIndexSelection(
+        fixed_indices=tuple(fixed_indices),
+        ranged_dim=ranged_dim,
+        ranged_indices=ranged_indices,
+        series_labels=ranged_labels,
+    )
+
+
+def _extract_axis_series_values(
+    values: list[Any],
+    *,
+    schema: dict[str, Any] | None,
+    index_tokens: tuple[str, ...] | None,
+) -> _AxisSeriesValues:
+    if schema is None or _array_channel_shape(schema) is None:
+        return _AxisSeriesValues(
+            series_values=[np.asarray(values, dtype=float)],
+            series_labels=None,
+        )
+
+    shape = _array_channel_shape(schema)
+    assert shape is not None
+    parsed = _parse_array_index_selection(schema, index_tokens)
+    if parsed.ranged_dim is None:
+        series_values = [[]]
+        for raw in values:
+            array = np.asarray(raw, dtype=float)
+            if tuple(array.shape) != shape:
+                raise ValueError(
+                    f"Expected point arrays with shape {shape}, got {tuple(array.shape)}"
+                )
+            series_values[0].append(float(array[parsed.fixed_indices]))
+        return _AxisSeriesValues(
+            series_values=[np.asarray(series_values[0], dtype=float)],
+            series_labels=None,
+        )
+
+    series_values = [[] for _ in parsed.ranged_indices]
+    for raw in values:
+        array = np.asarray(raw, dtype=float)
+        if tuple(array.shape) != shape:
+            raise ValueError(
+                f"Expected point arrays with shape {shape}, got {tuple(array.shape)}"
+            )
+        for series_index, ranged_index in enumerate(parsed.ranged_indices):
+            index_tuple = list(parsed.fixed_indices)
+            index_tuple[parsed.ranged_dim] = ranged_index
+            series_values[series_index].append(float(array[tuple(index_tuple)]))
+    return _AxisSeriesValues(
+        series_values=[np.asarray(series, dtype=float) for series in series_values],
+        series_labels=list(parsed.series_labels or ()),
+    )
+
+
+def _ranged_dim_name_for_selection(
+    schema: dict[str, Any] | None,
+    index_tokens: tuple[str, ...] | None,
+) -> str | None:
+    if schema is None or _array_channel_shape(schema) is None:
+        return None
+    parsed = _parse_array_index_selection(schema, index_tokens)
+    if parsed.ranged_dim is None:
+        return None
+    dim_names = _array_channel_dim_names(schema)
+    if dim_names is None:
+        return None
+    return dim_names[parsed.ranged_dim]
+
+
+def _annotation_index_tuple(raw: Any) -> tuple[int, ...] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, (list, tuple)):
+        return None
+    try:
+        return tuple(int(item) for item in raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _selected_fixed_array_indices(
+    schema: dict[str, Any] | None,
+    index_tokens: tuple[str, ...] | None,
+) -> tuple[int, ...] | None:
+    if schema is None or _array_channel_shape(schema) is None:
+        return None
+    parsed = _parse_array_index_selection(schema, index_tokens)
+    if parsed.ranged_dim is not None:
+        return None
+    return parsed.fixed_indices
+
+
 def _generic_point_stream_choice_label(key: str) -> str:
     if key == "acquired_at_unix":
         return _machine_and_human_label(key, "acquired at / s")
@@ -364,7 +687,7 @@ def _is_numeric_pseudoparam_schema(schema: dict[str, Any]) -> bool:
 def _is_numeric_channel_schema(schema: dict[str, Any]) -> bool:
     """Return whether a persisted channel schema describes a numeric stream."""
 
-    return schema.get("type") in {"float", "int"}
+    return schema.get("type") in {"float", "int"} or _is_numeric_array_channel_schema(schema)
 
 
 def _x_axis_choices(site: HostRuntimeSiteData) -> list[tuple[str, str]]:
@@ -393,7 +716,7 @@ def _x_axis_choices(site: HostRuntimeSiteData) -> list[tuple[str, str]]:
         if values is None:
             if not declared_numeric:
                 return
-        elif not _is_numeric_point_stream(values):
+        elif not _is_numeric_point_stream(values) and not declared_numeric:
             return
         choices.append((key, label))
         seen.add(key)
@@ -470,6 +793,15 @@ def _group_by_choices(
             continue
         choices.append((key, _parameter_choice_label(key, schema)))
     return _unique_choice_labels(choices)
+
+
+def _array_group_choice(
+    *,
+    dim_name: str | None,
+) -> tuple[str, str] | None:
+    if not dim_name:
+        return None
+    return (_ARRAY_SERIES_GROUP_KEY, dim_name)
 
 
 def _fit_model_choices(fit_backend: FitBackend) -> list[tuple[str, str]]:
@@ -1085,6 +1417,45 @@ def _descends_from(path: tuple[str, ...], parent: tuple[str, ...]) -> bool:
     return path[: len(parent)] == parent
 
 
+def _run_id_text_for_site(site: HostRuntimeSiteData) -> str | None:
+    """Return a short run identifier for one site, if available."""
+
+    source_id = site.metadata.get("site.source_id")
+    if not source_id:
+        return None
+    source_id = str(source_id)
+    suffix = source_id.rsplit("_", 1)[-1]
+    if suffix.isdigit():
+        return f"RID {suffix}"
+    return source_id
+
+
+def _wrap_overlay_text(
+    text: str,
+    *,
+    max_chars: int = 72,
+    max_lines: int = 2,
+) -> str:
+    """Return a compact overlay summary wrapped to a small number of lines."""
+
+    compact = " ".join(str(text).split())
+    wrapped = textwrap.wrap(
+        compact,
+        width=max_chars,
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
+    if len(wrapped) <= max_lines:
+        return "\n".join(wrapped)
+
+    kept = wrapped[: max_lines]
+    last_line = kept[-1]
+    if len(last_line) >= max_chars:
+        last_line = last_line[: max_chars - 1].rstrip()
+    kept[-1] = last_line.rstrip(" .,;:") + "…"
+    return "\n".join(kept)
+
+
 class _PopupAwareComboBox(QtWidgets.QComboBox):
     """QComboBox that remembers whether its popup is currently open."""
 
@@ -1104,6 +1475,236 @@ class _PopupAwareComboBox(QtWidgets.QComboBox):
     def is_popup_visible(self) -> bool:
         return self._popup_visible
 
+
+class _ArrayIndexWidget(QtWidgets.QWidget):
+    """Compact editable array-index selector shown next to array-valued axes."""
+
+    selection_changed = QtCore.pyqtSignal(object)
+
+    def __init__(self):
+        super().__init__()
+        self._schema: dict[str, Any] | None = None
+        self._edits: list[QtWidgets.QLineEdit] = []
+        layout = QtWidgets.QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        self.setLayout(layout)
+        self.hide()
+
+    def set_state(
+        self,
+        *,
+        schema: dict[str, Any] | None,
+        index_tokens: tuple[str, ...] | None,
+    ) -> None:
+        self._schema = schema if isinstance(schema, dict) else None
+        self._rebuild_inputs(index_tokens)
+
+    def current_tokens(self) -> tuple[str, ...] | None:
+        if self._schema is None or _array_channel_shape(self._schema) is None:
+            return None
+        return tuple(edit.text().strip() or "0" for edit in self._edits)
+
+    def has_array_schema(self) -> bool:
+        return self._schema is not None and _array_channel_shape(self._schema) is not None
+
+    def _rebuild_inputs(self, index_tokens: tuple[str, ...] | None) -> None:
+        layout = self.layout()
+        assert isinstance(layout, QtWidgets.QHBoxLayout)
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._edits.clear()
+
+        if self._schema is None or _array_channel_shape(self._schema) is None:
+            self.hide()
+            return
+
+        tokens = _normalise_array_index_tokens(self._schema, index_tokens)
+        dim_names = _array_channel_dim_names(self._schema) or ()
+        if tokens is None:
+            self.hide()
+            return
+
+        for dim_name, token in zip(dim_names, tokens, strict=True):
+            label = QtWidgets.QLabel(dim_name)
+            label.setStyleSheet("color: #555; font-size: 9px;")
+            layout.addWidget(label)
+
+            edit = QtWidgets.QLineEdit(token)
+            edit.setPlaceholderText("0")
+            edit.setMaximumWidth(66)
+            edit.setToolTip("Use N, all, or start:stop")
+            edit.editingFinished.connect(self._emit_selection_changed)
+            self._edits.append(edit)
+            layout.addWidget(edit)
+
+        layout.addStretch(1)
+        self.show()
+
+    def _emit_selection_changed(self) -> None:
+        self.selection_changed.emit(self.current_tokens())
+
+
+class _SeriesControlRow(QtWidgets.QWidget):
+    """One compact 1D dependent-series control row."""
+
+    state_changed = QtCore.pyqtSignal()
+    remove_requested = QtCore.pyqtSignal()
+
+    def __init__(self):
+        super().__init__()
+        layout = QtWidgets.QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        self.setLayout(layout)
+
+        self._y_label = QtWidgets.QLabel("y")
+        layout.addWidget(self._y_label)
+
+        self._y_combo = _PopupAwareComboBox()
+        self._y_combo.currentIndexChanged.connect(self._emit_state_changed)
+        layout.addWidget(self._y_combo, 2)
+
+        self._y_index_label = QtWidgets.QLabel("idx")
+        layout.addWidget(self._y_index_label)
+        self._y_index_widget = _ArrayIndexWidget()
+        self._y_index_widget.selection_changed.connect(lambda *_: self._emit_state_changed())
+        layout.addWidget(self._y_index_widget, 2)
+
+        self._split_label = QtWidgets.QLabel("split")
+        layout.addWidget(self._split_label)
+        self._split_combo = _PopupAwareComboBox()
+        self._split_combo.currentIndexChanged.connect(self._emit_state_changed)
+        layout.addWidget(self._split_combo, 1)
+
+        self._repeat_label = QtWidgets.QLabel("repeats")
+        layout.addWidget(self._repeat_label)
+        self._repeat_combo = _PopupAwareComboBox()
+        self._repeat_combo.currentIndexChanged.connect(self._emit_state_changed)
+        layout.addWidget(self._repeat_combo, 1)
+
+        self._remove_button = QtWidgets.QPushButton("−")
+        self._remove_button.setMaximumWidth(24)
+        self._remove_button.clicked.connect(self.remove_requested.emit)
+        layout.addWidget(self._remove_button)
+
+    def set_state(
+        self,
+        *,
+        site: HostRuntimeSiteData,
+        x_key: str | None,
+        state: _SeriesUiState,
+        can_remove: bool,
+    ) -> None:
+        y_choices = _default_y_choices(site)
+        channel_keys = _channel_choice_keys(site)
+        current_y = self._sync_choice_combo(
+            self._y_combo,
+            y_choices,
+            state.y_key,
+            preferred_keys=channel_keys,
+            excluded_keys={x_key} if x_key is not None else None,
+        )
+        self._sync_array_index_widget(
+            self._y_index_widget,
+            site.channels.get(current_y) if current_y is not None else None,
+            state.y_index_tokens,
+        )
+        split_choices = _group_by_choices(site, x_key)
+        array_choice = self._current_array_group_choice(
+            site=site,
+            y_key=current_y,
+            y_index_tokens=self._y_index_widget.current_tokens(),
+        )
+        if array_choice is not None:
+            split_choices = split_choices + [array_choice]
+        self._sync_choice_combo(
+            self._split_combo,
+            split_choices,
+            state.group_key if state.group_key is not None else _NO_GROUP_KEY,
+            preferred_keys=[_NO_GROUP_KEY],
+        )
+        self._sync_choice_combo(
+            self._repeat_combo,
+            _repeat_combine_choices(),
+            state.repeat_combine_mode if state.repeat_combine_mode is not None else _REPEAT_COMBINE_NONE,
+            preferred_keys=[_REPEAT_COMBINE_NONE],
+        )
+        self._remove_button.setVisible(can_remove)
+        self._y_index_label.setVisible(self._y_index_widget.has_array_schema())
+        self._y_index_widget.setVisible(self._y_index_widget.has_array_schema())
+
+    def current_state(self) -> _SeriesUiState:
+        group_key = self._split_combo.currentData()
+        return _SeriesUiState(
+            y_key=self._y_combo.currentData(),
+            y_index_tokens=self._y_index_widget.current_tokens(),
+            group_key=None if group_key in {None, _NO_GROUP_KEY} else group_key,
+            repeat_combine_mode=self._repeat_combo.currentData() or _REPEAT_COMBINE_NONE,
+        )
+
+    def display_label(self) -> str:
+        return self._y_combo.currentText()
+
+    def _emit_state_changed(self) -> None:
+        self.state_changed.emit()
+
+    @staticmethod
+    def _sync_choice_combo(
+        combo: _PopupAwareComboBox,
+        choices: list[tuple[Any, str]],
+        selected_key: Any,
+        *,
+        preferred_keys: list[Any] | None = None,
+        excluded_keys: set[Any] | None = None,
+    ) -> Any:
+        if combo.is_popup_visible():
+            return combo.currentData()
+        combo.blockSignals(True)
+        combo.clear()
+        for key, label in choices:
+            combo.addItem(label, key)
+        index = combo.findData(selected_key) if selected_key is not None else -1
+        if index == -1:
+            default_key = _select_default_choice(
+                choices,
+                preferred_keys=preferred_keys,
+                excluded_keys=excluded_keys,
+            )
+            index = combo.findData(default_key) if default_key is not None else -1
+        if index != -1:
+            combo.setCurrentIndex(index)
+        combo.blockSignals(False)
+        return combo.currentData()
+
+    @staticmethod
+    def _sync_array_index_widget(
+        widget: _ArrayIndexWidget,
+        schema: dict[str, Any] | None,
+        selected_tokens: tuple[str, ...] | None,
+    ) -> None:
+        widget.blockSignals(True)
+        widget.set_state(schema=schema, index_tokens=selected_tokens)
+        widget.blockSignals(False)
+
+    @staticmethod
+    def _current_array_group_choice(
+        *,
+        site: HostRuntimeSiteData,
+        y_key: str | None,
+        y_index_tokens: tuple[str, ...] | None,
+    ) -> tuple[str, str] | None:
+        if y_key is None:
+            return None
+        y_schema = site.channels.get(y_key)
+        y_dim_name = _ranged_dim_name_for_selection(
+            y_schema if isinstance(y_schema, dict) else None,
+            y_index_tokens,
+        )
+        return _array_group_choice(dim_name=y_dim_name)
 
 class _VerticalColorBarWidget(QtWidgets.QWidget):
     """Small fixed-layout colorbar used by the lightweight 2D plot modes."""
@@ -1152,6 +1753,121 @@ class _VerticalColorBarWidget(QtWidgets.QWidget):
         self._min_label.setText(_format_colorbar_value(float(z_min)))
 
 
+class _MovableViewBoxTextItem(pg.TextItem):
+    """Text overlay positioned in view-box fractions rather than data coordinates."""
+
+    def __init__(
+        self,
+        *,
+        text: str = "",
+        relative_pos: tuple[float, float] = (0.02, 0.98),
+        anchor: tuple[float, float] = (0.0, 0.0),
+    ):
+        super().__init__(
+            text=text,
+            anchor=anchor,
+            color=(30, 30, 30),
+            fill=(255, 255, 255, 185),
+            border=pg.mkPen(100, 100, 100, 150),
+        )
+        self._relative_pos = QtCore.QPointF(*relative_pos)
+        self._view_box: pg.ViewBox | None = None
+        self._syncing_position = False
+        self._display_text = text
+        self._drag_offset = None
+        self.setZValue(1000)
+        self.setAcceptedMouseButtons(QtCore.Qt.MouseButton.LeftButton)
+        self.setFlag(
+            QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemIsMovable,
+            True,
+        )
+        self.setFlag(
+            QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemIsSelectable,
+            True,
+        )
+        self.setFlag(
+            QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges,
+            True,
+        )
+        # ``TextItem`` renders via an internal QGraphicsTextItem child. Make the child
+        # transparent to mouse events so dragging hits this movable parent item.
+        self.textItem.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+        font = QtGui.QFont(self.textItem.font())
+        font.setPointSize(max(8, font.pointSize() - 2))
+        self.textItem.setFont(font)
+
+    def attach_to_view_box(self, view_box: pg.ViewBox) -> None:
+        self._view_box = view_box
+        view_box.addItem(self, ignoreBounds=True)
+        view_box.sigRangeChanged.connect(self._update_position_from_view_range)
+        self._update_position_from_view_range()
+
+    def set_display_text(self, text: str | None) -> None:
+        self._display_text = "" if text is None else str(text)
+        self.setText("" if not self._display_text else f" {self._display_text} ")
+        self.setVisible(bool(self._display_text))
+        if self.isVisible():
+            self._update_position_from_view_range()
+
+    def display_text(self) -> str:
+        return self._display_text
+
+    def itemChange(self, change, value):
+        if (
+            change
+            == QtWidgets.QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged
+            and not self._syncing_position
+            and self._view_box is not None
+        ):
+            x_range, y_range = self._view_box.viewRange()
+            x0, x1 = map(float, x_range)
+            y0, y1 = map(float, y_range)
+            x_span = x1 - x0
+            y_span = y1 - y0
+            if x_span != 0.0:
+                rel_x = (float(value.x()) - x0) / x_span
+            else:
+                rel_x = 0.0
+            if y_span != 0.0:
+                rel_y = (float(value.y()) - y0) / y_span
+            else:
+                rel_y = 1.0
+            self._relative_pos = QtCore.QPointF(
+                min(1.0, max(0.0, rel_x)),
+                min(1.0, max(0.0, rel_y)),
+            )
+        return super().itemChange(change, value)
+
+    def mouseDragEvent(self, ev) -> None:
+        if ev.button() != QtCore.Qt.MouseButton.LeftButton:
+            return
+        ev.accept()
+        if self._view_box is None:
+            return
+        if ev.isStart():
+            self._drag_offset = self.pos() - self.mapToView(ev.buttonDownPos())
+        if self._drag_offset is None:
+            return
+        self.setPos(self._drag_offset + self.mapToView(ev.pos()))
+        if ev.isFinish():
+            self._drag_offset = None
+
+    def _update_position_from_view_range(self, *args) -> None:
+        del args
+        if self._view_box is None or not self._display_text:
+            return
+        x_range, y_range = self._view_box.viewRange()
+        x0, x1 = map(float, x_range)
+        y0, y1 = map(float, y_range)
+        x = x0 + self._relative_pos.x() * (x1 - x0)
+        y = y0 + self._relative_pos.y() * (y1 - y0)
+        self._syncing_position = True
+        try:
+            self.setPos(x, y)
+        finally:
+            self._syncing_position = False
+
+
 class _SiteColumnWidget(QtWidgets.QWidget):
     """Render one scan site and expose user selections through Qt signals.
 
@@ -1165,11 +1881,15 @@ class _SiteColumnWidget(QtWidgets.QWidget):
     child_site_changed = QtCore.pyqtSignal(object, object)
     plot_mode_changed = QtCore.pyqtSignal(object, str)
     x_key_changed = QtCore.pyqtSignal(object, str)
+    x_index_tokens_changed = QtCore.pyqtSignal(object, object)
     y_key_changed = QtCore.pyqtSignal(object, str)
+    y_index_tokens_changed = QtCore.pyqtSignal(object, object)
     z_key_changed = QtCore.pyqtSignal(object, str)
+    z_index_tokens_changed = QtCore.pyqtSignal(object, object)
     group_key_changed = QtCore.pyqtSignal(object, str)
     show_lines_changed = QtCore.pyqtSignal(object, bool)
     repeat_combine_mode_changed = QtCore.pyqtSignal(object, str)
+    series_states_changed = QtCore.pyqtSignal(object, object)
 
     def __init__(
         self,
@@ -1186,17 +1906,28 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         selected_group_key: str | None,
         show_lines: bool,
         selected_repeat_combine_mode: str | None = None,
+        selected_x_index_tokens: tuple[str, ...] | None = None,
+        selected_y_index_tokens: tuple[str, ...] | None = None,
+        selected_z_index_tokens: tuple[str, ...] | None = None,
+        selected_display_point_key: _DisplayPointKey | None = None,
+        selected_series_states: tuple[_SeriesUiState, ...] | None = None,
         fit_backend: FitBackend | None = None,
     ):
         super().__init__()
         self._site = site
         self._fit_backend = default_fit_backend() if fit_backend is None else fit_backend
         self._selected_point_index = selected_point_index
+        self._selected_display_point_key = selected_display_point_key
         self._parent_point_index = parent_point_index
         self._plot_data = _site_plot_data(site, parent_point_index)
         self._child_site_options = child_site_options
-        self._rendered_point_values = dict[int, tuple[float, float, float | None]]()
-        self._rendered_group_values = dict[int, float]()
+        self._rendered_point_values = dict[_DisplayPointKey, tuple[float, float, float | None]]()
+        self._rendered_group_values = dict[_DisplayPointKey, float]()
+        self._rendered_group_displays = dict[_DisplayPointKey, str]()
+        self._rendered_source_indices = dict[_DisplayPointKey, int]()
+        self._rendered_series_indices = dict[_DisplayPointKey, int]()
+        self._rendered_series_labels = dict[int, str]()
+        self._rendered_group_label_map = dict[float, str]()
         self._group_colors = dict[float, QtGui.QColor]()
         self._current_x_label = "x"
         self._current_y_label = "y"
@@ -1208,9 +1939,37 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         self._fit_target_group_value: float | None = None
         self._current_plot_mode = _PLOT_MODE_1D
         self._current_plot_arrays: tuple[np.ndarray, np.ndarray] | None = None
-        self._current_source_indices: list[int] = []
+        self._current_display_point_keys: list[_DisplayPointKey] = []
+        self._current_group_values: np.ndarray | None = None
+        self._current_visible_fit_series: list[_VisibleFitSeries] = []
 
         layout = QtWidgets.QVBoxLayout()
+        self._configure_widget_layout(layout)
+        self._build_header(layout)
+        self._build_details_panel(layout)
+        self._build_plot_stack(layout)
+
+        self.update_state(
+            site=site,
+            child_site_options=child_site_options,
+            selected_child_path=selected_child_path,
+            parent_point_index=parent_point_index,
+            selected_point_index=selected_point_index,
+            selected_display_point_key=selected_display_point_key,
+            selected_plot_mode=selected_plot_mode,
+            selected_x_key=selected_x_key,
+            selected_x_index_tokens=selected_x_index_tokens,
+            selected_y_key=selected_y_key,
+            selected_y_index_tokens=selected_y_index_tokens,
+            selected_z_key=selected_z_key,
+            selected_z_index_tokens=selected_z_index_tokens,
+            selected_group_key=selected_group_key,
+            show_lines=show_lines,
+            selected_repeat_combine_mode=selected_repeat_combine_mode,
+            selected_series_states=selected_series_states,
+        )
+
+    def _configure_widget_layout(self, layout: QtWidgets.QVBoxLayout) -> None:
         layout.setContentsMargins(6, 6, 6, 6)
         self.setLayout(layout)
         self.setMinimumWidth(380)
@@ -1222,11 +1981,12 @@ class _SiteColumnWidget(QtWidgets.QWidget):
             "QCheckBox { font-size: 10px; }"
         )
 
+    def _build_header(self, layout: QtWidgets.QVBoxLayout) -> None:
         self._child_combo = _PopupAwareComboBox()
         self._child_combo.currentIndexChanged.connect(self._emit_child_site_changed)
         layout.addWidget(self._child_combo)
 
-        self._title = QtWidgets.QLabel("/".join(site.path) or "root")
+        self._title = QtWidgets.QLabel("/".join(self._site.path) or "root")
         self._title.setWordWrap(True)
         title_font = QtGui.QFont(self._title.font())
         title_font.setPointSize(max(9, title_font.pointSize() - 1))
@@ -1234,15 +1994,21 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         self._title.setFont(title_font)
         layout.addWidget(self._title)
 
+        self._build_plot_controls_box()
+        self._build_fit_controls_box()
+        layout.addWidget(self._plot_controls_box)
+        layout.addWidget(self._fit_controls_box)
+
+    def _build_plot_controls_box(self) -> None:
         self._plot_controls_box = QtWidgets.QGroupBox("Plot")
-        plot_controls_layout = QtWidgets.QGridLayout()
+        plot_controls_layout = QtWidgets.QVBoxLayout()
         plot_controls_layout.setContentsMargins(8, 8, 8, 8)
-        plot_controls_layout.setHorizontalSpacing(8)
-        plot_controls_layout.setVerticalSpacing(6)
-        plot_controls_layout.setColumnStretch(1, 1)
-        plot_controls_layout.setColumnStretch(3, 1)
-        plot_controls_layout.setColumnStretch(4, 1)
+        plot_controls_layout.setSpacing(6)
         self._plot_controls_box.setLayout(plot_controls_layout)
+
+        global_row = QtWidgets.QHBoxLayout()
+        global_row.setContentsMargins(0, 0, 0, 0)
+        global_row.setSpacing(6)
 
         self._mode_label = QtWidgets.QLabel("mode")
         self._plot_mode_combo = _PopupAwareComboBox()
@@ -1251,8 +2017,8 @@ class _SiteColumnWidget(QtWidgets.QWidget):
                 self._site.path, self._current_combo_data(self._plot_mode_combo)
             )
         )
-        plot_controls_layout.addWidget(self._mode_label, 0, 0)
-        plot_controls_layout.addWidget(self._plot_mode_combo, 0, 1)
+        global_row.addWidget(self._mode_label)
+        global_row.addWidget(self._plot_mode_combo, 1)
 
         self._x_label = QtWidgets.QLabel("x")
         self._x_combo = _PopupAwareComboBox()
@@ -1261,19 +2027,64 @@ class _SiteColumnWidget(QtWidgets.QWidget):
                 self._site.path, self._current_combo_data(self._x_combo)
             )
         )
-        plot_controls_layout.addWidget(self._x_label, 0, 2)
-        plot_controls_layout.addWidget(self._x_combo, 0, 3)
+        global_row.addWidget(self._x_label)
+        global_row.addWidget(self._x_combo, 1)
 
-        self._y_label = QtWidgets.QLabel("y")
-        self._y_combo = _PopupAwareComboBox()
-        self._y_combo.currentIndexChanged.connect(
+        self._x_index_label = QtWidgets.QLabel("x idx")
+        self._x_index_widget = _ArrayIndexWidget()
+        self._x_index_widget.selection_changed.connect(
+            lambda tokens: self.x_index_tokens_changed.emit(self._site.path, tokens)
+        )
+        global_row.addWidget(self._x_index_label)
+        global_row.addWidget(self._x_index_widget, 1)
+
+        self._plane_y_label = QtWidgets.QLabel("y")
+        self._plane_y_combo = _PopupAwareComboBox()
+        self._plane_y_combo.currentIndexChanged.connect(
             lambda *_: self.y_key_changed.emit(
-                self._site.path, self._current_combo_data(self._y_combo)
+                self._site.path, self._current_combo_data(self._plane_y_combo)
             )
         )
-        plot_controls_layout.addWidget(self._y_label, 1, 0)
-        plot_controls_layout.addWidget(self._y_combo, 1, 1)
+        global_row.addWidget(self._plane_y_label)
+        global_row.addWidget(self._plane_y_combo, 1)
 
+        self._plane_y_index_label = QtWidgets.QLabel("y idx")
+        self._plane_y_index_widget = _ArrayIndexWidget()
+        self._plane_y_index_widget.selection_changed.connect(
+            lambda tokens: self.y_index_tokens_changed.emit(self._site.path, tokens)
+        )
+        global_row.addWidget(self._plane_y_index_label)
+        global_row.addWidget(self._plane_y_index_widget, 1)
+        global_row.addStretch(1)
+        plot_controls_layout.addLayout(global_row)
+
+        self._series_rows_widget = QtWidgets.QWidget()
+        self._series_rows_layout = QtWidgets.QVBoxLayout()
+        self._series_rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._series_rows_layout.setSpacing(4)
+        self._series_rows_widget.setLayout(self._series_rows_layout)
+        plot_controls_layout.addWidget(self._series_rows_widget)
+
+        series_buttons_row = QtWidgets.QHBoxLayout()
+        series_buttons_row.setContentsMargins(0, 0, 0, 0)
+        series_buttons_row.setSpacing(6)
+        self._add_series_button = QtWidgets.QPushButton("+")
+        self._add_series_button.setMaximumWidth(26)
+        self._add_series_button.clicked.connect(self._add_series_row)
+        series_buttons_row.addWidget(self._add_series_button)
+        self._show_lines_checkbox = QtWidgets.QCheckBox("connect points")
+        self._show_lines_checkbox.toggled.connect(
+            lambda checked: self.show_lines_changed.emit(self._site.path, checked)
+        )
+        series_buttons_row.addWidget(self._show_lines_checkbox)
+        series_buttons_row.addStretch(1)
+        plot_controls_layout.addLayout(series_buttons_row)
+
+        self._z_row_widget = QtWidgets.QWidget()
+        z_row = QtWidgets.QHBoxLayout()
+        z_row.setContentsMargins(0, 0, 0, 0)
+        z_row.setSpacing(6)
+        self._z_row_widget.setLayout(z_row)
         self._z_label = QtWidgets.QLabel("z")
         self._z_combo = _PopupAwareComboBox()
         self._z_combo.currentIndexChanged.connect(
@@ -1281,74 +2092,55 @@ class _SiteColumnWidget(QtWidgets.QWidget):
                 self._site.path, self._current_combo_data(self._z_combo)
             )
         )
-        plot_controls_layout.addWidget(self._z_label, 1, 2)
-        plot_controls_layout.addWidget(self._z_combo, 1, 3)
+        z_row.addWidget(self._z_label)
+        z_row.addWidget(self._z_combo, 1)
 
-        self._group_label = QtWidgets.QLabel("group by")
-        self._group_combo = _PopupAwareComboBox()
-        self._group_combo.currentIndexChanged.connect(
-            lambda *_: self.group_key_changed.emit(
-                self._site.path, self._current_combo_data(self._group_combo)
-            )
+        self._z_index_label = QtWidgets.QLabel("z idx")
+        self._z_index_widget = _ArrayIndexWidget()
+        self._z_index_widget.selection_changed.connect(
+            lambda tokens: self.z_index_tokens_changed.emit(self._site.path, tokens)
         )
-        plot_controls_layout.addWidget(self._group_label, 2, 0)
-        plot_controls_layout.addWidget(self._group_combo, 2, 1)
+        z_row.addWidget(self._z_index_label)
+        z_row.addWidget(self._z_index_widget, 1)
+        z_row.addStretch(1)
+        plot_controls_layout.addWidget(self._z_row_widget)
 
-        self._show_lines_checkbox = QtWidgets.QCheckBox("connect points")
-        self._show_lines_checkbox.toggled.connect(
-            lambda checked: self.show_lines_changed.emit(self._site.path, checked)
-        )
-        plot_controls_layout.addWidget(self._show_lines_checkbox, 2, 2)
-
-        self._repeat_combine_label = QtWidgets.QLabel("repeats")
-        self._repeat_combine_combo = _PopupAwareComboBox()
-        self._repeat_combine_combo.currentIndexChanged.connect(
-            lambda *_: self.repeat_combine_mode_changed.emit(
-                self._site.path, self._current_combo_data(self._repeat_combine_combo)
-            )
-        )
-        plot_controls_layout.addWidget(self._repeat_combine_label, 2, 3)
-        plot_controls_layout.addWidget(self._repeat_combine_combo, 2, 4)
-
+    def _build_fit_controls_box(self) -> None:
         self._fit_controls_box = QtWidgets.QGroupBox("Fit")
-        fit_controls = QtWidgets.QGridLayout()
+        fit_controls = QtWidgets.QHBoxLayout()
         fit_controls.setContentsMargins(8, 8, 8, 8)
-        fit_controls.setHorizontalSpacing(8)
-        fit_controls.setVerticalSpacing(6)
-        fit_controls.setColumnStretch(1, 1)
+        fit_controls.setSpacing(8)
         self._fit_controls_box.setLayout(fit_controls)
+
+        self._fit_series_label = QtWidgets.QLabel("series")
+        self._fit_series_combo = _PopupAwareComboBox()
+        self._fit_series_combo.currentIndexChanged.connect(
+            lambda *_: (self._sync_fit_target_combo(), self._sync_fit_controls())
+        )
+        fit_controls.addWidget(self._fit_series_label)
+        fit_controls.addWidget(self._fit_series_combo, 1)
 
         self._fit_model_label = QtWidgets.QLabel("fit")
         self._fit_model_combo = _PopupAwareComboBox()
         self._fit_model_combo.currentIndexChanged.connect(self._sync_fit_controls)
-        fit_controls.addWidget(self._fit_model_label, 0, 0)
-        fit_controls.addWidget(self._fit_model_combo, 0, 1)
+        fit_controls.addWidget(self._fit_model_label)
+        fit_controls.addWidget(self._fit_model_combo, 1)
+
         self._fit_target_label = QtWidgets.QLabel("target")
         self._fit_target_combo = _PopupAwareComboBox()
         self._fit_target_combo.currentIndexChanged.connect(self._sync_fit_controls)
-        fit_controls.addWidget(self._fit_target_label, 1, 0)
-        fit_controls.addWidget(self._fit_target_combo, 1, 1)
-        fit_buttons = QtWidgets.QHBoxLayout()
-        fit_buttons.setContentsMargins(0, 0, 0, 0)
-        fit_buttons.setSpacing(6)
+        fit_controls.addWidget(self._fit_target_label)
+        fit_controls.addWidget(self._fit_target_combo, 1)
+
         self._fit_button = QtWidgets.QPushButton("fit")
         self._fit_button.clicked.connect(self._fit_now)
-        fit_buttons.addWidget(self._fit_button)
+        fit_controls.addWidget(self._fit_button)
         self._clear_fit_button = QtWidgets.QPushButton("clear")
         self._clear_fit_button.clicked.connect(self._clear_fit)
-        fit_buttons.addWidget(self._clear_fit_button)
-        fit_buttons.addStretch(1)
-        fit_buttons_widget = QtWidgets.QWidget()
-        fit_buttons_widget.setLayout(fit_buttons)
-        fit_controls.addWidget(fit_buttons_widget, 2, 0, 1, 2)
+        fit_controls.addWidget(self._clear_fit_button)
+        fit_controls.addStretch(1)
 
-        header_row = QtWidgets.QHBoxLayout()
-        header_row.setContentsMargins(0, 0, 0, 0)
-        header_row.setSpacing(8)
-        header_row.addWidget(self._plot_controls_box, 3)
-        header_row.addWidget(self._fit_controls_box, 2)
-        layout.addLayout(header_row)
-
+    def _build_details_panel(self, layout: QtWidgets.QVBoxLayout) -> None:
         self._details_box = QtWidgets.QGroupBox("Details")
         details_layout = QtWidgets.QGridLayout()
         details_layout.setContentsMargins(8, 8, 8, 8)
@@ -1385,8 +2177,15 @@ class _SiteColumnWidget(QtWidgets.QWidget):
 
         layout.addWidget(self._details_box)
 
+    def _build_plot_stack(self, layout: QtWidgets.QVBoxLayout) -> None:
         self._plot_stack = QtWidgets.QStackedWidget()
+        self._build_pyqtgraph_panel()
+        self._bo_plot_widget = BoCornerPlotWidget()
+        self._plot_stack.addWidget(self._pyqtgraph_panel)
+        self._plot_stack.addWidget(self._bo_plot_widget)
+        layout.addWidget(self._plot_stack, 1)
 
+    def _build_pyqtgraph_panel(self) -> None:
         self._pyqtgraph_panel = QtWidgets.QWidget()
         plot_row = QtWidgets.QHBoxLayout()
         plot_row.setContentsMargins(0, 0, 0, 0)
@@ -1417,10 +2216,22 @@ class _SiteColumnWidget(QtWidgets.QWidget):
             brush=pg.mkBrush(255, 255, 255, 120),
         )
         self._crosshair_x = pg.InfiniteLine(
-            angle=90, movable=False, pen=pg.mkPen("#ffd84d", width=1.2, style=QtCore.Qt.PenStyle.DashLine)
+            angle=90,
+            movable=False,
+            pen=pg.mkPen(
+                "#ffd84d",
+                width=1.2,
+                style=QtCore.Qt.PenStyle.DashLine,
+            ),
         )
         self._crosshair_y = pg.InfiniteLine(
-            angle=0, movable=False, pen=pg.mkPen("#ffd84d", width=1.2, style=QtCore.Qt.PenStyle.DashLine)
+            angle=0,
+            movable=False,
+            pen=pg.mkPen(
+                "#ffd84d",
+                width=1.2,
+                style=QtCore.Qt.PenStyle.DashLine,
+            ),
         )
         self._crosshair_x.hide()
         self._crosshair_y.hide()
@@ -1429,7 +2240,13 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         self._plot_item.addItem(self._highlight)
         self._plot_item.addItem(self._crosshair_x, ignoreBounds=True)
         self._plot_item.addItem(self._crosshair_y, ignoreBounds=True)
-        self._fit_curve_item = self._plot_item.plot(pen=pg.mkPen("#ff7f0e", width=2.2, style=QtCore.Qt.PenStyle.DashLine))
+        self._fit_curve_item = self._plot_item.plot(
+            pen=pg.mkPen(
+                "#ff7f0e",
+                width=2.2,
+                style=QtCore.Qt.PenStyle.DashLine,
+            )
+        )
         self._fit_curve_item.hide()
         self._annotation_items: list[Any] = []
         self._scatter.sigClicked.connect(self._point_clicked)
@@ -1441,30 +2258,38 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         self._colorbar = _VerticalColorBarWidget()
         plot_row.addWidget(self._colorbar)
 
-        self._bo_plot_widget = BoCornerPlotWidget()
-
-        self._plot_stack.addWidget(self._pyqtgraph_panel)
-        self._plot_stack.addWidget(self._bo_plot_widget)
-        layout.addWidget(self._plot_stack, 1)
-
-        self.update_state(
-            site=site,
-            child_site_options=child_site_options,
-            selected_child_path=selected_child_path,
-            parent_point_index=parent_point_index,
-            selected_point_index=selected_point_index,
-            selected_plot_mode=selected_plot_mode,
-            selected_x_key=selected_x_key,
-            selected_y_key=selected_y_key,
-            selected_z_key=selected_z_key,
-            selected_group_key=selected_group_key,
-            show_lines=show_lines,
-            selected_repeat_combine_mode=selected_repeat_combine_mode,
-        )
+        self._run_id_overlay = _MovableViewBoxTextItem()
+        self._run_id_overlay.attach_to_view_box(self._plot_item.vb)
 
     @property
     def site_path(self) -> tuple[str, ...]:
         return self._site.path
+
+    @property
+    def _primary_series_row(self) -> _SeriesControlRow | None:
+        if not hasattr(self, "_series_rows") or not self._series_rows:
+            return None
+        return self._series_rows[0]
+
+    @property
+    def _y_combo(self) -> _PopupAwareComboBox | None:
+        row = self._primary_series_row
+        return None if row is None else row._y_combo
+
+    @property
+    def _y_index_widget(self) -> _ArrayIndexWidget | None:
+        row = self._primary_series_row
+        return None if row is None else row._y_index_widget
+
+    @property
+    def _group_combo(self) -> _PopupAwareComboBox | None:
+        row = self._primary_series_row
+        return None if row is None else row._split_combo
+
+    @property
+    def _repeat_combine_combo(self) -> _PopupAwareComboBox | None:
+        row = self._primary_series_row
+        return None if row is None else row._repeat_combo
 
     def update_state(
         self,
@@ -1481,25 +2306,47 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         selected_group_key: str | None,
         show_lines: bool,
         selected_repeat_combine_mode: str | None = None,
+        selected_x_index_tokens: tuple[str, ...] | None = None,
+        selected_y_index_tokens: tuple[str, ...] | None = None,
+        selected_z_index_tokens: tuple[str, ...] | None = None,
+        selected_display_point_key: _DisplayPointKey | None = None,
+        selected_series_states: tuple[_SeriesUiState, ...] | None = None,
     ) -> None:
         """Refresh the widget to match the current site-tree and UI selection state."""
         self._site = site
         self._selected_point_index = selected_point_index
+        self._selected_display_point_key = selected_display_point_key
         self._parent_point_index = parent_point_index
         self._plot_data = _site_plot_data(site, parent_point_index)
         self._child_site_options = child_site_options
 
         self._title.setText("/".join(site.path) or "root")
+        self._run_id_overlay.set_display_text(_run_id_text_for_site(site))
         self._sync_child_combo(selected_child_path)
         self._sync_plot_mode_combo(selected_plot_mode)
-        self._sync_xyz_combos(selected_x_key, selected_y_key, selected_z_key)
-        self._sync_group_combo(selected_group_key)
+        self._sync_xyz_combos(
+            selected_x_key,
+            selected_x_index_tokens,
+            selected_y_key,
+            selected_y_index_tokens,
+            selected_z_key,
+            selected_z_index_tokens,
+        )
+        self._sync_series_rows(
+            self._ensure_default_series_states(
+                selected_series_states,
+                selected_y_key=selected_y_key,
+                selected_y_index_tokens=selected_y_index_tokens,
+                selected_group_key=selected_group_key,
+                selected_repeat_combine_mode=selected_repeat_combine_mode,
+            )
+        )
+        self._sync_fit_series_combo()
         self._sync_fit_model_combo()
         self._sync_fit_target_combo()
         self._show_lines_checkbox.blockSignals(True)
         self._show_lines_checkbox.setChecked(show_lines)
         self._show_lines_checkbox.blockSignals(False)
-        self._sync_repeat_combine_combo(selected_repeat_combine_mode)
         self._sync_control_visibility()
         self._sync_fit_controls()
         self._render_plot()
@@ -1596,8 +2443,11 @@ class _SiteColumnWidget(QtWidgets.QWidget):
     def _sync_xyz_combos(
         self,
         selected_x_key: str | None,
+        selected_x_index_tokens: tuple[str, ...] | None,
         selected_y_key: str | None,
+        selected_y_index_tokens: tuple[str, ...] | None,
         selected_z_key: str | None,
+        selected_z_index_tokens: tuple[str, ...] | None,
     ) -> None:
         x_choices = _default_x_choices(self._site)
         y_choices = _default_y_choices(self._site)
@@ -1609,8 +2459,8 @@ class _SiteColumnWidget(QtWidgets.QWidget):
             selected_x_key,
             preferred_keys=_default_x_preferred_keys(self._site, x_choices),
         )
-        current_y_key = self._sync_choice_combo(
-            self._y_combo,
+        current_plane_y_key = self._sync_choice_combo(
+            self._plane_y_combo,
             y_choices,
             selected_y_key,
             preferred_keys=channel_keys,
@@ -1621,24 +2471,102 @@ class _SiteColumnWidget(QtWidgets.QWidget):
             z_choices,
             selected_z_key,
             preferred_keys=channel_keys,
-            excluded_keys={key for key in (current_x_key, current_y_key) if key is not None},
+            excluded_keys={key for key in (current_x_key, current_plane_y_key) if key is not None},
+        )
+        self._sync_array_index_widget(
+            self._x_index_widget,
+            self._site.channels.get(current_x_key) if current_x_key is not None else None,
+            selected_x_index_tokens,
+        )
+        self._sync_array_index_widget(
+            self._plane_y_index_widget,
+            self._site.channels.get(current_plane_y_key) if current_plane_y_key is not None else None,
+            selected_y_index_tokens,
+        )
+        self._sync_array_index_widget(
+            self._z_index_widget,
+            self._site.channels.get(self._selected_z_key()) if self._selected_z_key() is not None else None,
+            selected_z_index_tokens,
         )
 
-    def _sync_group_combo(self, selected_group_key: str | None) -> None:
-        self._sync_choice_combo(
-            self._group_combo,
-            _group_by_choices(self._site, self._selected_x_key()),
-            selected_group_key if selected_group_key is not None else _NO_GROUP_KEY,
-            preferred_keys=[_NO_GROUP_KEY],
+    def _sync_array_index_widget(
+        self,
+        widget: _ArrayIndexWidget,
+        schema: dict[str, Any] | None,
+        selected_tokens: tuple[str, ...] | None,
+    ) -> None:
+        widget.blockSignals(True)
+        widget.set_state(schema=schema, index_tokens=selected_tokens)
+        widget.blockSignals(False)
+
+    def _ensure_default_series_states(
+        self,
+        selected_series_states: tuple[_SeriesUiState, ...] | None,
+        *,
+        selected_y_key: str | None,
+        selected_y_index_tokens: tuple[str, ...] | None,
+        selected_group_key: str | None,
+        selected_repeat_combine_mode: str | None,
+    ) -> tuple[_SeriesUiState, ...]:
+        if selected_series_states:
+            return selected_series_states
+        return (
+            _SeriesUiState(
+                y_key=selected_y_key,
+                y_index_tokens=selected_y_index_tokens,
+                group_key=selected_group_key,
+                repeat_combine_mode=selected_repeat_combine_mode or _REPEAT_COMBINE_NONE,
+            ),
         )
 
-    def _sync_repeat_combine_combo(self, selected_mode: str | None) -> None:
-        self._sync_choice_combo(
-            self._repeat_combine_combo,
-            _repeat_combine_choices(),
-            selected_mode if selected_mode is not None else _REPEAT_COMBINE_NONE,
-            preferred_keys=[_REPEAT_COMBINE_NONE],
-        )
+    def _sync_series_rows(
+        self,
+        selected_series_states: tuple[_SeriesUiState, ...],
+    ) -> None:
+        if not hasattr(self, "_series_rows"):
+            self._series_rows: list[_SeriesControlRow] = []
+        while len(self._series_rows) > len(selected_series_states):
+            row = self._series_rows.pop()
+            self._series_rows_layout.removeWidget(row)
+            row.deleteLater()
+        while len(self._series_rows) < len(selected_series_states):
+            row = _SeriesControlRow()
+            row.state_changed.connect(self._emit_series_states_changed)
+            row.remove_requested.connect(self._remove_series_row)
+            self._series_rows.append(row)
+            self._series_rows_layout.addWidget(row)
+        x_key = self._selected_x_key()
+        for index, (row, state) in enumerate(zip(self._series_rows, selected_series_states, strict=True)):
+            row.set_state(
+                site=self._site,
+                x_key=x_key,
+                state=state,
+                can_remove=len(selected_series_states) > 1,
+            )
+
+    def _current_series_states(self) -> tuple[_SeriesUiState, ...]:
+        if not hasattr(self, "_series_rows"):
+            return ()
+        return tuple(row.current_state() for row in self._series_rows)
+
+    def _emit_series_states_changed(self) -> None:
+        self.series_states_changed.emit(self._site.path, self._current_series_states())
+
+    def _add_series_row(self) -> None:
+        states = list(self._current_series_states())
+        states.append(_SeriesUiState())
+        self._sync_series_rows(tuple(states))
+        self._emit_series_states_changed()
+
+    def _remove_series_row(self) -> None:
+        sender = self.sender()
+        if not isinstance(sender, _SeriesControlRow):
+            return
+        states = [row.current_state() for row in self._series_rows if row is not sender]
+        if not states:
+            states = [_SeriesUiState()]
+        self._sync_series_rows(tuple(states))
+        self._emit_series_states_changed()
 
     def _sync_fit_model_combo(self) -> None:
         self._sync_choice_combo(
@@ -1648,10 +2576,33 @@ class _SiteColumnWidget(QtWidgets.QWidget):
             preferred_keys=[_NO_FIT_MODEL_KEY],
         )
 
+    def _sync_fit_series_combo(self) -> None:
+        current_data = self._current_combo_data(self._fit_series_combo)
+        choices = [
+            (index, series.label)
+            for index, series in enumerate(self._current_visible_fit_series)
+        ]
+        if not choices:
+            choices = [(0, "series 1")]
+        self._sync_choice_combo(
+            self._fit_series_combo,
+            choices,
+            current_data if current_data is not None else choices[0][0],
+            preferred_keys=[choices[0][0]],
+        )
+
     def _sync_fit_target_combo(self) -> None:
+        fit_series_index = self._selected_fit_series_index()
+        fit_series = (
+            self._current_visible_fit_series[fit_series_index]
+            if 0 <= fit_series_index < len(self._current_visible_fit_series)
+            else None
+        )
         self._sync_choice_combo(
             self._fit_target_combo,
-            _fit_target_choices(self._selected_group_key()),
+            _fit_target_choices(
+                None if fit_series is None or fit_series.group_values is None else "__group__"
+            ),
             self._current_combo_data(self._fit_target_combo),
             preferred_keys=[_FIT_TARGET_VISIBLE],
         )
@@ -1659,6 +2610,9 @@ class _SiteColumnWidget(QtWidgets.QWidget):
     def _selected_fit_model(self) -> str | None:
         model_id = self._current_combo_data(self._fit_model_combo)
         return None if model_id in {None, _NO_FIT_MODEL_KEY} else model_id
+
+    def _selected_fit_series_index(self) -> int:
+        return int(self._current_combo_data(self._fit_series_combo) or 0)
 
     def _selected_fit_target(self) -> str:
         return self._current_combo_data(self._fit_target_combo) or _FIT_TARGET_VISIBLE
@@ -1669,6 +2623,8 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         if (not show_fit or not fit_enabled) and self._fit_active:
             self._clear_fit()
         self._fit_controls_box.setVisible(show_fit)
+        self._fit_series_label.setVisible(show_fit)
+        self._fit_series_combo.setVisible(show_fit)
         self._fit_model_label.setVisible(show_fit)
         self._fit_model_combo.setVisible(show_fit)
         self._fit_target_label.setVisible(show_fit and fit_enabled)
@@ -1696,42 +2652,128 @@ class _SiteColumnWidget(QtWidgets.QWidget):
     def _selected_x_key(self) -> str | None:
         return self._current_combo_data(self._x_combo)
 
+    def _selected_x_index_tokens(self) -> tuple[str, ...] | None:
+        return self._x_index_widget.current_tokens()
+
     def _selected_y_key(self) -> str | None:
-        return self._current_combo_data(self._y_combo)
+        if self._selected_plot_mode() != _PLOT_MODE_1D:
+            return self._current_combo_data(self._plane_y_combo)
+        series_states = self._current_series_states()
+        return series_states[0].y_key if series_states else None
+
+    def _selected_y_index_tokens(self) -> tuple[str, ...] | None:
+        if self._selected_plot_mode() != _PLOT_MODE_1D:
+            return self._plane_y_index_widget.current_tokens()
+        series_states = self._current_series_states()
+        return series_states[0].y_index_tokens if series_states else None
 
     def _selected_z_key(self) -> str | None:
         return self._current_combo_data(self._z_combo)
+
+    def _selected_z_index_tokens(self) -> tuple[str, ...] | None:
+        return self._z_index_widget.current_tokens()
+
+    def _annotation_axis_slice_matches(
+        self,
+        axis_key: str,
+        expected_indices: Any,
+        *,
+        x_key: str,
+        y_key: str,
+    ) -> bool:
+        expected = _annotation_index_tuple(expected_indices)
+        if expected is None:
+            return expected_indices is None
+
+        if axis_key == x_key:
+            schema = self._site.channels.get(x_key)
+            return _selected_fixed_array_indices(
+                schema if isinstance(schema, dict) else None,
+                self._selected_x_index_tokens(),
+            ) == expected
+
+        if axis_key == y_key:
+            schema = self._site.channels.get(y_key)
+            return _selected_fixed_array_indices(
+                schema if isinstance(schema, dict) else None,
+                self._selected_y_index_tokens(),
+            ) == expected
+
+        z_key = self._selected_z_key()
+        if z_key is not None and axis_key == z_key:
+            schema = self._site.channels.get(z_key)
+            return _selected_fixed_array_indices(
+                schema if isinstance(schema, dict) else None,
+                self._selected_z_index_tokens(),
+            ) == expected
+
+        return False
+
+    def _annotation_xy_slice_matches(
+        self,
+        parameters: dict[str, Any],
+        *,
+        x_key: str,
+        y_key: str,
+    ) -> bool:
+        return self._annotation_axis_slice_matches(
+            x_key,
+            parameters.get("x_indices"),
+            x_key=x_key,
+            y_key=y_key,
+        ) and self._annotation_axis_slice_matches(
+            y_key,
+            parameters.get("y_indices"),
+            x_key=x_key,
+            y_key=y_key,
+        )
 
     def _selected_plot_mode(self) -> str:
         return self._current_combo_data(self._plot_mode_combo) or _PLOT_MODE_1D
 
     def _selected_group_key(self) -> str | None:
-        group_key = self._current_combo_data(self._group_combo)
-        return None if group_key in {None, _NO_GROUP_KEY} else group_key
+        series_states = self._current_series_states()
+        return series_states[0].group_key if series_states else None
 
     def _selected_repeat_combine_mode(self) -> str:
-        return (
-            self._current_combo_data(self._repeat_combine_combo)
-            or _REPEAT_COMBINE_NONE
-        )
+        series_states = self._current_series_states()
+        if not series_states:
+            return _REPEAT_COMBINE_NONE
+        return series_states[0].repeat_combine_mode or _REPEAT_COMBINE_NONE
 
     def _sync_control_visibility(self) -> None:
         plot_mode = self._selected_plot_mode()
         is_bo = plot_mode == _PLOT_MODE_BO
         is_2d = plot_mode in {_PLOT_MODE_2D_SCATTER, _PLOT_MODE_2D_IMAGE}
-        show_group = not is_bo and not is_2d and self._group_combo.count() > 1
         show_xy = not is_bo
-        self._z_label.setVisible(is_2d)
-        self._z_combo.setVisible(is_2d)
         self._x_label.setVisible(show_xy)
         self._x_combo.setVisible(show_xy)
-        self._y_label.setVisible(show_xy)
-        self._y_combo.setVisible(show_xy)
-        self._group_label.setVisible(show_group)
-        self._group_combo.setVisible(show_group)
+        self._x_index_label.setVisible(show_xy and self._x_index_widget.has_array_schema())
+        self._x_index_widget.setVisible(show_xy and self._x_index_widget.has_array_schema())
+        self._plane_y_label.setVisible(show_xy and is_2d)
+        self._plane_y_combo.setVisible(show_xy and is_2d)
+        self._plane_y_index_label.setVisible(
+            show_xy and is_2d and self._plane_y_index_widget.has_array_schema()
+        )
+        self._plane_y_index_widget.setVisible(
+            show_xy and is_2d and self._plane_y_index_widget.has_array_schema()
+        )
+        self._series_rows_widget.setVisible(show_xy and not is_2d)
+        self._add_series_button.setVisible(show_xy and not is_2d)
         self._show_lines_checkbox.setVisible(show_xy and not is_2d)
-        self._repeat_combine_label.setVisible(show_xy and not is_2d)
-        self._repeat_combine_combo.setVisible(show_xy and not is_2d)
+        if hasattr(self, "_series_rows"):
+            for row in self._series_rows:
+                row.setVisible(show_xy and not is_2d)
+                show_split = show_xy and not is_2d and row._split_combo.count() > 1
+                row._split_label.setVisible(show_split)
+                row._split_combo.setVisible(show_split)
+                row._repeat_label.setVisible(show_xy and not is_2d)
+                row._repeat_combo.setVisible(show_xy and not is_2d)
+        self._z_row_widget.setVisible(is_2d)
+        self._z_label.setVisible(is_2d)
+        self._z_combo.setVisible(is_2d)
+        self._z_index_label.setVisible(is_2d and self._z_index_widget.has_array_schema())
+        self._z_index_widget.setVisible(is_2d and self._z_index_widget.has_array_schema())
         layout = self.layout()
         if layout is not None:
             layout.invalidate()
@@ -1743,8 +2785,8 @@ class _SiteColumnWidget(QtWidgets.QWidget):
             return
         distances = np.array([(point.pos() - event.pos()).length() for point in points])
         point = points[int(distances.argmin())]
-        source_index = point.data()
-        self.point_selected.emit(self._site.path, source_index)
+        selection = point.data()
+        self.point_selected.emit(self._site.path, selection)
 
     def _background_clicked(self, event) -> None:
         if event.isAccepted():
@@ -1786,9 +2828,16 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         self._legend.hide()
         self._rendered_point_values.clear()
         self._rendered_group_values.clear()
+        self._rendered_group_displays.clear()
+        self._rendered_source_indices.clear()
+        self._rendered_series_indices.clear()
+        self._rendered_series_labels.clear()
+        self._rendered_group_label_map.clear()
         self._group_colors.clear()
         self._current_plot_arrays = None
-        self._current_source_indices = []
+        self._current_display_point_keys = []
+        self._current_group_values = None
+        self._current_visible_fit_series = []
         self._selected_readout.setText("selected: none")
         artifact_source_kind, display_artifacts = _annotation_artifact_map_for_display(
             self._site, self._parent_point_index
@@ -1796,6 +2845,7 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         self._artifact_readout.setText(
             _format_artifact_readout(artifact_source_kind, display_artifacts)
         )
+        self._update_plot_overlay_text()
 
     def _clear_annotation_items(self) -> None:
         """Remove all persisted-analysis overlay items from the plot."""
@@ -1848,6 +2898,9 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         """Render one explicit curve annotation when it matches the selected axes."""
 
         annotation = render_spec.annotation
+        parameters = annotation.get("parameters", {})
+        if not self._annotation_xy_slice_matches(parameters, x_key=x_key, y_key=y_key):
+            return
         coordinates = annotation.get("coordinates", {})
         x_values = _annotation_curve_data(
             _annotation_value_from_spec(self._site, render_spec, coordinates.get(x_key))
@@ -1879,6 +2932,8 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         parameters = annotation.get("parameters", {})
         function_name = parameters.get("function_name")
         if function_name not in FIT_OBJECTS:
+            return
+        if not self._annotation_xy_slice_matches(parameters, x_key=x_key, y_key=y_key):
             return
 
         associated_channels = parameters.get("associated_channels")
@@ -1923,6 +2978,8 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         annotation = render_spec.annotation
         parameters = annotation.get("parameters", {})
         if parameters.get("x_axis") != x_key or parameters.get("y_axis") != y_key:
+            return
+        if not self._annotation_xy_slice_matches(parameters, x_key=x_key, y_key=y_key):
             return
 
         associated_channels = parameters.get("associated_channels")
@@ -1972,6 +3029,13 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         artifact_name = parameters.get("artifact")
         parameter_name = parameters.get("parameter")
         if not axis_key or not artifact_name or not parameter_name:
+            return
+        if not self._annotation_axis_slice_matches(
+            axis_key,
+            parameters.get("axis_indices"),
+            x_key=x_key,
+            y_key=y_key,
+        ):
             return
 
         artifact = render_spec.artifacts.get(artifact_name)
@@ -2023,6 +3087,13 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         coordinates = annotation.get("coordinates", {})
         data = annotation.get("data", {})
         for axis_key, spec in coordinates.items():
+            if not self._annotation_axis_slice_matches(
+                axis_key,
+                parameters.get("axis_indices"),
+                x_key=x_key,
+                y_key=y_key,
+            ):
+                continue
             value = _annotation_scalar_value(
                 _annotation_value_from_spec(self._site, render_spec, spec)
             )
@@ -2146,34 +3217,66 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         self._fit_curve_item.setData([], [])
         self._fit_curve_item.hide()
         self._fit_readout.setText("fit: none")
+        self._update_plot_overlay_text(
+            x_key=self._selected_x_key(),
+            y_key=self._selected_y_key(),
+        )
+
+    def _resolved_selected_display_point_key(self) -> _DisplayPointKey | None:
+        """Return the visible marker currently selected in this plot.
+
+        The viewer persists both the underlying logical source point and, when the user
+        clicked a specific visible marker, a display-point key. The latter is needed for
+        array-channel fan-out and other cases where one source point produces multiple
+        plotted markers.
+        """
+
+        if (
+            self._selected_display_point_key is not None
+            and self._selected_display_point_key in self._rendered_point_values
+        ):
+            return self._selected_display_point_key
+        if self._selected_point_index is None:
+            return None
+        for key, source_index in self._rendered_source_indices.items():
+            if int(source_index) == int(self._selected_point_index):
+                return key
+        return None
 
     def _fit_request_data(self) -> tuple[FitRequest, QtGui.QColor | str] | None:
         """Return the currently selected 1D data slice for viewer-side fitting."""
-        if self._current_plot_mode != _PLOT_MODE_1D or self._current_plot_arrays is None:
+        if self._current_plot_mode != _PLOT_MODE_1D or not self._current_visible_fit_series:
             self._fit_readout.setText("fit: 1D only")
             return None
 
-        x, y = self._current_plot_arrays
+        fit_series_index = self._selected_fit_series_index()
+        if fit_series_index < 0 or fit_series_index >= len(self._current_visible_fit_series):
+            self._fit_readout.setText("fit: choose a visible series")
+            return None
+        fit_series = self._current_visible_fit_series[fit_series_index]
+        x, y = fit_series.x, fit_series.y
         target = self._selected_fit_target()
-        if target == _FIT_TARGET_VISIBLE or not self._rendered_group_values:
+        if target == _FIT_TARGET_VISIBLE or fit_series.group_values is None:
             self._fit_target_group_value = None
             return FitRequest(x=x, y=y), "#ff7f0e"
 
-        if self._selected_point_index is None:
+        selected_display_key = self._resolved_selected_display_point_key()
+        if selected_display_key is None:
             self._fit_readout.setText("fit: select a point to choose its group")
             return None
-        selected_group = self._rendered_group_values.get(int(self._selected_point_index))
+        selected_series_index = self._rendered_series_indices.get(selected_display_key)
+        if selected_series_index != fit_series_index:
+            self._fit_readout.setText("fit: select a point from the chosen series")
+            return None
+        selected_group = self._rendered_group_values.get(selected_display_key)
         if selected_group is None:
             self._fit_readout.setText("fit: selected point group is not visible")
             return None
 
-        group_mask = np.array(
-            [
-                self._rendered_group_values.get(int(source_index)) == float(selected_group)
-                for source_index in self._current_source_indices
-            ],
-            dtype=bool,
-        )
+        if fit_series.group_values is None:
+            self._fit_readout.setText("fit: selected group is not available")
+            return None
+        group_mask = np.asarray(fit_series.group_values == float(selected_group), dtype=bool)
         if not group_mask.any():
             self._fit_readout.setText("fit: selected group has no visible points")
             return None
@@ -2202,6 +3305,7 @@ class _SiteColumnWidget(QtWidgets.QWidget):
             self._fit_result = None
             self._fit_curve_item.hide()
             self._fit_readout.setText(f"fit: {exc}")
+            self._update_plot_overlay_text()
             return
 
         self._fit_active = True
@@ -2212,41 +3316,86 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         self._fit_curve_item.setData(result.curve_x, result.curve_y)
         self._fit_curve_item.show()
         summary = result.summary()
+        fit_series_index = self._selected_fit_series_index()
+        fit_series_label = (
+            self._current_visible_fit_series[fit_series_index].label
+            if 0 <= fit_series_index < len(self._current_visible_fit_series)
+            else "series"
+        )
+        include_series_label = len(self._current_visible_fit_series) > 1
         if self._fit_target_group_value is not None:
+            selected_key = self._resolved_selected_display_point_key()
+            group_display = (
+                self._rendered_group_displays.get(selected_key)
+                if selected_key is not None
+                else None
+            )
+            if not group_display:
+                group_display = self._rendered_group_label_map.get(
+                    float(self._fit_target_group_value),
+                    _format_readout_value(self._fit_target_group_value),
+                )
+            prefix = (
+                f"fit: {model_id} on {fit_series_label}, "
+                if include_series_label
+                else f"fit: {model_id} on "
+            )
             self._fit_readout.setText(
-                "fit: "
-                f"{model_id} on {self._current_group_label} = "
-                f"{_format_readout_value(self._fit_target_group_value)}; {summary}"
+                prefix + f"{self._current_group_label} = {group_display}; {summary}"
             )
         else:
-            self._fit_readout.setText(f"fit: {model_id}; {summary}")
+            if include_series_label:
+                self._fit_readout.setText(f"fit: {model_id} on {fit_series_label}; {summary}")
+            else:
+                self._fit_readout.setText(f"fit: {model_id}; {summary}")
+        self._update_plot_overlay_text()
 
     def _update_selected_readout(self, plot_mode: str) -> None:
         """Show the numeric value of the selected sampled point."""
-        if self._selected_point_index is None:
+        selected_key = self._resolved_selected_display_point_key()
+        if selected_key is None:
             self._selected_readout.setText("selected: none")
             return
 
-        values = self._rendered_point_values.get(int(self._selected_point_index))
+        values = self._rendered_point_values.get(selected_key)
         if values is None:
             self._selected_readout.setText("selected: current point not visible")
             return
 
+        source_index = self._rendered_source_indices.get(selected_key)
         x_value, y_value, z_value = values
+        series_index = self._rendered_series_indices.get(selected_key)
+        y_label = (
+            self._rendered_series_labels.get(series_index, self._current_y_label)
+            if series_index is not None and len(self._rendered_series_labels) > 1
+            else self._current_y_label
+        )
         parts = [
             f"{self._current_x_label} = {_format_readout_value(x_value)}",
-            f"{self._current_y_label} = {_format_readout_value(y_value)}",
+            f"{y_label} = {_format_readout_value(y_value)}",
         ]
+        if series_index is not None and len(self._rendered_series_labels) > 1:
+            parts.append(
+                f"series = {self._rendered_series_labels.get(series_index, f'series {series_index + 1}')}"
+            )
         if plot_mode in {_PLOT_MODE_2D_SCATTER, _PLOT_MODE_2D_IMAGE} and z_value is not None:
             parts.append(f"{self._current_z_label} = {_format_readout_value(z_value)}")
         if plot_mode == _PLOT_MODE_1D and self._current_group_label is not None:
-            group_value = self._rendered_group_values.get(int(self._selected_point_index))
+            group_value = self._rendered_group_values.get(selected_key)
             if group_value is not None:
+                group_display = self._rendered_group_displays.get(
+                    selected_key,
+                    self._rendered_group_label_map.get(
+                        float(group_value),
+                        _format_readout_value(group_value),
+                    ),
+                )
                 parts.append(
-                    f"{self._current_group_label} = {_format_readout_value(group_value)}"
+                    f"{self._current_group_label} = {group_display}"
                 )
         self._selected_readout.setText(
-            f"selected point {int(self._selected_point_index)}: " + ", ".join(parts)
+            f"selected point {int(source_index) if source_index is not None else '?'}: "
+            + ", ".join(parts)
         )
 
     def _update_cursor_readout(self) -> None:
@@ -2261,14 +3410,422 @@ class _SiteColumnWidget(QtWidgets.QWidget):
             f"{self._current_y_label} = {_format_readout_value(y_value)}"
         )
 
+    def _set_error_bars_item(
+        self,
+        item: pg.ErrorBarItem,
+        *,
+        x_values: np.ndarray,
+        y_values: np.ndarray,
+        error_values: np.ndarray | None,
+        color: QtGui.QColor | str,
+    ) -> None:
+        if error_values is None or len(error_values) != len(y_values):
+            _clear_error_bar_item(item)
+            return
+        finite = np.isfinite(error_values) & (error_values > 0.0)
+        if finite.any():
+            item.setOpts(pen=_series_error_bar_pen(color))
+            item.setData(
+                x=x_values[finite],
+                y=y_values[finite],
+                top=error_values[finite],
+                bottom=error_values[finite],
+            )
+        else:
+            _clear_error_bar_item(item)
+
+    def _ensure_trace_items(self, count: int) -> tuple[list[pg.PlotDataItem], list[pg.ErrorBarItem]]:
+        while len(self._extra_line_items) + 1 < count:
+            self._extra_line_items.append(self._plot_item.plot())
+        while len(self._extra_error_bar_items) + 1 < count:
+            error_bar_item = pg.ErrorBarItem(beam=0.0)
+            self._extra_error_bar_items.append(error_bar_item)
+            self._plot_item.addItem(error_bar_item)
+        all_line_items = [self._line_item, *self._extra_line_items]
+        all_error_bar_items = [self._error_bar_item, *self._extra_error_bar_items]
+        for line_item in all_line_items[count:]:
+            line_item.setData([], [])
+        for error_bar_item in all_error_bar_items[count:]:
+            _clear_error_bar_item(error_bar_item)
+        return all_line_items[:count], all_error_bar_items[:count]
+
+    def _render_multi_series_1d(
+        self,
+        *,
+        x_key: str,
+        x_label_map: dict[str, str],
+        y_label_map: dict[str, str],
+    ) -> bool:
+        self._colorbar.set_state(visible=False)
+        self._legend.clear()
+        self._legend.hide()
+        self._image_item.hide()
+        self._crosshair_x.hide()
+        self._crosshair_y.hide()
+        self._clear_annotation_items()
+        self._rendered_group_displays.clear()
+        self._rendered_group_label_map = {}
+        self._group_colors.clear()
+
+        raw_scatter_points: list[dict[str, Any]] = []
+        summary_scatter_points: list[dict[str, Any]] = []
+        rendered_entries: list[tuple[_DisplayPointKey, int, float, float, float | None, float | None, int]] = []
+        fit_series: list[_VisibleFitSeries] = []
+        line_payloads: list[tuple[np.ndarray, np.ndarray, QtGui.QColor, str]] = []
+        error_payloads: list[tuple[np.ndarray, np.ndarray, np.ndarray | None, QtGui.QColor]] = []
+        repeated_status_bits: list[str] = []
+
+        for series_index, series_state in enumerate(self._current_series_states()):
+            if series_state.y_key is None:
+                continue
+            prepared = self._prepare_plot_arrays(
+                plot_mode=_PLOT_MODE_1D,
+                x_key=x_key,
+                y_key=series_state.y_key,
+                group_key=series_state.group_key,
+                y_index_tokens=series_state.y_index_tokens,
+            )
+            if prepared is None:
+                continue
+
+            series_label = _axis_label_with_indices(
+                y_label_map.get(series_state.y_key, series_state.y_key),
+                site=self._site,
+                key=series_state.y_key,
+                index_tokens=series_state.y_index_tokens,
+            )
+
+            repeat_mode = series_state.repeat_combine_mode or _REPEAT_COMBINE_NONE
+            aggregated = _aggregate_repeated_1d_points(
+                prepared.x,
+                prepared.y,
+                prepared.source_indices,
+                prepared.group_values,
+            )
+            use_aggregated = (
+                repeat_mode != _REPEAT_COMBINE_NONE and aggregated.used_repeats
+            )
+            display_x = aggregated.x if use_aggregated else prepared.x
+            display_y = aggregated.y if use_aggregated else prepared.y
+            display_group_values = (
+                aggregated.group_values if use_aggregated else prepared.group_values
+            )
+            display_y_error = (
+                aggregated.y_std
+                if use_aggregated and repeat_mode == _REPEAT_COMBINE_STD
+                else aggregated.y_sem
+                if use_aggregated and repeat_mode == _REPEAT_COMBINE_SEM
+                else prepared.y_error
+            )
+            if use_aggregated:
+                repeat_mode_labels = dict(_REPEAT_COMBINE_CHOICES)
+                repeated_status_bits.append(
+                    f"repeated x: {repeat_mode_labels.get(repeat_mode, 'combined')}"
+                )
+            elif prepared.array_series_label_map is not None and series_state.group_key is None:
+                repeated_status_bits.append(
+                    f"repeated {prepared.array_series_label_name or 'series'} values"
+                )
+            fit_series.append(
+                _VisibleFitSeries(
+                    label=series_label,
+                    x=display_x.copy(),
+                    y=display_y.copy(),
+                    group_values=(
+                        None
+                        if display_group_values is None
+                        else display_group_values.copy()
+                    ),
+                )
+            )
+            raw_point_keys = [
+                ("series_point", series_index, point_index)
+                for point_index in range(len(prepared.source_indices))
+            ]
+            display_point_keys = (
+                [
+                    ("series_summary", series_index, point_index)
+                    for point_index in range(len(display_x))
+                ]
+                if use_aggregated
+                else list(raw_point_keys)
+            )
+
+            if display_group_values is None:
+                color = (
+                    QtGui.QColor("#1f77b4")
+                    if len(self._current_series_states()) == 1
+                    else QtGui.QColor(
+                        pg.intColor(len(line_payloads), hues=max(3, len(self._current_series_states()) + 1))
+                    )
+                )
+                line_payloads.append((display_x, display_y, color, series_label))
+                error_payloads.append((display_x, display_y, display_y_error, color))
+                for point_index, (xi, yi, point_key, source_index) in enumerate(
+                    zip(prepared.x, prepared.y, raw_point_keys, prepared.source_indices, strict=True)
+                ):
+                    raw_scatter_points.append(
+                        {
+                            "pos": (float(xi), float(yi)),
+                            "data": _DisplayedPointSelection(int(source_index), point_key),
+                            "brush": pg.mkBrush(_alpha_color(color, 40)) if use_aggregated else pg.mkBrush(color),
+                            "pen": pg.mkPen(_alpha_color(color, 60)) if use_aggregated else pg.mkPen(30, 30, 30, 120),
+                            "size": 6 if use_aggregated else 9,
+                        }
+                    )
+                    rendered_entries.append(
+                        (point_key, int(source_index), float(xi), float(yi), None, None, series_index)
+                    )
+                if use_aggregated:
+                    for point_index, (xi, yi, point_key, source_index) in enumerate(
+                        zip(display_x, display_y, display_point_keys, aggregated.source_indices, strict=True)
+                    ):
+                        summary_scatter_points.append(
+                            {
+                                "pos": (float(xi), float(yi)),
+                                "data": _DisplayedPointSelection(int(source_index), point_key),
+                                "brush": pg.mkBrush(color),
+                                "pen": pg.mkPen(30, 30, 30, 150),
+                                "size": 10,
+                            }
+                        )
+                        rendered_entries.append(
+                            (point_key, int(source_index), float(xi), float(yi), None, None, series_index)
+                        )
+                continue
+
+            groups: dict[float, list[int]] = {}
+            for point_index, group_value in enumerate(display_group_values):
+                groups.setdefault(float(group_value), []).append(point_index)
+            for group_value, indices in groups.items():
+                color = QtGui.QColor(pg.intColor(len(line_payloads), hues=max(3, len(line_payloads) + len(groups) + 1)))
+                self._group_colors[float(group_value)] = color
+                group_display = (
+                    prepared.group_label_map.get(float(group_value), _format_readout_value(group_value))
+                    if prepared.group_label_map is not None
+                    else _format_readout_value(group_value)
+                )
+                self._rendered_group_label_map[float(group_value)] = group_display
+                trace_label = f"{series_label}; {prepared.group_label_name or 'group'} = {group_display}"
+                ordered_indices = np.asarray(indices, dtype=int)[
+                    np.argsort(display_x[indices], kind="stable")
+                ]
+                line_payloads.append(
+                    (display_x[ordered_indices], display_y[ordered_indices], color, trace_label)
+                )
+                group_error = (
+                    None
+                    if display_y_error is None
+                    else np.asarray(display_y_error[indices], dtype=float)
+                )
+                error_payloads.append(
+                    (display_x[indices], display_y[indices], group_error, color)
+                )
+            for raw_index, (xi, yi, point_key, source_index, raw_group_value) in enumerate(
+                zip(
+                    prepared.x,
+                    prepared.y,
+                    raw_point_keys,
+                    prepared.source_indices,
+                    [None] * len(prepared.source_indices)
+                    if prepared.group_values is None
+                    else prepared.group_values,
+                    strict=True,
+                )
+            ):
+                raw_color = QtGui.QColor(pg.intColor(
+                    list(groups.keys()).index(float(raw_group_value))
+                    if raw_group_value is not None
+                    else 0,
+                    hues=max(3, len(groups)),
+                ))
+                raw_scatter_points.append(
+                    {
+                        "pos": (float(xi), float(yi)),
+                        "data": _DisplayedPointSelection(int(source_index), point_key),
+                        "brush": pg.mkBrush(_alpha_color(raw_color, 40)) if use_aggregated else pg.mkBrush(raw_color),
+                        "pen": pg.mkPen(_alpha_color(raw_color, 60)) if use_aggregated else pg.mkPen(30, 30, 30, 120),
+                        "size": 6 if use_aggregated else 9,
+                    }
+                )
+                group_display = (
+                    prepared.group_label_map.get(float(raw_group_value), _format_readout_value(raw_group_value))
+                    if raw_group_value is not None and prepared.group_label_map is not None
+                    else _format_readout_value(raw_group_value) if raw_group_value is not None else ""
+                )
+                rendered_entries.append(
+                    (
+                        point_key,
+                        int(source_index),
+                        float(xi),
+                        float(yi),
+                        None,
+                        None if raw_group_value is None else float(raw_group_value),
+                        series_index,
+                    )
+                )
+                self._rendered_group_displays[point_key] = group_display
+            if use_aggregated:
+                for point_index, (xi, yi, point_key, source_index, group_value) in enumerate(
+                    zip(
+                        display_x,
+                        display_y,
+                        display_point_keys,
+                        aggregated.source_indices,
+                        display_group_values,
+                        strict=True,
+                    )
+                ):
+                    color = QtGui.QColor(pg.intColor(
+                        list(groups.keys()).index(float(group_value)),
+                        hues=max(3, len(groups)),
+                    ))
+                    summary_scatter_points.append(
+                        {
+                            "pos": (float(xi), float(yi)),
+                            "data": _DisplayedPointSelection(int(source_index), point_key),
+                            "brush": pg.mkBrush(color),
+                            "pen": pg.mkPen(30, 30, 30, 150),
+                            "size": 10,
+                        }
+                    )
+                    rendered_entries.append(
+                        (
+                            point_key,
+                            int(source_index),
+                            float(xi),
+                            float(yi),
+                            None,
+                            float(group_value),
+                            series_index,
+                        )
+                    )
+                    group_display = (
+                        prepared.group_label_map.get(float(group_value), _format_readout_value(group_value))
+                        if prepared.group_label_map is not None
+                        else _format_readout_value(group_value)
+                    )
+                    self._rendered_group_displays[point_key] = group_display
+
+        if not fit_series:
+            return False
+
+        all_line_items, all_error_bar_items = self._ensure_trace_items(len(line_payloads))
+        for item, payload in zip(all_line_items, line_payloads, strict=True):
+            x_values, y_values, color, label = payload
+            item.setPen(pg.mkPen(color, width=1.8))
+            if self._show_lines_checkbox.isChecked():
+                item.setData(x_values, y_values)
+            else:
+                item.setData([], [])
+            self._legend.addItem(item, label)
+        for item, payload in zip(all_error_bar_items, error_payloads, strict=True):
+            x_values, y_values, error_values, color = payload
+            self._set_error_bars_item(
+                item,
+                x_values=x_values,
+                y_values=y_values,
+                error_values=error_values,
+                color=color,
+            )
+        self._legend.setVisible(len(line_payloads) > 1)
+        self._scatter.setData(raw_scatter_points)
+        self._summary_scatter.setData(summary_scatter_points)
+
+        self._current_visible_fit_series = fit_series
+        self._sync_fit_series_combo()
+        self._sync_fit_target_combo()
+
+        first_series = fit_series[0]
+        self._current_plot_arrays = (first_series.x.copy(), first_series.y.copy())
+        self._current_group_values = (
+            None if first_series.group_values is None else first_series.group_values.copy()
+        )
+        self._current_x_label = _axis_label_with_indices(
+            x_label_map.get(x_key, x_key if x_key != _POINT_INDEX_KEY else "point_index"),
+            site=self._site,
+            key=x_key,
+            index_tokens=self._selected_x_index_tokens(),
+        )
+        self._current_y_label = first_series.label if len(fit_series) == 1 else "value"
+        self._plot_item.setLabel("bottom", self._current_x_label)
+        self._plot_item.setLabel("left", self._current_y_label)
+        self._current_plot_mode = _PLOT_MODE_1D
+        self._current_z_label = None
+        first_group_label = None
+        first_group_key = self._current_series_states()[0].group_key if self._current_series_states() else None
+        if first_group_key is not None:
+            if first_group_key == _ARRAY_SERIES_GROUP_KEY:
+                first_series_state = self._current_series_states()[0]
+                y_schema = self._site.channels.get(first_series_state.y_key) if first_series_state.y_key is not None else None
+                first_group_label = _ranged_dim_name_for_selection(
+                    y_schema if isinstance(y_schema, dict) else None,
+                    first_series_state.y_index_tokens,
+                ) or "group"
+            else:
+                group_label_map = _choice_label_map(_group_by_choices(self._site, x_key))
+                first_group_label = group_label_map.get(first_group_key, first_group_key)
+        self._current_group_label = first_group_label
+        self._rendered_point_values = {
+            point_key: (x_value, y_value, z_value)
+            for point_key, _, x_value, y_value, z_value, _, _ in rendered_entries
+        }
+        self._rendered_source_indices = {
+            point_key: source_index
+            for point_key, source_index, _, _, _, _, _ in rendered_entries
+        }
+        self._rendered_group_values = {
+            point_key: group_value
+            for point_key, _, _, _, _, group_value, _ in rendered_entries
+            if group_value is not None
+        }
+        self._rendered_series_indices = {
+            point_key: series_index
+            for point_key, _, _, _, _, _, series_index in rendered_entries
+        }
+        self._rendered_series_labels = {
+            index: series.label for index, series in enumerate(fit_series)
+        }
+        status = self._plot_data.mode_label
+        split_labels = []
+        for series_state in self._current_series_states():
+            if series_state.group_key is None:
+                continue
+            if series_state.group_key == _ARRAY_SERIES_GROUP_KEY:
+                y_schema = self._site.channels.get(series_state.y_key) if series_state.y_key is not None else None
+                dim_name = _ranged_dim_name_for_selection(
+                    y_schema if isinstance(y_schema, dict) else None,
+                    series_state.y_index_tokens,
+                )
+                if dim_name:
+                    split_labels.append(f"split by {dim_name}")
+            else:
+                group_label_map = _choice_label_map(_group_by_choices(self._site, x_key))
+                split_labels.append(
+                    f"grouped by {group_label_map.get(series_state.group_key, series_state.group_key)}"
+                )
+        if split_labels:
+            status += "; " + "; ".join(split_labels)
+        if repeated_status_bits:
+            status += "; " + "; ".join(dict.fromkeys(repeated_status_bits))
+        if len(fit_series) > 1:
+            status += f"; {len(fit_series)} series"
+        self._status.setText(status)
+        self._highlight_selected_point(_PLOT_MODE_1D)
+        self._update_selected_readout(_PLOT_MODE_1D)
+        self._update_cursor_readout()
+        return True
+
     def _render_1d_plot(
         self,
         x: np.ndarray,
         y: np.ndarray,
         y_error: np.ndarray | None,
+        point_keys: list[_DisplayPointKey],
         source_indices: list[int],
         group_key: str | None,
         group_values: np.ndarray | None,
+        group_label_map: dict[float, str] | None,
     ) -> _Rendered1DView:
         """Render a 1D scatter/line view.
 
@@ -2287,6 +3844,11 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         )
         display_x = aggregated.x if use_aggregated else x
         display_y = aggregated.y if use_aggregated else y
+        display_point_keys = (
+            [("summary", index) for index in range(len(aggregated.x))]
+            if use_aggregated
+            else list(point_keys)
+        )
         display_source_indices = (
             aggregated.source_indices if use_aggregated else list(source_indices)
         )
@@ -2349,25 +3911,41 @@ class _SiteColumnWidget(QtWidgets.QWidget):
                     [
                         {
                             "pos": (float(xi), float(yi)),
-                            "data": int(source_index),
+                            "data": _DisplayedPointSelection(
+                                int(source_index),
+                                point_key,
+                            ),
                             "brush": pg.mkBrush(_alpha_color("#1f77b4", 40)),
                             "pen": pg.mkPen(_alpha_color("#1f77b4", 60)),
                             "size": 6,
                         }
-                        for xi, yi, source_index in zip(x, y, source_indices, strict=True)
+                        for xi, yi, point_key, source_index in zip(
+                            x,
+                            y,
+                            point_keys,
+                            source_indices,
+                            strict=True,
+                        )
                     ]
                 )
                 self._summary_scatter.setData(
                     [
                         {
                             "pos": (float(xi), float(yi)),
-                            "data": int(source_index),
+                            "data": _DisplayedPointSelection(
+                                int(source_index),
+                                point_key,
+                            ),
                             "brush": pg.mkBrush("#1f77b4"),
                             "pen": pg.mkPen(30, 30, 30, 150),
                             "size": 10,
                         }
-                        for xi, yi, source_index in zip(
-                            display_x, display_y, display_source_indices, strict=True
+                        for xi, yi, point_key, source_index in zip(
+                            display_x,
+                            display_y,
+                            display_point_keys,
+                            display_source_indices,
+                            strict=True,
                         )
                     ]
                 )
@@ -2377,17 +3955,29 @@ class _SiteColumnWidget(QtWidgets.QWidget):
                     [
                         {
                             "pos": (float(xi), float(yi)),
-                            "data": int(source_index),
+                            "data": _DisplayedPointSelection(
+                                int(source_index),
+                                point_key,
+                            ),
                         }
-                        for xi, yi, source_index in zip(x, y, source_indices, strict=True)
+                        for xi, yi, point_key, source_index in zip(
+                            x,
+                            y,
+                            point_keys,
+                            source_indices,
+                            strict=True,
+                        )
                     ]
                 )
             return _Rendered1DView(
                 display_x=display_x,
                 display_y=display_y,
+                display_point_keys=display_point_keys,
                 display_source_indices=display_source_indices,
+                display_group_values=display_group_values,
                 raw_x=x,
                 raw_y=y,
+                raw_point_keys=list(point_keys),
                 raw_source_indices=list(source_indices),
                 raw_group_values=group_values,
                 repeats_aggregated=use_aggregated,
@@ -2448,7 +4038,10 @@ class _SiteColumnWidget(QtWidgets.QWidget):
                                 float(display_x[point_index]),
                                 float(display_y[point_index]),
                             ),
-                            "data": int(display_source_indices[point_index]),
+                            "data": _DisplayedPointSelection(
+                                int(display_source_indices[point_index]),
+                                display_point_keys[point_index],
+                            ),
                             "brush": brush,
                             "pen": pg.mkPen(30, 30, 30, 150),
                             "size": 10,
@@ -2463,9 +4056,14 @@ class _SiteColumnWidget(QtWidgets.QWidget):
                             float(x[point_index]) if use_aggregated else float(display_x[point_index]),
                             float(y[point_index]) if use_aggregated else float(display_y[point_index]),
                         ),
-                        "data": int(source_indices[point_index])
-                        if use_aggregated
-                        else int(display_source_indices[point_index]),
+                        "data": _DisplayedPointSelection(
+                            int(source_indices[point_index])
+                            if use_aggregated
+                            else int(display_source_indices[point_index]),
+                            point_keys[point_index]
+                            if use_aggregated
+                            else display_point_keys[point_index],
+                        ),
                         "brush": (
                             pg.mkBrush(_alpha_color(color, 40))
                             if use_aggregated
@@ -2479,16 +4077,24 @@ class _SiteColumnWidget(QtWidgets.QWidget):
                         "size": 6 if use_aggregated else 9,
                     }
                 )
-            self._legend.addItem(line_item, _format_readout_value(group_value))
+            legend_label = (
+                group_label_map.get(float(group_value), _format_readout_value(group_value))
+                if group_label_map is not None
+                else _format_readout_value(group_value)
+            )
+            self._legend.addItem(line_item, legend_label)
         self._legend.show()
         self._scatter.setData(raw_scatter_points)
         self._summary_scatter.setData(summary_scatter_points if use_aggregated else [])
         return _Rendered1DView(
             display_x=display_x,
             display_y=display_y,
+            display_point_keys=display_point_keys,
             display_source_indices=display_source_indices,
+            display_group_values=display_group_values,
             raw_x=x,
             raw_y=y,
+            raw_point_keys=list(point_keys),
             raw_source_indices=list(source_indices),
             raw_group_values=group_values,
             repeats_aggregated=use_aggregated,
@@ -2500,6 +4106,7 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         x: np.ndarray,
         y: np.ndarray,
         z: np.ndarray,
+        point_keys: list[_DisplayPointKey],
         source_indices: list[int],
         z_key: str | None,
         z_label_map: dict[str, str],
@@ -2542,12 +4149,18 @@ class _SiteColumnWidget(QtWidgets.QWidget):
                 [
                     {
                         "pos": (float(xi), float(yi)),
-                        "data": int(source_index),
+                        "data": _DisplayedPointSelection(int(source_index), point_key),
                         "brush": pg.mkBrush(255, 255, 255, 70),
                         "pen": pg.mkPen(255, 255, 255, 160),
                         "size": 6,
                     }
-                    for xi, yi, source_index in zip(x, y, source_indices, strict=True)
+                    for xi, yi, point_key, source_index in zip(
+                        x,
+                        y,
+                        point_keys,
+                        source_indices,
+                        strict=True,
+                    )
                 ]
             )
         else:
@@ -2555,13 +4168,18 @@ class _SiteColumnWidget(QtWidgets.QWidget):
                 [
                     {
                         "pos": (float(xi), float(yi)),
-                        "data": int(source_index),
+                        "data": _DisplayedPointSelection(int(source_index), point_key),
                         "brush": brush,
                         "pen": pg.mkPen(30, 30, 30, 120),
                         "size": 9,
                     }
-                    for xi, yi, source_index, brush in zip(
-                        x, y, source_indices, brushes, strict=True
+                    for xi, yi, point_key, source_index, brush in zip(
+                        x,
+                        y,
+                        point_keys,
+                        source_indices,
+                        brushes,
+                        strict=True,
                     )
                 ]
             )
@@ -2570,23 +4188,23 @@ class _SiteColumnWidget(QtWidgets.QWidget):
             )
         self._update_colorbar(z_key, z)
 
-    def _highlight_selected_point(
-        self, plot_mode: str, x: np.ndarray, y: np.ndarray, source_indices: list[int]
-    ) -> None:
-        """Show the selected point, and crosshairs in 2D modes."""
+    def _highlight_selected_point(self, plot_mode: str) -> None:
+        """Show the selected visible marker, and crosshairs in 2D modes."""
         highlighted = []
-        if self._selected_point_index is not None:
-            for xi, yi, source_index in zip(x, y, source_indices, strict=True):
-                if int(source_index) == int(self._selected_point_index):
-                    highlighted.append(
-                        {"pos": (float(xi), float(yi)), "data": int(source_index)}
-                    )
-                    if plot_mode in {_PLOT_MODE_2D_SCATTER, _PLOT_MODE_2D_IMAGE}:
-                        self._crosshair_x.setPos(float(xi))
-                        self._crosshair_y.setPos(float(yi))
-                        self._crosshair_x.show()
-                        self._crosshair_y.show()
-                    break
+        selected_key = self._resolved_selected_display_point_key()
+        if selected_key is not None:
+            values = self._rendered_point_values.get(selected_key)
+            source_index = self._rendered_source_indices.get(selected_key)
+            if values is not None and source_index is not None:
+                xi, yi, _ = values
+                highlighted.append(
+                    {"pos": (float(xi), float(yi)), "data": int(source_index)}
+                )
+                if plot_mode in {_PLOT_MODE_2D_SCATTER, _PLOT_MODE_2D_IMAGE}:
+                    self._crosshair_x.setPos(float(xi))
+                    self._crosshair_y.setPos(float(yi))
+                    self._crosshair_x.show()
+                    self._crosshair_y.show()
         self._highlight.setData(highlighted)
 
     def _render_bo_plot(self) -> None:
@@ -2598,7 +4216,8 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         self._status.setText(status)
         self._current_plot_mode = _PLOT_MODE_BO
         self._current_plot_arrays = None
-        self._current_source_indices = []
+        self._current_display_point_keys = []
+        self._current_group_values = None
         self._current_x_label = "x"
         self._current_y_label = "y"
         self._current_z_label = None
@@ -2606,6 +4225,519 @@ class _SiteColumnWidget(QtWidgets.QWidget):
         self._selected_readout.setText("selected: not available in BO dashboard")
         self._cursor_readout.setText("cursor: not available in BO dashboard")
         self._fit_readout.setText("fit: BO dashboard")
+        self._update_plot_overlay_text()
+
+    def _overlay_fit_summary_from_annotations(
+        self,
+        *,
+        x_key: str,
+        y_key: str,
+    ) -> str | None:
+        for render_spec in _annotation_specs_for_display(
+            self._site, self._parent_point_index
+        ):
+            if render_spec.annotation.get("kind") != "artifact_curve":
+                continue
+            parameters = render_spec.annotation.get("parameters", {})
+            if parameters.get("x_axis") != x_key or parameters.get("y_axis") != y_key:
+                continue
+            if not self._annotation_xy_slice_matches(parameters, x_key=x_key, y_key=y_key):
+                continue
+            associated_channels = parameters.get("associated_channels")
+            if associated_channels is not None and y_key not in associated_channels:
+                continue
+            artifact_name = parameters.get("artifact")
+            if not artifact_name:
+                continue
+            artifact = render_spec.artifacts.get(artifact_name)
+            if not isinstance(artifact, dict) or artifact.get("kind") != "model_fit":
+                continue
+            model_name = str(artifact.get("model_name", artifact.get("model_id", "fit")))
+            summary = artifact_summary(artifact)
+            return _wrap_overlay_text(f"{model_name}: {summary}")
+        return None
+
+    def _update_plot_overlay_text(
+        self,
+        *,
+        x_key: str | None = None,
+        y_key: str | None = None,
+    ) -> None:
+        lines = []
+        run_id_text = _run_id_text_for_site(self._site)
+        if run_id_text:
+            lines.append(run_id_text)
+
+        fit_line = None
+        if self._fit_active and self._fit_result is not None:
+            fit_line = _wrap_overlay_text(
+                f"{self._fit_result.model_id}: {self._fit_result.summary()}"
+            )
+        elif x_key is not None and y_key is not None:
+            fit_line = self._overlay_fit_summary_from_annotations(
+                x_key=x_key,
+                y_key=y_key,
+            )
+        if fit_line:
+            lines.append(fit_line)
+
+        self._run_id_overlay.set_display_text("\n".join(lines) if lines else None)
+
+    def _prepare_plot_arrays(
+        self,
+        *,
+        plot_mode: str,
+        x_key: str,
+        y_key: str,
+        group_key: str | None,
+        y_index_tokens: tuple[str, ...] | None = None,
+    ) -> _PreparedPlotArrays | None:
+        x_values = self._point_stream_values(x_key)
+        y_values = self._point_stream_values(y_key)
+        group_axis_values = (
+            self._point_stream_values(group_key)
+            if group_key not in {None, _ARRAY_SERIES_GROUP_KEY}
+            else []
+        )
+        y_error_key = _error_bar_channel_key(self._site, y_key)
+        y_error_values = (
+            self._point_stream_values(y_error_key) if y_error_key is not None else []
+        )
+        x_schema = self._site.channels.get(x_key)
+        y_schema = self._site.channels.get(y_key)
+        y_error_schema = (
+            self._site.channels.get(y_error_key) if y_error_key is not None else None
+        )
+
+        count = min(
+            len(x_values),
+            len(y_values),
+            len(self._plot_data.source_indices),
+        )
+        if group_key not in {None, _ARRAY_SERIES_GROUP_KEY}:
+            count = min(count, len(group_axis_values))
+        if y_error_key is not None:
+            count = min(count, len(y_error_values))
+        if count == 0:
+            return None
+
+        source_indices = self._plot_data.source_indices[:count]
+        x_series = _extract_axis_series_values(
+            list(x_values[:count]),
+            schema=x_schema if isinstance(x_schema, dict) else None,
+            index_tokens=self._selected_x_index_tokens(),
+        )
+        y_series = _extract_axis_series_values(
+            list(y_values[:count]),
+            schema=y_schema if isinstance(y_schema, dict) else None,
+            index_tokens=y_index_tokens if y_index_tokens is not None else self._selected_y_index_tokens(),
+        )
+        y_error_series = (
+            _extract_axis_series_values(
+                list(y_error_values[:count]),
+                schema=y_error_schema if isinstance(y_error_schema, dict) else None,
+                index_tokens=y_index_tokens if y_index_tokens is not None else self._selected_y_index_tokens(),
+            )
+            if y_error_key is not None
+            else None
+        )
+        z_key = None
+        z = None
+        group_values = None
+        group_label_map = None
+        group_label_name = None
+        array_series_label_map = None
+        array_series_label_name = None
+
+        if plot_mode != _PLOT_MODE_1D and (
+            len(x_series.series_values) > 1 or len(y_series.series_values) > 1
+        ):
+            raise ValueError("Array ranges are currently only supported in 1D mode")
+
+        num_series = max(len(x_series.series_values), len(y_series.series_values))
+        if len(x_series.series_values) not in {1, num_series}:
+            raise ValueError("X array selection produced an unsupported number of series")
+        if len(y_series.series_values) not in {1, num_series}:
+            raise ValueError("Y array selection produced an unsupported number of series")
+        if y_error_series is not None and len(y_error_series.series_values) not in {
+            1,
+            num_series,
+        }:
+            raise ValueError("Y error selection does not match the plotted series")
+
+        if num_series == 1:
+            x = x_series.series_values[0]
+            y = y_series.series_values[0]
+            y_error = (
+                y_error_series.series_values[0] if y_error_series is not None else None
+            )
+            if group_key is not None:
+                group_values = np.asarray(group_axis_values[:count], dtype=float)
+        else:
+            active_labels = (
+                x_series.series_labels
+                if len(x_series.series_values) > 1
+                else y_series.series_labels
+            )
+            active_label_name = (
+                _ranged_dim_name_for_selection(
+                    x_schema if isinstance(x_schema, dict) else None,
+                    self._selected_x_index_tokens(),
+                )
+                if len(x_series.series_values) > 1
+                else _ranged_dim_name_for_selection(
+                    y_schema if isinstance(y_schema, dict) else None,
+                    self._selected_y_index_tokens(),
+                )
+            ) or "series"
+
+            flat_x = []
+            flat_y = []
+            flat_y_error = [] if y_error_series is not None else None
+            flat_source_indices = []
+            flat_group_values = [] if group_key is not None else None
+            for series_index in range(num_series):
+                x_part = (
+                    x_series.series_values[series_index]
+                    if len(x_series.series_values) > 1
+                    else x_series.series_values[0]
+                )
+                y_part = (
+                    y_series.series_values[series_index]
+                    if len(y_series.series_values) > 1
+                    else y_series.series_values[0]
+                )
+                series_count = min(len(x_part), len(y_part), len(source_indices))
+                if series_count == 0:
+                    continue
+                flat_x.append(np.asarray(x_part[:series_count], dtype=float))
+                flat_y.append(np.asarray(y_part[:series_count], dtype=float))
+                if flat_y_error is not None and y_error_series is not None:
+                    error_part = (
+                        y_error_series.series_values[series_index]
+                        if len(y_error_series.series_values) > 1
+                        else y_error_series.series_values[0]
+                    )
+                    flat_y_error.append(np.asarray(error_part[:series_count], dtype=float))
+                flat_source_indices.extend(source_indices[:series_count])
+                if flat_group_values is not None:
+                    if group_key == _ARRAY_SERIES_GROUP_KEY:
+                        flat_group_values.extend([float(series_index)] * series_count)
+                    else:
+                        flat_group_values.extend(
+                            np.asarray(group_axis_values[:series_count], dtype=float).tolist()
+                        )
+
+            if not flat_x or not flat_y:
+                return None
+            x = np.concatenate(flat_x)
+            y = np.concatenate(flat_y)
+            y_error = (
+                np.concatenate(flat_y_error)
+                if flat_y_error is not None
+                else None
+            )
+            source_indices = flat_source_indices
+            group_values = (
+                np.asarray(flat_group_values, dtype=float)
+                if flat_group_values is not None
+                else None
+            )
+            array_series_label_map = {
+                float(index): label
+                for index, label in enumerate(active_labels or [])
+            }
+            array_series_label_name = active_label_name
+            if group_key == _ARRAY_SERIES_GROUP_KEY:
+                group_label_map = array_series_label_map
+                group_label_name = array_series_label_name
+
+        if plot_mode in {_PLOT_MODE_2D_SCATTER, _PLOT_MODE_2D_IMAGE}:
+            z_key = self._selected_z_key()
+            z_values = self._point_stream_values(z_key) if z_key is not None else []
+            count = min(len(x), len(y), len(source_indices), len(z_values))
+            if count == 0:
+                return None
+            x = x[:count]
+            y = y[:count]
+            source_indices = source_indices[:count]
+            z_series = _extract_axis_series_values(
+                list(z_values[:count]),
+                schema=(
+                    self._site.channels.get(z_key)
+                    if z_key is not None and isinstance(self._site.channels.get(z_key), dict)
+                    else None
+                ),
+                index_tokens=self._selected_z_index_tokens(),
+            )
+            if len(z_series.series_values) != 1:
+                raise ValueError("Z array ranges are currently only supported in 1D mode")
+            z = np.asarray(z_series.series_values[0], dtype=float)
+
+            finite_mask = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+            if not finite_mask.any():
+                return None
+            x = x[finite_mask]
+            y = y[finite_mask]
+            z = z[finite_mask]
+            source_indices = [
+                src
+                for src, keep in zip(source_indices, finite_mask, strict=True)
+                if keep
+            ]
+        else:
+            finite_mask = np.isfinite(x) & np.isfinite(y)
+            if group_values is not None:
+                finite_mask &= np.isfinite(group_values)
+            if not finite_mask.any():
+                return None
+            x = x[finite_mask]
+            y = y[finite_mask]
+            if y_error is not None:
+                y_error = y_error[finite_mask]
+            if group_values is not None:
+                group_values = group_values[finite_mask]
+            source_indices = [
+                src
+                for src, keep in zip(source_indices, finite_mask, strict=True)
+                if keep
+            ]
+        point_keys = [("point", index) for index in range(len(source_indices))]
+
+        return _PreparedPlotArrays(
+            plot_mode=plot_mode,
+            x_key=x_key,
+            y_key=y_key,
+            group_key=group_key,
+            z_key=z_key,
+            x=x,
+            y=y,
+            y_error=y_error,
+            point_keys=point_keys,
+            source_indices=source_indices,
+            group_values=group_values,
+            group_label_map=group_label_map,
+            group_label_name=group_label_name,
+            array_series_label_map=array_series_label_map,
+            array_series_label_name=array_series_label_name,
+            z=z,
+        )
+
+    def _render_selected_plot_mode(
+        self,
+        prepared: _PreparedPlotArrays,
+        *,
+        z_label_map: dict[str, str],
+    ) -> _Rendered1DView | None:
+        if prepared.plot_mode == _PLOT_MODE_1D:
+            rendered_1d = self._render_1d_plot(
+                prepared.x,
+                prepared.y,
+                prepared.y_error,
+                prepared.point_keys,
+                prepared.source_indices,
+                prepared.group_key,
+                prepared.group_values,
+                prepared.group_label_map,
+            )
+            status = self._plot_data.mode_label
+            if prepared.group_key == _ARRAY_SERIES_GROUP_KEY:
+                status += (
+                    "; split by "
+                    f"{prepared.group_label_name or 'series'}"
+                )
+            elif prepared.group_key is not None:
+                group_label_map = _choice_label_map(
+                    _group_by_choices(self._site, prepared.x_key)
+                )
+                status += (
+                    "; grouped by "
+                    f"{group_label_map.get(prepared.group_key, prepared.group_key)}"
+                )
+            elif prepared.array_series_label_map is not None:
+                status += (
+                    "; repeated "
+                    f"{prepared.array_series_label_name or 'series'} values"
+                )
+            if rendered_1d.repeats_aggregated:
+                repeat_mode_labels = dict(_REPEAT_COMBINE_CHOICES)
+                status += (
+                    "; repeated x: "
+                    f"{repeat_mode_labels.get(self._selected_repeat_combine_mode(), 'combined')}"
+                )
+            self._status.setText(status)
+            return rendered_1d
+
+        assert prepared.z is not None
+        self._render_2d_plot(
+            prepared.plot_mode,
+            prepared.x,
+            prepared.y,
+            prepared.z,
+            prepared.point_keys,
+            prepared.source_indices,
+            prepared.z_key,
+            z_label_map,
+        )
+        return None
+
+    def _update_rendered_plot_state(
+        self,
+        prepared: _PreparedPlotArrays,
+        rendered_1d: _Rendered1DView | None,
+        *,
+        x_label_map: dict[str, str],
+        y_label_map: dict[str, str],
+        z_label_map: dict[str, str],
+    ) -> None:
+        annotation_x = rendered_1d.display_x if rendered_1d is not None else prepared.x
+        self._render_annotations(
+            prepared.plot_mode,
+            x_key=prepared.x_key,
+            y_key=prepared.y_key,
+            x=annotation_x,
+        )
+        artifact_source_kind, display_artifacts = _annotation_artifact_map_for_display(
+            self._site, self._parent_point_index
+        )
+        self._artifact_readout.setText(
+            _format_artifact_readout(artifact_source_kind, display_artifacts)
+        )
+
+        x_label = x_label_map.get(
+            prepared.x_key,
+            prepared.x_key
+            if prepared.x_key != _POINT_INDEX_KEY
+            else "point_index",
+        )
+        x_label = _axis_label_with_indices(
+            x_label,
+            site=self._site,
+            key=prepared.x_key,
+            index_tokens=self._selected_x_index_tokens(),
+        )
+        y_label = _axis_label_with_indices(
+            y_label_map.get(prepared.y_key, prepared.y_key),
+            site=self._site,
+            key=prepared.y_key,
+            index_tokens=self._selected_y_index_tokens(),
+        )
+        z_label = (
+            _axis_label_with_indices(
+                z_label_map.get(prepared.z_key, prepared.z_key),
+                site=self._site,
+                key=prepared.z_key,
+                index_tokens=self._selected_z_index_tokens(),
+            )
+            if prepared.z_key is not None
+            else None
+        )
+        self._plot_item.setLabel("bottom", x_label)
+        self._plot_item.setLabel("left", y_label)
+        self._current_x_label = x_label
+        self._current_y_label = y_label
+        self._current_z_label = z_label
+        self._current_plot_mode = prepared.plot_mode
+
+        if rendered_1d is not None:
+            self._current_plot_arrays = (
+                rendered_1d.display_x.copy(),
+                rendered_1d.display_y.copy(),
+            )
+            self._current_display_point_keys = list(rendered_1d.display_point_keys)
+            self._current_group_values = (
+                None
+                if rendered_1d.display_group_values is None
+                else np.asarray(rendered_1d.display_group_values, dtype=float).copy()
+            )
+            rendered_entries = [
+                *zip(
+                    rendered_1d.raw_point_keys,
+                    rendered_1d.raw_source_indices,
+                    rendered_1d.raw_x,
+                    rendered_1d.raw_y,
+                    [None] * len(rendered_1d.raw_point_keys),
+                    [None] * len(rendered_1d.raw_point_keys)
+                    if rendered_1d.raw_group_values is None
+                    else rendered_1d.raw_group_values,
+                    strict=True,
+                ),
+            ]
+            if rendered_1d.repeats_aggregated:
+                rendered_entries.extend(
+                    zip(
+                        rendered_1d.display_point_keys,
+                        rendered_1d.display_source_indices,
+                        rendered_1d.display_x,
+                        rendered_1d.display_y,
+                        [None] * len(rendered_1d.display_point_keys),
+                        [None] * len(rendered_1d.display_point_keys)
+                        if rendered_1d.display_group_values is None
+                        else rendered_1d.display_group_values,
+                        strict=True,
+                    )
+                )
+        else:
+            self._current_plot_arrays = (prepared.x.copy(), prepared.y.copy())
+            self._current_display_point_keys = list(prepared.point_keys)
+            self._current_group_values = (
+                None
+                if prepared.group_values is None
+                else np.asarray(prepared.group_values, dtype=float).copy()
+            )
+            rendered_entries = list(
+                zip(
+                    prepared.point_keys,
+                    prepared.source_indices,
+                    prepared.x,
+                    prepared.y,
+                    [None] * len(prepared.point_keys)
+                    if prepared.z is None
+                    else prepared.z,
+                    [None] * len(prepared.point_keys)
+                    if prepared.group_values is None
+                    else prepared.group_values,
+                    strict=True,
+                )
+            )
+
+        if prepared.group_label_map is not None:
+            self._current_group_label = prepared.group_label_name or "series"
+            self._rendered_group_label_map = dict(prepared.group_label_map)
+        else:
+            group_label_map = _choice_label_map(
+                _group_by_choices(self._site, prepared.x_key)
+            )
+            self._current_group_label = (
+                group_label_map.get(prepared.group_key, prepared.group_key)
+                if prepared.group_key is not None
+                else None
+            )
+            self._rendered_group_label_map = {}
+        self._rendered_point_values = {
+            point_key: (
+                float(xi),
+                float(yi),
+                None if zi is None else float(zi),
+            )
+            for point_key, _, xi, yi, zi, _ in rendered_entries
+        }
+        self._rendered_source_indices = {
+            point_key: int(source_index)
+            for point_key, source_index, _, _, _, _ in rendered_entries
+        }
+        self._rendered_group_values = {
+            point_key: float(group_value)
+            for point_key, _, _, _, _, group_value in rendered_entries
+            if group_value is not None
+        }
+        self._highlight_selected_point(prepared.plot_mode)
+        self._update_selected_readout(prepared.plot_mode)
+        self._update_cursor_readout()
+        self._update_plot_overlay_text(
+            x_key=prepared.x_key,
+            y_key=prepared.y_key,
+        )
 
     def _render_plot(self) -> None:
         """Render the current site slice using the selected plot mode and axes."""
@@ -2626,199 +4758,72 @@ class _SiteColumnWidget(QtWidgets.QWidget):
             return
         self._plot_stack.setCurrentWidget(self._pyqtgraph_panel)
         x_key = self._selected_x_key()
-        y_key = self._selected_y_key()
-        group_key = self._selected_group_key()
-        if x_key is None or y_key is None:
+        if x_key is None:
             self._clear_plot_items()
             return
-
-        x_values = self._point_stream_values(x_key)
-        y_values = self._point_stream_values(y_key)
-        group_axis_values = self._point_stream_values(group_key) if group_key is not None else []
-        y_error_key = _error_bar_channel_key(self._site, y_key)
-        y_error_values = (
-            self._point_stream_values(y_error_key) if y_error_key is not None else []
-        )
-
-        count = min(
-            len(x_values),
-            len(y_values),
-            len(self._plot_data.source_indices),
-        )
-        if group_key is not None:
-            count = min(count, len(group_axis_values))
-        if y_error_key is not None:
-            count = min(count, len(y_error_values))
-        if count == 0:
-            self._clear_plot_items()
-            return
-
-        x = np.asarray(x_values[:count], dtype=float)
-        y = np.asarray(y_values[:count], dtype=float)
-        y_error = (
-            np.asarray(y_error_values[:count], dtype=float)
-            if y_error_key is not None
-            else None
-        )
-        source_indices = self._plot_data.source_indices[:count]
-        group = (
-            np.asarray(group_axis_values[:count], dtype=float)
-            if group_key is not None
-            else None
-        )
-        z_key = None
-        z = None
-        if plot_mode in {_PLOT_MODE_2D_SCATTER, _PLOT_MODE_2D_IMAGE}:
-            z_key = self._selected_z_key()
-            z_values = self._point_stream_values(z_key) if z_key is not None else []
-            count = min(count, len(z_values))
-            if count == 0:
-                self._clear_plot_items()
-                return
-            z = np.asarray(z_values[:count], dtype=float)
-            x = x[:count]
-            y = y[:count]
-            source_indices = source_indices[:count]
-
-            finite_mask = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
-            if not finite_mask.any():
-                self._clear_plot_items()
-                return
-            x = x[finite_mask]
-            y = y[finite_mask]
-            z = z[finite_mask]
-            source_indices = [src for src, keep in zip(source_indices, finite_mask, strict=True) if keep]
-        else:
-            finite_mask = np.isfinite(x) & np.isfinite(y)
-            if group is not None:
-                finite_mask &= np.isfinite(group)
-            if not finite_mask.any():
-                self._clear_plot_items()
-                return
-            x = x[finite_mask]
-            y = y[finite_mask]
-            if y_error is not None:
-                y_error = y_error[finite_mask]
-            if group is not None:
-                group = group[finite_mask]
-            source_indices = [src for src, keep in zip(source_indices, finite_mask, strict=True) if keep]
 
         self._image_item.hide()
         self._crosshair_x.hide()
         self._crosshair_y.hide()
-
         if plot_mode == _PLOT_MODE_1D:
-            rendered_1d = self._render_1d_plot(
-                x, y, y_error, source_indices, group_key, group
+            if not self._render_multi_series_1d(
+                x_key=x_key,
+                x_label_map=x_label_map,
+                y_label_map=y_label_map,
+            ):
+                self._clear_plot_items()
+                return
+            first_series = next(
+                (series for series in self._current_series_states() if series.y_key is not None),
+                None,
             )
-            status = self._plot_data.mode_label
-            if group_key is not None:
-                group_label_map = _choice_label_map(_group_by_choices(self._site, x_key))
-                status += f"; grouped by {group_label_map.get(group_key, group_key)}"
-            if rendered_1d.repeats_aggregated:
-                repeat_mode_labels = dict(_REPEAT_COMBINE_CHOICES)
-                status += (
-                    "; repeated x: "
-                    f"{repeat_mode_labels.get(self._selected_repeat_combine_mode(), 'combined')}"
+            if first_series is not None and self._current_plot_arrays is not None:
+                self._render_annotations(
+                    plot_mode,
+                    x_key=x_key,
+                    y_key=first_series.y_key,
+                    x=self._current_plot_arrays[0],
                 )
-            self._status.setText(status)
-        else:
-            assert z is not None
-            self._render_2d_plot(plot_mode, x, y, z, source_indices, z_key, z_label_map)
-            rendered_1d = None
+            artifact_source_kind, display_artifacts = _annotation_artifact_map_for_display(
+                self._site, self._parent_point_index
+            )
+            self._artifact_readout.setText(
+                _format_artifact_readout(artifact_source_kind, display_artifacts)
+            )
+            self._update_plot_overlay_text(x_key=x_key, y_key=self._selected_y_key())
+            return
 
-        self._render_annotations(
-            plot_mode,
-            x_key=x_key,
-            y_key=y_key,
-            x=(
-                rendered_1d.display_x
-                if rendered_1d is not None
-                else x
-            ),
-        )
-        artifact_source_kind, display_artifacts = _annotation_artifact_map_for_display(
-            self._site, self._parent_point_index
-        )
-        self._artifact_readout.setText(
-            _format_artifact_readout(artifact_source_kind, display_artifacts)
-        )
-        self._plot_item.setLabel(
-            "bottom",
-            x_label_map.get(
-                x_key,
-                x_key if x_key != _POINT_INDEX_KEY else "point_index",
-            ),
-        )
-        self._plot_item.setLabel("left", y_label_map.get(y_key, y_key))
-        self._current_x_label = x_label_map.get(
-            x_key,
-            x_key if x_key != _POINT_INDEX_KEY else "point_index",
-        )
-        self._current_y_label = y_label_map.get(y_key, y_key)
-        self._current_z_label = z_label_map.get(z_key, z_key) if z_key is not None else None
-        self._current_plot_mode = plot_mode
-        if rendered_1d is not None:
-            self._current_plot_arrays = (
-                rendered_1d.display_x.copy(),
-                rendered_1d.display_y.copy(),
+        y_key = self._selected_y_key()
+        group_key = self._selected_group_key()
+        if y_key is None:
+            self._clear_plot_items()
+            return
+        try:
+            prepared = self._prepare_plot_arrays(
+                plot_mode=plot_mode,
+                x_key=x_key,
+                y_key=y_key,
+                group_key=group_key,
             )
-            self._current_source_indices = list(rendered_1d.display_source_indices)
-            highlight_x = rendered_1d.raw_x
-            highlight_y = rendered_1d.raw_y
-            highlight_source_indices = rendered_1d.raw_source_indices
-            rendered_group_values = rendered_1d.raw_group_values
-            rendered_source_indices = rendered_1d.raw_source_indices
-            rendered_x = rendered_1d.raw_x
-            rendered_y = rendered_1d.raw_y
-        else:
-            self._current_plot_arrays = (x.copy(), y.copy())
-            self._current_source_indices = list(source_indices)
-            highlight_x = x
-            highlight_y = y
-            highlight_source_indices = source_indices
-            rendered_group_values = group
-            rendered_source_indices = source_indices
-            rendered_x = x
-            rendered_y = y
-        group_label_map = _choice_label_map(_group_by_choices(self._site, x_key))
-        self._current_group_label = (
-            group_label_map.get(group_key, group_key) if group_key is not None else None
+        except ValueError as exc:
+            self._clear_plot_items()
+            self._status.setText(str(exc))
+            return
+        if prepared is None:
+            self._clear_plot_items()
+            return
+
+        rendered_1d = self._render_selected_plot_mode(
+            prepared,
+            z_label_map=z_label_map,
         )
-        self._rendered_point_values = {
-            int(source_index): (
-                float(xi),
-                float(yi),
-                None if z is None else float(zi),
-            )
-            for source_index, xi, yi, zi in zip(
-                rendered_source_indices,
-                rendered_x,
-                rendered_y,
-                [None] * len(rendered_source_indices) if z is None else z,
-                strict=True,
-            )
-        }
-        self._rendered_group_values = (
-            {
-                int(source_index): float(group_value)
-                for source_index, group_value in zip(
-                    rendered_source_indices,
-                    rendered_group_values,
-                    strict=True,
-                )
-            }
-            if rendered_group_values is not None
-            else {}
+        self._update_rendered_plot_state(
+            prepared,
+            rendered_1d,
+            x_label_map=x_label_map,
+            y_label_map=y_label_map,
+            z_label_map=z_label_map,
         )
-        self._highlight_selected_point(
-            plot_mode,
-            highlight_x,
-            highlight_y,
-            highlight_source_indices,
-        )
-        self._update_selected_readout(plot_mode)
-        self._update_cursor_readout()
 
 
 class RuntimePlotViewer(QtWidgets.QWidget):
@@ -2836,15 +4841,7 @@ class RuntimePlotViewer(QtWidgets.QWidget):
         self._snapshot = None
         self._paused = False
         self._pending_values: dict[str, Any] | None = None
-        self._selected_points = dict[tuple[str, ...], int | None]()
-        self._selected_child_paths = dict[tuple[str, ...], tuple[str, ...]]()
-        self._selected_plot_modes = dict[tuple[str, ...], str]()
-        self._selected_x_keys = dict[tuple[str, ...], str]()
-        self._selected_y_keys = dict[tuple[str, ...], str]()
-        self._selected_z_keys = dict[tuple[str, ...], str]()
-        self._selected_group_keys = dict[tuple[str, ...], str]()
-        self._show_lines = dict[tuple[str, ...], bool]()
-        self._selected_repeat_combine_modes = dict[tuple[str, ...], str]()
+        self._site_ui_state = dict[tuple[str, ...], _SiteUiState]()
         self._columns: list[_SiteColumnWidget] = []
 
         outer = QtWidgets.QVBoxLayout()
@@ -2873,6 +4870,13 @@ class RuntimePlotViewer(QtWidgets.QWidget):
         self._columns_layout.setSpacing(8)
         self._columns_widget.setLayout(self._columns_layout)
         self._scroll.setWidget(self._columns_widget)
+
+    def _ui_state_for(self, site_path: tuple[str, ...]) -> _SiteUiState:
+        state = self._site_ui_state.get(site_path)
+        if state is None:
+            state = _SiteUiState()
+            self._site_ui_state[site_path] = state
+        return state
 
     def data_changed(
         self,
@@ -2940,24 +4944,23 @@ class RuntimePlotViewer(QtWidgets.QWidget):
         itself: selected descendant points and chosen descendant child sites.
         """
 
-        for store in (
-            self._selected_points,
-            self._selected_child_paths,
-        ):
-            for path in list(store.keys()):
-                if _descends_from(path, site_path):
-                    del store[path]
+        for path, state in self._site_ui_state.items():
+            if _descends_from(path, site_path):
+                state.selected_point_index = None
+                state.selected_display_point_key = None
+                state.selected_child_path = None
 
     def _choose_child_site(
         self, parent_path: tuple[str, ...], child_sites: list[HostRuntimeSiteData]
     ) -> HostRuntimeSiteData:
         """Return the chosen child site for one parent path, defaulting to the first."""
-        selected_path = self._selected_child_paths.get(parent_path)
+        state = self._ui_state_for(parent_path)
+        selected_path = state.selected_child_path
         for site in child_sites:
             if site.path == selected_path:
                 return site
         chosen = child_sites[0]
-        self._selected_child_paths[parent_path] = chosen.path
+        state.selected_child_path = chosen.path
         return chosen
 
     def _rebuild_columns(self) -> None:
@@ -3000,7 +5003,7 @@ class RuntimePlotViewer(QtWidgets.QWidget):
                     site=child_site,
                     child_site_options=child_sites,
                     selected_child_path=child_site.path,
-                    parent_point_index=self._selected_points.get(parent_path),
+                    parent_point_index=self._ui_state_for(parent_path).selected_point_index,
                 )
             )
             parent_path = child_site.path
@@ -3022,45 +5025,58 @@ class RuntimePlotViewer(QtWidgets.QWidget):
                 selected_child_path=spec.selected_child_path,
                 parent_point_index=spec.parent_point_index,
                 selected_point_index=None,
+                selected_display_point_key=None,
                 selected_plot_mode=None,
                 selected_x_key=None,
+                selected_x_index_tokens=None,
                 selected_y_key=None,
+                selected_y_index_tokens=None,
                 selected_z_key=None,
+                selected_z_index_tokens=None,
                 selected_group_key=None,
                 show_lines=False,
                 selected_repeat_combine_mode=None,
+                selected_series_states=None,
             )
             column.point_selected.connect(self._on_point_selected)
             column.child_site_changed.connect(self._on_child_site_changed)
             column.plot_mode_changed.connect(self._on_plot_mode_changed)
             column.x_key_changed.connect(self._on_x_key_changed)
+            column.x_index_tokens_changed.connect(self._on_x_index_tokens_changed)
             column.y_key_changed.connect(self._on_y_key_changed)
+            column.y_index_tokens_changed.connect(self._on_y_index_tokens_changed)
             column.z_key_changed.connect(self._on_z_key_changed)
+            column.z_index_tokens_changed.connect(self._on_z_index_tokens_changed)
             column.group_key_changed.connect(self._on_group_key_changed)
             column.show_lines_changed.connect(self._on_show_lines_changed)
             column.repeat_combine_mode_changed.connect(
                 self._on_repeat_combine_mode_changed
             )
+            column.series_states_changed.connect(self._on_series_states_changed)
             self._columns.append(column)
             self._columns_layout.addWidget(column)
 
         for column, spec in zip(self._columns, column_specs, strict=True):
             site = spec.site
+            state = self._ui_state_for(site.path)
             column.update_state(
                 site=site,
                 child_site_options=spec.child_site_options,
                 selected_child_path=spec.selected_child_path,
                 parent_point_index=spec.parent_point_index,
-                selected_point_index=self._selected_points.get(site.path),
-                selected_plot_mode=self._selected_plot_modes.get(site.path),
-                selected_x_key=self._selected_x_keys.get(site.path),
-                selected_y_key=self._selected_y_keys.get(site.path),
-                selected_z_key=self._selected_z_keys.get(site.path),
-                selected_group_key=self._selected_group_keys.get(site.path),
-                show_lines=self._show_lines.get(site.path, False),
-                selected_repeat_combine_mode=self._selected_repeat_combine_modes.get(
-                    site.path
-                ),
+                selected_point_index=state.selected_point_index,
+                selected_display_point_key=state.selected_display_point_key,
+                selected_plot_mode=state.plot_mode,
+                selected_x_key=state.x_key,
+                selected_x_index_tokens=state.x_index_tokens,
+                selected_y_key=state.y_key,
+                selected_y_index_tokens=state.y_index_tokens,
+                selected_z_key=state.z_key,
+                selected_z_index_tokens=state.z_index_tokens,
+                selected_group_key=state.group_key,
+                show_lines=state.show_lines,
+                selected_repeat_combine_mode=state.repeat_combine_mode,
+                selected_series_states=state.series_states,
             )
         self._columns_layout.invalidate()
         self._columns_layout.activate()
@@ -3070,47 +5086,124 @@ class RuntimePlotViewer(QtWidgets.QWidget):
         self._scroll.viewport().update()
 
     def _on_point_selected(
-        self, site_path: tuple[str, ...], point_index: int | None
+        self, site_path: tuple[str, ...], selection: _DisplayedPointSelection | int | None
     ) -> None:
-        self._selected_points[site_path] = None if point_index is None else int(point_index)
+        state = self._ui_state_for(site_path)
+        if selection is None:
+            state.selected_point_index = None
+            state.selected_display_point_key = None
+        elif isinstance(selection, _DisplayedPointSelection):
+            state.selected_point_index = int(selection.source_index)
+            state.selected_display_point_key = selection.display_key
+        else:
+            state.selected_point_index = int(selection)
+            state.selected_display_point_key = None
         self._clear_descendant_navigation(site_path)
         self._rebuild_columns()
 
     def _on_child_site_changed(
         self, parent_path: tuple[str, ...], child_path: tuple[str, ...]
     ) -> None:
-        self._selected_child_paths[parent_path] = child_path
+        self._ui_state_for(parent_path).selected_child_path = child_path
         self._clear_descendant_navigation(parent_path)
         self._rebuild_columns()
 
     def _on_x_key_changed(self, site_path: tuple[str, ...], key: str) -> None:
-        self._selected_x_keys[site_path] = key
+        self._ui_state_for(site_path).x_key = key
+        self._rebuild_columns()
+
+    def _on_x_index_tokens_changed(
+        self, site_path: tuple[str, ...], tokens: tuple[str, ...] | None
+    ) -> None:
+        self._ui_state_for(site_path).x_index_tokens = tokens
         self._rebuild_columns()
 
     def _on_y_key_changed(self, site_path: tuple[str, ...], key: str) -> None:
-        self._selected_y_keys[site_path] = key
+        state = self._ui_state_for(site_path)
+        state.y_key = key
+        series_states = list(state.series_states or (_SeriesUiState(),))
+        series_states[0] = _SeriesUiState(
+            y_key=key,
+            y_index_tokens=series_states[0].y_index_tokens,
+            group_key=series_states[0].group_key,
+            repeat_combine_mode=series_states[0].repeat_combine_mode,
+        )
+        state.series_states = tuple(series_states)
+        self._rebuild_columns()
+
+    def _on_y_index_tokens_changed(
+        self, site_path: tuple[str, ...], tokens: tuple[str, ...] | None
+    ) -> None:
+        state = self._ui_state_for(site_path)
+        state.y_index_tokens = tokens
+        series_states = list(state.series_states or (_SeriesUiState(),))
+        series_states[0] = _SeriesUiState(
+            y_key=series_states[0].y_key,
+            y_index_tokens=tokens,
+            group_key=series_states[0].group_key,
+            repeat_combine_mode=series_states[0].repeat_combine_mode,
+        )
+        state.series_states = tuple(series_states)
         self._rebuild_columns()
 
     def _on_plot_mode_changed(self, site_path: tuple[str, ...], mode: str) -> None:
-        self._selected_plot_modes[site_path] = mode
+        self._ui_state_for(site_path).plot_mode = mode
         self._rebuild_columns()
 
     def _on_z_key_changed(self, site_path: tuple[str, ...], key: str) -> None:
-        self._selected_z_keys[site_path] = key
+        self._ui_state_for(site_path).z_key = key
+        self._rebuild_columns()
+
+    def _on_z_index_tokens_changed(
+        self, site_path: tuple[str, ...], tokens: tuple[str, ...] | None
+    ) -> None:
+        self._ui_state_for(site_path).z_index_tokens = tokens
         self._rebuild_columns()
 
     def _on_group_key_changed(self, site_path: tuple[str, ...], key: str) -> None:
-        self._selected_group_keys[site_path] = key
+        state = self._ui_state_for(site_path)
+        state.group_key = key
+        series_states = list(state.series_states or (_SeriesUiState(),))
+        series_states[0] = _SeriesUiState(
+            y_key=series_states[0].y_key,
+            y_index_tokens=series_states[0].y_index_tokens,
+            group_key=None if key in {None, _NO_GROUP_KEY} else key,
+            repeat_combine_mode=series_states[0].repeat_combine_mode,
+        )
+        state.series_states = tuple(series_states)
         self._rebuild_columns()
 
     def _on_show_lines_changed(
         self, site_path: tuple[str, ...], show_lines: bool
     ) -> None:
-        self._show_lines[site_path] = show_lines
+        self._ui_state_for(site_path).show_lines = show_lines
         self._rebuild_columns()
 
     def _on_repeat_combine_mode_changed(
         self, site_path: tuple[str, ...], mode: str
     ) -> None:
-        self._selected_repeat_combine_modes[site_path] = mode
+        state = self._ui_state_for(site_path)
+        state.repeat_combine_mode = mode
+        series_states = list(state.series_states or (_SeriesUiState(),))
+        series_states[0] = _SeriesUiState(
+            y_key=series_states[0].y_key,
+            y_index_tokens=series_states[0].y_index_tokens,
+            group_key=series_states[0].group_key,
+            repeat_combine_mode=mode,
+        )
+        state.series_states = tuple(series_states)
+        self._rebuild_columns()
+
+    def _on_series_states_changed(
+        self,
+        site_path: tuple[str, ...],
+        states: tuple[_SeriesUiState, ...],
+    ) -> None:
+        ui_state = self._ui_state_for(site_path)
+        ui_state.series_states = tuple(states)
+        if states:
+            ui_state.y_key = states[0].y_key
+            ui_state.y_index_tokens = states[0].y_index_tokens
+            ui_state.group_key = states[0].group_key
+            ui_state.repeat_combine_mode = states[0].repeat_combine_mode
         self._rebuild_columns()

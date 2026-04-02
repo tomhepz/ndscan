@@ -12,6 +12,7 @@ import ndscan.experiment as experiment_facade
 from artiq.experiment import kernel
 from artiq.language.core import TerminationRequested
 from examples.host_runtime_grouped_line_family import HostRuntimeGroupedLineFamily
+import examples.host_runtime_counts_field_calibration as counts_field_calibration
 import examples.host_runtime_interleaved_spectroscopy_patterns as interleaved_patterns
 from examples.host_runtime_field_shift_spectroscopy import (
     HostRuntimeFieldShiftSpectroscopy,
@@ -2581,6 +2582,131 @@ class HostRuntimeCase(HasEnvironmentCase):
         self.assertEqual(
             segment_feedback[0]["annotations"][1]["kind"], "artifact_location"
         )
+
+    def test_counts_shot_chunk_time_scan_example_runs(self):
+        with (
+            patch.object(counts_field_calibration, "POINT_DELAY_S", 0.0),
+            patch.object(counts_field_calibration, "DEFAULT_SHOTS_PER_CHUNK", 12),
+            patch.object(
+                counts_field_calibration,
+                "DURATION_POINTS",
+                _REAL_NP_LINSPACE(0.0, 2.2, 9).tolist(),
+            ),
+        ):
+            exp = self.create(counts_field_calibration.HostRuntimeCountsShotChunkTimeScan)
+            exp.prepare()
+            exp.run()
+
+        prefix = "ndscan.rid_0.site.root."
+        repeat_prefix = prefix + "repeat_scan."
+        self.assertEqual(len(self.d(prefix, "points.param_0")), 9)
+        self.assertAlmostEqual(
+            self.d(prefix, "analysis.output.fit_pi_time"),
+            0.5 / counts_field_calibration.DEFAULT_RABI_FREQUENCY,
+            delta=0.22,
+        )
+        self.assertEqual(
+            np.asarray(exp.get_dataset("last_image")).shape,
+            counts_field_calibration.IMAGE_SHAPE,
+        )
+        self.assertEqual(
+            np.asarray(self.d(repeat_prefix, "points.channel_0")[0]).shape,
+            (
+                counts_field_calibration.NUM_GROUPS,
+                counts_field_calibration.NUM_ROIS,
+            ),
+        )
+        annotations_data = self.j(prefix, "analysis.annotations")
+        self.assertEqual([item["kind"] for item in annotations_data], ["artifact_curve"])
+
+    def test_counts_frequency_calibration_example_runs(self):
+        with (
+            patch.object(counts_field_calibration, "POINT_DELAY_S", 0.0),
+            patch.object(counts_field_calibration, "DEFAULT_SHOTS_PER_CHUNK", 14),
+            patch.object(
+                counts_field_calibration,
+                "FREQUENCY_POINTS",
+                _REAL_NP_LINSPACE(9.4, 12.6, 9).tolist(),
+            ),
+        ):
+            exp = self.create(counts_field_calibration.HostRuntimeCountsFrequencyCalibration)
+            exp.prepare()
+            exp.run()
+
+        prefix = "ndscan.rid_0.site.root."
+        freq_prefix = prefix + "scan_frequency."
+        repeat_prefix = freq_prefix + "repeat_scan."
+
+        self.assertEqual(len(self.d(freq_prefix, "points.param_0")), 9)
+        self.assertAlmostEqual(
+            self.d(freq_prefix, "analysis.output.fit_center"),
+            counts_field_calibration.TRUE_ZERO_FIELD_FREQUENCY,
+            delta=0.18,
+        )
+        self.assertEqual(
+            np.asarray(exp.get_dataset("last_image")).shape,
+            counts_field_calibration.IMAGE_SHAPE,
+        )
+        self.assertEqual(
+            np.asarray(self.d(repeat_prefix, "points.channel_0")[0]).shape,
+            (
+                counts_field_calibration.NUM_GROUPS,
+                counts_field_calibration.NUM_ROIS,
+            ),
+        )
+        self.assertEqual(len(self.d(prefix, "points.channel_0")), 1)
+        self.assertEqual(len(self.d(prefix, "points.channel_1")), 1)
+
+    def test_counts_field_calibration_example_runs(self):
+        with (
+            patch.object(counts_field_calibration, "POINT_DELAY_S", 0.0),
+            patch.object(counts_field_calibration, "DEFAULT_SHOTS_PER_CHUNK", 14),
+            patch.object(
+                counts_field_calibration,
+                "FREQUENCY_POINTS",
+                _REAL_NP_LINSPACE(9.4, 12.6, 9).tolist(),
+            ),
+            patch.object(
+                counts_field_calibration,
+                "FIELD_POINTS",
+                _REAL_NP_LINSPACE(-1.2, 1.2, 5).tolist(),
+            ),
+        ):
+            exp = self.create(counts_field_calibration.HostRuntimeCountsFieldCalibration)
+            exp.prepare()
+            exp.run()
+
+        field_prefix = "ndscan.rid_0.site.root.scan_field."
+        freq_prefix = field_prefix + "scan_frequency."
+        repeat_prefix = freq_prefix + "repeat_scan."
+
+        self.assertEqual(len(self.d(field_prefix, "points.param_0")), 5)
+        self.assertAlmostEqual(
+            self.d(field_prefix, "analysis.output.fit_shift_per_current"),
+            counts_field_calibration.TRUE_FREQUENCY_SHIFT_PER_CURRENT,
+            delta=0.12,
+        )
+        self.assertAlmostEqual(
+            self.d(field_prefix, "analysis.output.fit_center_at_zero_current"),
+            counts_field_calibration.TRUE_ZERO_FIELD_FREQUENCY,
+            delta=0.18,
+        )
+        self.assertEqual(
+            np.asarray(exp.get_dataset("last_image")).shape,
+            counts_field_calibration.IMAGE_SHAPE,
+        )
+        self.assertEqual(
+            np.asarray(self.d(repeat_prefix, "points.channel_0")[0]).shape,
+            (
+                counts_field_calibration.NUM_GROUPS,
+                counts_field_calibration.NUM_ROIS,
+            ),
+        )
+        segment_feedback = [
+            json.loads(item)
+            for item in self.d(freq_prefix, "segments.analysis.final_feedback")
+        ]
+        self.assertEqual(segment_feedback[0]["annotations"][0]["kind"], "artifact_curve")
 
     def test_interleaved_spectroscopy_example_runs(self):
         with (
