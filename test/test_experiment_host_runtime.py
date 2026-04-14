@@ -12,8 +12,10 @@ import ndscan.experiment as experiment_facade
 from artiq.experiment import kernel
 from artiq.language.core import TerminationRequested
 from examples.host_runtime_grouped_line_family import HostRuntimeGroupedLineFamily
+import examples._roi_condition_stats as roi_condition_stats
 import examples.host_runtime_counts_field_calibration as counts_field_calibration
 import examples.host_runtime_interleaved_spectroscopy_patterns as interleaved_patterns
+import examples.host_runtime_three_image_rearrangement as three_image_rearrangement
 from examples.host_runtime_field_shift_spectroscopy import (
     HostRuntimeFieldShiftSpectroscopy,
     TRUE_CENTER_AT_ZERO,
@@ -80,6 +82,48 @@ _REAL_NP_LINSPACE = np.linspace
 def _execute_and_inspect(scan):
     scan.execute()
     return scan.inspect()
+
+
+class RoiConditionStatsTest(unittest.TestCase):
+    def test_conditional_binomial_supports_same_group_pair_conditions(self):
+        occupancy = np.zeros((3, 3, 3, 2), dtype=bool)
+        occupancy[0, 1, 0, :] = True
+        occupancy[0, 2, 0, :] = True
+        occupancy[1, 1, 0, :] = True
+        occupancy[1, 2, 0, 0] = True
+        occupancy[2, 1, 1, :] = True
+        occupancy[2, 2, 1, :] = True
+
+        pair_image1 = roi_condition_stats.parse_condition_syntax("1[0,1]")
+        pair_image2 = roi_condition_stats.parse_condition_syntax("2[0,1]")
+
+        result = roi_condition_stats.conditional_binomial(
+            occupancy,
+            given=pair_image1,
+            event=pair_image2,
+        )
+
+        self.assertEqual(result.pooled_num_selected, 3)
+        self.assertEqual(result.pooled_num_successes, 2)
+        self.assertAlmostEqual(result.pooled_probability, 2.0 / 3.0)
+        np.testing.assert_array_equal(result.num_selected_by_group, np.array([2, 1, 0]))
+        np.testing.assert_allclose(result.probability_by_group[:2], np.array([0.5, 1.0]))
+
+    def test_parse_condition_syntax_supports_boolean_expression(self):
+        occupancy = np.zeros((2, 3, 2, 4), dtype=bool)
+        occupancy[0, 1, 0, 0] = True
+        occupancy[0, 1, 0, 1] = True
+        occupancy[:, 2, 1, 3] = True
+
+        condition = roi_condition_stats.parse_condition_syntax(
+            "(1[0,1]) | (2[!3] & !1[2])"
+        )
+        result = roi_condition_stats.conditional_binomial(
+            occupancy,
+            event=condition,
+        )
+
+        np.testing.assert_array_equal(result.num_successes_by_group, np.array([2, 0]))
 
 
 class DictShimFragment(ExpFragment):
@@ -2708,6 +2752,211 @@ class HostRuntimeCase(HasEnvironmentCase):
         ]
         self.assertEqual(segment_feedback[0]["annotations"][0]["kind"], "artifact_curve")
 
+    def test_three_image_rearrangement_example_runs(self):
+        with (
+            patch.object(three_image_rearrangement, "POINT_DELAY_S", 0.0),
+            patch.object(
+                three_image_rearrangement,
+                "DEFAULT_NUM_SHOTS",
+                12,
+            ),
+        ):
+            exp = self.create(three_image_rearrangement.HostRuntimeThreeImageRearrangement)
+            exp.prepare()
+            exp.run()
+
+        prefix = "ndscan.rid_0.site.root."
+        repeat_prefix = prefix + "repeat_scan."
+
+        self.assertEqual(len(self.d(prefix, "points.channel_0")), 1)
+        self.assertEqual(
+            np.asarray(
+                exp.get_dataset(
+                    f"{three_image_rearrangement.DEBUG_DATASET_PREFIX}.image0"
+                )
+            ).shape,
+            three_image_rearrangement.IMAGE_SHAPES[0],
+        )
+        self.assertEqual(
+            np.asarray(
+                exp.get_dataset(
+                    f"{three_image_rearrangement.DEBUG_DATASET_PREFIX}.image1"
+                )
+            ).shape,
+            three_image_rearrangement.IMAGE_SHAPES[1],
+        )
+        self.assertEqual(
+            np.asarray(
+                exp.get_dataset(
+                    f"{three_image_rearrangement.DEBUG_DATASET_PREFIX}.image2"
+                )
+            ).shape,
+            three_image_rearrangement.IMAGE_SHAPES[2],
+        )
+        self.assertEqual(
+            np.asarray(
+                exp.get_dataset(
+                    f"{three_image_rearrangement.DEBUG_DATASET_PREFIX}.occupied_image0"
+                )
+            ).shape,
+            (
+                three_image_rearrangement.NUM_GROUPS,
+                three_image_rearrangement.NUM_ROIS_BY_IMAGE[0],
+            ),
+        )
+        self.assertEqual(
+            np.asarray(
+                exp.get_dataset(
+                    f"{three_image_rearrangement.DEBUG_DATASET_PREFIX}.rearranged_target_image1"
+                )
+            ).shape,
+            (
+                three_image_rearrangement.NUM_GROUPS,
+                three_image_rearrangement.NUM_ROIS_BY_IMAGE[1],
+            ),
+        )
+        self.assertIsInstance(
+            exp.get_dataset(
+                f"{three_image_rearrangement.DEBUG_DATASET_PREFIX}.rearrangement_moves"
+            ),
+            list,
+        )
+        self.assertEqual(
+            exp.get_dataset(
+                f"{three_image_rearrangement.DEBUG_DATASET_PREFIX}.threshold_counts"
+            ),
+            three_image_rearrangement.DEFAULT_THRESHOLD_COUNTS,
+        )
+        self.assertEqual(
+            len(
+                exp.get_dataset(
+                    f"{three_image_rearrangement.DEBUG_DATASET_PREFIX}.rois_image0"
+                )
+            ),
+            three_image_rearrangement.NUM_GROUPS,
+        )
+        self.assertEqual(
+            len(
+                exp.get_dataset(
+                    f"{three_image_rearrangement.DEBUG_DATASET_PREFIX}.rois_image1"
+                )
+            ),
+            three_image_rearrangement.NUM_GROUPS,
+        )
+        self.assertEqual(
+            len(
+                exp.get_dataset(
+                    f"{three_image_rearrangement.DEBUG_DATASET_PREFIX}.rois_image2"
+                )
+            ),
+            three_image_rearrangement.NUM_GROUPS,
+        )
+        self.assertEqual(
+            np.asarray(
+                exp.get_dataset(
+                    f"{three_image_rearrangement.DEBUG_DATASET_PREFIX}.counts_image0"
+                )
+            ).shape,
+            (
+                three_image_rearrangement.NUM_GROUPS,
+                three_image_rearrangement.NUM_ROIS_BY_IMAGE[0],
+            ),
+        )
+        self.assertEqual(
+            np.asarray(
+                exp.get_dataset(
+                    f"{three_image_rearrangement.DEBUG_DATASET_PREFIX}.counts_image1"
+                )
+            ).shape,
+            (
+                three_image_rearrangement.NUM_GROUPS,
+                three_image_rearrangement.NUM_ROIS_BY_IMAGE[1],
+            ),
+        )
+        self.assertEqual(
+            np.asarray(
+                exp.get_dataset(
+                    f"{three_image_rearrangement.DEBUG_DATASET_PREFIX}.counts_image2"
+                )
+            ).shape,
+            (
+                three_image_rearrangement.NUM_GROUPS,
+                three_image_rearrangement.NUM_ROIS_BY_IMAGE[2],
+            ),
+        )
+        self.assertEqual(
+            np.asarray(self.d(repeat_prefix, "points.channel_0")[0]).shape,
+            (
+                three_image_rearrangement.NUM_GROUPS,
+                three_image_rearrangement.NUM_ROIS_BY_IMAGE[0],
+            ),
+        )
+        self.assertEqual(
+            np.asarray(self.d(repeat_prefix, "points.channel_1")[0]).shape,
+            (
+                three_image_rearrangement.NUM_GROUPS,
+                three_image_rearrangement.NUM_ROIS_BY_IMAGE[1],
+            ),
+        )
+        self.assertEqual(
+            np.asarray(self.d(repeat_prefix, "points.channel_2")[0]).shape,
+            (
+                three_image_rearrangement.NUM_GROUPS,
+                three_image_rearrangement.NUM_ROIS_BY_IMAGE[2],
+            ),
+        )
+        self.assertEqual(
+            np.asarray(self.d(repeat_prefix, "points.channel_3")[0]).shape,
+            three_image_rearrangement.IMAGE_SHAPES[0],
+        )
+        self.assertEqual(
+            np.asarray(self.d(repeat_prefix, "points.channel_4")[0]).shape,
+            three_image_rearrangement.IMAGE_SHAPES[1],
+        )
+        self.assertEqual(
+            np.asarray(self.d(repeat_prefix, "points.channel_5")[0]).shape,
+            three_image_rearrangement.IMAGE_SHAPES[2],
+        )
+        self.assertEqual(len(self.d(repeat_prefix, "points.channel_0")), 12)
+        self.assertEqual(
+            np.asarray(self.d(prefix, "points.channel_0")[0]).shape,
+            (
+                three_image_rearrangement.NUM_GROUPS,
+                three_image_rearrangement.NUM_ROIS_BY_IMAGE[0],
+            ),
+        )
+        self.assertEqual(
+            np.asarray(self.d(prefix, "points.channel_2")[0]).shape,
+            (
+                three_image_rearrangement.NUM_GROUPS,
+                three_image_rearrangement.NUM_ROIS_BY_IMAGE[1],
+            ),
+        )
+        self.assertEqual(
+            np.asarray(self.d(prefix, "points.channel_4")[0]).shape,
+            (
+                three_image_rearrangement.NUM_GROUPS,
+                three_image_rearrangement.NUM_ROIS_BY_IMAGE[2],
+            ),
+        )
+        self.assertIsInstance(self.d(prefix, "points.channel_6")[0], float)
+        self.assertEqual(
+            np.asarray(self.d(prefix, "points.channel_8")[0]).shape,
+            (three_image_rearrangement.NUM_GROUPS,),
+        )
+        self.assertIsInstance(self.d(prefix, "points.channel_10")[0], float)
+        self.assertEqual(
+            np.asarray(self.d(prefix, "points.channel_12")[0]).shape,
+            (three_image_rearrangement.NUM_GROUPS,),
+        )
+        self.assertEqual(
+            np.asarray(self.d(prefix, "points.channel_14")[0]).shape,
+            (
+                three_image_rearrangement.NUM_GROUPS,
+                three_image_rearrangement.COMMON_IMAGE12_ROIS,
+            ),
+        )
+
     def test_interleaved_spectroscopy_example_runs(self):
         with (
             patch.object(interleaved_patterns, "POINT_DELAY_S", 0.0),
@@ -2950,6 +3199,20 @@ class HostRuntimeCase(HasEnvironmentCase):
         prefix = "ndscan.rid_0.site.root."
         self.assertEqual(self.d(prefix, "points.param_0"), [2.0, 4.0])
         self.assertEqual(self.d(prefix, "points.channel_0"), [3.0, 5.0])
+
+    def test_three_image_rearrangement_dashboard_experiment_publishes_probe_frequency(self):
+        exp = self.create(
+            three_image_rearrangement.HostRuntimeThreeImageRearrangementDashboard
+        )
+
+        self.assertEqual(exp.argument_ui, "ndscan")
+        self.assertIn(
+            (
+                exp.fragment.shot.probe_frequency.parameter.fqn,
+                exp.fragment.shot._stringize_path(),
+            ),
+            exp.args._params["always_shown"],
+        )
 
     def test_host_scan_session_allows_kernel_helpers_inside_host_methods(self):
         fragment = self.create(HostCallsKernelHelperFragment, [])

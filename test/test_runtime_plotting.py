@@ -31,6 +31,7 @@ from ndscan.plots.runtime.viewer import (
     _default_x_choices,
     _default_y_choices,
     _group_by_choices,
+    _series_error_bar_pen,
     _wrap_overlay_text,
 )
 from ndscan.runtime.api import make_fragment_prepared_scan_exp
@@ -491,6 +492,99 @@ class RuntimeLiveSnapshotTest(unittest.TestCase):
         self.assertIsNone(widget._current_group_label)
         self.assertEqual(len(widget._current_plot_arrays[0]), 4)
         self.assertIn("repeated group values", widget._status.text())
+
+    def test_grouped_array_subset_keeps_point_and_error_bar_colors_aligned(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication([])
+
+        prefix = "ndscan.rid_0.site.root."
+        values = {
+            prefix + "site.path": json.dumps([]),
+            prefix + "site.fragment_fqn": "RootFragment",
+            prefix + "scan.parameters": json.dumps(
+                {
+                    "param_0": {
+                        "path": "",
+                        "is_scanned": True,
+                        "param": {
+                            "fqn": "demo.root.frequency",
+                            "description": "Probe Frequency",
+                            "type": "float",
+                            "spec": {"unit": "MHz"},
+                        },
+                    }
+                }
+            ),
+            prefix + "scan.channels": json.dumps(
+                {
+                    "counts": {
+                        "path": "detector/counts",
+                        "description": "ROI Counts",
+                        "type": "array",
+                        "element_type": "float",
+                        "shape": [4, 1],
+                        "dim_names": ["group", "roi"],
+                        "unit": "cts",
+                    },
+                    "counts_error": {
+                        "path": "detector/counts_error",
+                        "description": "ROI Counts Error",
+                        "type": "array",
+                        "element_type": "float",
+                        "shape": [4, 1],
+                        "dim_names": ["group", "roi"],
+                        "unit": "cts",
+                        "display_hints": {"error_bar_for": "detector/counts"},
+                    },
+                }
+            ),
+            prefix + "points.param_0": [0.0, 1.0],
+            prefix + "points.counts": np.asarray(
+                [[[10.0], [20.0], [30.0], [40.0]], [[11.0], [21.0], [31.0], [41.0]]]
+            ),
+            prefix + "points.counts_error": np.asarray(
+                [[[0.5], [0.7], [0.9], [1.1]], [[0.6], [0.8], [1.0], [1.2]]]
+            ),
+            prefix + "state.num_points": 2,
+            prefix + "state.completed": False,
+        }
+
+        root = snapshot_from_live_values(prefix, values).get_site(())
+        widget = _SiteColumnWidget(
+            site=root,
+            child_site_options=[],
+            selected_child_path=None,
+            parent_point_index=None,
+            selected_point_index=None,
+            selected_plot_mode=_PLOT_MODE_1D,
+            selected_x_key="param_0",
+            selected_y_key="counts",
+            selected_group_key=_ARRAY_SERIES_GROUP_KEY,
+            selected_x_index_tokens=None,
+            selected_y_index_tokens=("0:3", "0"),
+            selected_z_index_tokens=None,
+            selected_z_key=None,
+            show_lines=True,
+        )
+
+        line_items = [widget._line_item, *widget._extra_line_items[:2]]
+        error_items = [widget._error_bar_item, *widget._extra_error_bar_items[:2]]
+        scatter_points = widget._scatter.points()
+        self.assertEqual(len(scatter_points), 6)
+
+        for group_index, scatter_index in enumerate((0, 2, 4)):
+            line_color = line_items[group_index].opts["pen"].color().getRgb()
+            point_color = scatter_points[scatter_index].brush().color().getRgb()
+            self.assertEqual(point_color, line_color)
+            expected_error_color = _series_error_bar_pen(
+                line_items[group_index].opts["pen"].color()
+            ).color().getRgb()
+            self.assertEqual(
+                error_items[group_index].opts["pen"].color().getRgb(),
+                expected_error_color,
+            )
 
     def test_site_column_widget_can_render_multiple_series_rows(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

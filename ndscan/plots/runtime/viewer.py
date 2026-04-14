@@ -3597,8 +3597,10 @@ class _SiteColumnWidget(QtWidgets.QWidget):
             groups: dict[float, list[int]] = {}
             for point_index, group_value in enumerate(display_group_values):
                 groups.setdefault(float(group_value), []).append(point_index)
+            group_color_map: dict[float, QtGui.QColor] = {}
             for group_value, indices in groups.items():
                 color = QtGui.QColor(pg.intColor(len(line_payloads), hues=max(3, len(line_payloads) + len(groups) + 1)))
+                group_color_map[float(group_value)] = color
                 self._group_colors[float(group_value)] = color
                 group_display = (
                     prepared.group_label_map.get(float(group_value), _format_readout_value(group_value))
@@ -3633,12 +3635,11 @@ class _SiteColumnWidget(QtWidgets.QWidget):
                     strict=True,
                 )
             ):
-                raw_color = QtGui.QColor(pg.intColor(
-                    list(groups.keys()).index(float(raw_group_value))
+                raw_color = (
+                    group_color_map.get(float(raw_group_value), QtGui.QColor("#1f77b4"))
                     if raw_group_value is not None
-                    else 0,
-                    hues=max(3, len(groups)),
-                ))
+                    else QtGui.QColor("#1f77b4")
+                )
                 raw_scatter_points.append(
                     {
                         "pos": (float(xi), float(yi)),
@@ -3676,10 +3677,7 @@ class _SiteColumnWidget(QtWidgets.QWidget):
                         strict=True,
                     )
                 ):
-                    color = QtGui.QColor(pg.intColor(
-                        list(groups.keys()).index(float(group_value)),
-                        hues=max(3, len(groups)),
-                    ))
+                    color = group_color_map.get(float(group_value), QtGui.QColor("#1f77b4"))
                     summary_scatter_points.append(
                         {
                             "pos": (float(xi), float(yi)),
