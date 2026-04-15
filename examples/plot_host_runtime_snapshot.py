@@ -33,13 +33,13 @@ from dataclasses import dataclass
 import matplotlib.pyplot as plt
 import numpy as np
 
-from ndscan.results.scan_site_reader import HostRuntimeSiteData, read_host_runtime_snapshot
+from ndscan.results.scan_site_reader import HostRuntimeSite, read_host_runtime_snapshot
 
 
 @dataclass(frozen=True)
 class _VisibleSitePanel:
-    site: HostRuntimeSiteData
-    point_data: dict[str, list]
+    site: HostRuntimeSite
+    raw_points: dict[str, list]
     global_point_indices: np.ndarray
     selected_point_index: int | None = None
 
@@ -65,7 +65,7 @@ def _label_for_channel(site, key: str) -> str:
 
 
 def _binary_channel_summary(values: np.ndarray) -> str | None:
-    """Return a compact binomial-style summary for binary point data."""
+    """Return a compact binomial-style summary for binary raw points."""
 
     if values.size == 0:
         return None
@@ -82,36 +82,36 @@ def _binary_channel_summary(values: np.ndarray) -> str | None:
     )
 
 
-def _x_data_for_site(site: HostRuntimeSiteData, point_data: dict[str, list]):
-    """Return default x data and label for one site's point arrays."""
+def _x_data_for_site(site: HostRuntimeSite, raw_points: dict[str, list]):
+    """Return default x data and label for one site's raw point arrays."""
 
     x_kind, x_key = site.choose_default_x_key()
     if x_kind is None or x_key is None:
-        first_series = next(iter(point_data.values()), [])
+        first_series = next(iter(raw_points.values()), [])
         return np.arange(len(first_series)), "point index"
 
     if x_kind == "pseudoparam":
-        return np.asarray(point_data[x_key]), _label_for_x(site, x_kind, x_key)
+        return np.asarray(raw_points[x_key]), _label_for_x(site, x_kind, x_key)
 
-    return np.asarray(point_data[x_key]), _label_for_x(site, x_kind, x_key)
+    return np.asarray(raw_points[x_key]), _label_for_x(site, x_kind, x_key)
 
 
-def _merge_segment_point_data(
-    site: HostRuntimeSiteData, parent_point_index: int
+def _merge_segment_raw_points(
+    site: HostRuntimeSite, parent_point_index: int
 ) -> tuple[dict[str, list], np.ndarray]:
-    """Return merged child point data and global point indices for one parent point."""
+    """Return merged child raw points and global point indices for one parent point."""
 
     segments = site.segments_for_parent_point(parent_point_index)
-    merged_point_data = {key: [] for key in site.point_data}
+    merged_raw_points = {key: [] for key in site.raw_points}
     global_point_indices = []
 
     for segment in segments:
-        segment_data = site.slice_point_data(segment.start_index, segment.stop_index)
+        segment_data = site.slice_raw_points(segment.start_index, segment.stop_index)
         for key, values in segment_data.items():
-            merged_point_data[key].extend(values)
+            merged_raw_points[key].extend(values)
         global_point_indices.extend(range(segment.start_index, segment.stop_index))
 
-    return merged_point_data, np.asarray(global_point_indices, dtype=int)
+    return merged_raw_points, np.asarray(global_point_indices, dtype=int)
 
 
 def _build_visible_site_panels(snapshot, selection_chain):
@@ -121,13 +121,13 @@ def _build_visible_site_panels(snapshot, selection_chain):
     panels = []
     for parent_path, parent_point_index in selection_chain:
         for child_site in snapshot.child_sites(parent_path):
-            point_data, global_point_indices = _merge_segment_point_data(
+            raw_points, global_point_indices = _merge_segment_raw_points(
                 child_site, parent_point_index
             )
             panels.append(
                 _VisibleSitePanel(
                     site=child_site,
-                    point_data=point_data,
+                    raw_points=raw_points,
                     global_point_indices=global_point_indices,
                     selected_point_index=selected_points.get(child_site.path),
                 )
@@ -160,15 +160,15 @@ def _update_selection_chain(snapshot, root_path, selection_chain, clicked_site_p
     return selection_chain[: parent_index + 1] + [(clicked_site_path, point_index)]
 
 
-def _plot_child_point_data(
+def _plot_child_raw_points(
     plot_axis,
-    site: HostRuntimeSiteData,
-    point_data: dict[str, list],
+    site: HostRuntimeSite,
+    raw_points: dict[str, list],
     global_point_indices: np.ndarray,
     *,
     selected_point_index: int | None = None,
 ):
-    """Plot one child site's point data for a selected parent point."""
+    """Plot one child site's raw points for a selected parent point."""
 
     plot_axis.clear()
     plot_axis.set_axis_on()
@@ -186,12 +186,12 @@ def _plot_child_point_data(
         plot_axis.set_axis_off()
         return
 
-    x_values, x_label = _x_data_for_site(site, point_data)
+    x_values, x_label = _x_data_for_site(site, raw_points)
     order = np.argsort(x_values)
     point_order = global_point_indices[order]
     plotted_binary_summary = None
     for channel_key in channel_keys:
-        y_values = np.asarray(point_data[channel_key])
+        y_values = np.asarray(raw_points[channel_key])
         label = _label_for_channel(site, channel_key)
         if np.all(np.isin(y_values, [0, 1])):
             plot_axis.step(x_values[order], y_values[order], where="mid", label=label)
@@ -251,7 +251,7 @@ def main() -> None:
             x_values = np.arange(site.metadata["state.num_points"])
             x_label = "point index"
         else:
-            x_values = np.asarray(site.point_data[x_key])
+            x_values = np.asarray(site.raw_points[x_key])
             x_label = _label_for_x(site, x_kind, x_key)
 
         direct_child_sites = snapshot.child_sites(site.path)
@@ -275,7 +275,7 @@ def main() -> None:
         selected_root_point = dict(selection_chain).get(site.path)
 
         for plot_axis, channel_key in zip(axes, channel_keys):
-            y_values = np.asarray(site.point_data[channel_key])
+            y_values = np.asarray(site.raw_points[channel_key])
             plot_axis.plot(x_values[order], y_values[order], color="tab:blue", alpha=0.7)
             scatter = plot_axis.scatter(
                 x_values[order],
@@ -311,10 +311,10 @@ def main() -> None:
             detail_axes[0].set_axis_off()
         else:
             for plot_axis, panel in zip(detail_axes, visible_panels, strict=False):
-                _plot_child_point_data(
+                _plot_child_raw_points(
                     plot_axis,
                     panel.site,
-                    panel.point_data,
+                    panel.raw_points,
                     panel.global_point_indices,
                     selected_point_index=panel.selected_point_index,
                 )

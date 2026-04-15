@@ -408,6 +408,8 @@ class ArrayChannel(ResultChannel):
     data into many separate scalar channels.
 
     :param element_type: Numeric element type, currently ``"float"`` or ``"int"``.
+        Integer numpy array payloads keep their concrete dtype, so camera-like data
+        can be stored as e.g. ``uint16`` instead of being widened to platform ``int``.
     :param shape: Constant array shape for each pushed value.
     :param dim_names: Optional names for each array dimension, used by plotting UIs.
     :param min: Optional lower limit for plotted scalar elements.
@@ -475,8 +477,12 @@ class ArrayChannel(ResultChannel):
         return "array"
 
     def _coerce_to_type(self, value):
-        dtype = float if self.element_type == "float" else int
-        array = np.asarray(value, dtype=dtype)
+        if self.element_type == "float":
+            array = np.asarray(value, dtype=float)
+        else:
+            array = np.asarray(value)
+            if not np.issubdtype(array.dtype, np.integer):
+                array = np.asarray(value, dtype=int)
         if array.shape != self.shape:
             raise ValueError(
                 f"Expected array with shape {self.shape}, got {tuple(array.shape)}"

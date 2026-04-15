@@ -29,7 +29,7 @@ import numpy as np
 import torch
 from matplotlib.lines import Line2D
 
-from ndscan.results.scan_site_reader import HostRuntimeSiteData, read_host_runtime_snapshot
+from ndscan.results.scan_site_reader import HostRuntimeSite, read_host_runtime_snapshot
 
 try:
     from gpytorch.likelihoods import FixedNoiseGaussianLikelihood
@@ -66,18 +66,18 @@ def _sorted_keys(keys: Sequence[str]) -> list[str]:
     return sorted(keys, key=key_index)
 
 
-def _pseudoparam_label(site: HostRuntimeSiteData, key: str) -> str:
+def _pseudoparam_label(site: HostRuntimeSite, key: str) -> str:
     schema = site.pseudoparams[key]["variable"]
     return schema.get("description") or schema.get("name") or key
 
 
-def _parameter_label(site: HostRuntimeSiteData, key: str) -> str:
+def _parameter_label(site: HostRuntimeSite, key: str) -> str:
     schema = site.parameters[key]["param"]
     return schema.get("description") or schema["fqn"].split(".")[-1]
 
 
 def _choose_bo_input_keys(
-    site: HostRuntimeSiteData,
+    site: HostRuntimeSite,
     dims: int,
 ) -> tuple[str, list[str], list[str]]:
     pseudoparam_keys = _sorted_keys(site.pseudoparams.keys())
@@ -181,7 +181,7 @@ def _surrogate_argmax(
     return x_max.reshape(-1)
 
 
-def _decode_bo_site(site: HostRuntimeSiteData) -> dict[str, object]:
+def _decode_bo_site(site: HostRuntimeSite) -> dict[str, object]:
     point_policy = site.metadata.get("scan.point_policy")
     if not isinstance(point_policy, dict):
         raise ValueError("Site does not contain scan.point_policy metadata")
@@ -200,10 +200,10 @@ def _decode_bo_site(site: HostRuntimeSiteData) -> dict[str, object]:
 
     dims = int(backend["dims"])
     x_kind, x_keys, x_labels = _choose_bo_input_keys(site, dims)
-    x_obs = np.column_stack([np.asarray(site.point_data[key], dtype=float) for key in x_keys])
+    x_obs = np.column_stack([np.asarray(site.raw_points[key], dtype=float) for key in x_keys])
 
     channel_key = extractor["channel_key"]
-    objective = np.asarray(site.point_data[channel_key], dtype=float)
+    objective = np.asarray(site.raw_points[channel_key], dtype=float)
     minimise = bool(backend.get("minimise", True))
     objective_score = -objective if minimise else objective
 
@@ -212,10 +212,10 @@ def _decode_bo_site(site: HostRuntimeSiteData) -> dict[str, object]:
         floor = float(backend.get("observation_noise_floor", 1e-6))
         objective_err = np.full_like(objective_score, floor, dtype=float)
     else:
-        objective_err = np.asarray(site.point_data[noise_channel_key], dtype=float)
+        objective_err = np.asarray(site.raw_points[noise_channel_key], dtype=float)
 
     decision_source = np.asarray(
-        site.point_data.get("metadata.decision_source", ["observed"] * len(objective_score))
+        site.raw_points.get("metadata.decision_source", ["observed"] * len(objective_score))
     )
 
     return {
@@ -234,7 +234,7 @@ def _decode_bo_site(site: HostRuntimeSiteData) -> dict[str, object]:
 
 def _plot_gp_corner(
     *,
-    site: HostRuntimeSiteData,
+    site: HostRuntimeSite,
     gp: GaussianProcess,
     bounds: torch.Tensor,
     x_obs: np.ndarray,

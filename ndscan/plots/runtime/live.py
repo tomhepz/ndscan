@@ -10,7 +10,7 @@ import numpy as np
 
 from ...results.scan_site_reader import (
     HostRuntimeSegmentFinalAnalysis,
-    HostRuntimeSiteData,
+    HostRuntimeSite,
     HostRuntimeSnapshot,
 )
 
@@ -100,6 +100,11 @@ def _decode_live_value(key: str, raw: Any) -> Any:
             or ".analysis.online_artifact." in key
             or ".analysis.online_annotation." in key
         ):
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return raw
+        if key.startswith("extra.") or ".extra." in key:
             try:
                 return json.loads(raw)
             except json.JSONDecodeError:
@@ -214,7 +219,7 @@ def snapshot_from_live_values(
     for site_prefix in _find_site_prefixes(datasets):
         path_value = tuple(datasets[site_prefix + "site.path"])
         parent_path = datasets.get(site_prefix + "site.parent_path")
-        sites[path_value] = HostRuntimeSiteData(
+        sites[path_value] = HostRuntimeSite(
             prefix=prefix + site_prefix,
             path=path_value,
             parent_path=None if parent_path is None else tuple(parent_path),
@@ -224,7 +229,7 @@ def snapshot_from_live_values(
             parameters=datasets.get(site_prefix + "scan.parameters", {}),
             fixed_parameters=datasets.get(site_prefix + "scan.fixed_parameters", {}),
             channels=datasets.get(site_prefix + "scan.channels", {}),
-            point_data=_point_keys_for_prefix(datasets, site_prefix),
+            raw_points=_point_keys_for_prefix(datasets, site_prefix),
             analysis_outputs_schema=datasets.get(site_prefix + "analysis.outputs", {}),
             analysis_outputs=_analysis_outputs_for_prefix(datasets, site_prefix),
             analysis_artifacts=_analysis_artifacts_for_prefix(datasets, site_prefix),

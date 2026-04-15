@@ -24,7 +24,7 @@ import numpy as np
 import torch
 
 from ..._qt import QtWidgets
-from ...results.scan_site_reader import HostRuntimeSiteData
+from ...results.scan_site_reader import HostRuntimeSite
 
 try:
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -43,7 +43,7 @@ SOURCE_COLORS = {
 }
 
 
-def site_supports_bo_corner_plot(site: HostRuntimeSiteData) -> bool:
+def site_supports_bo_corner_plot(site: HostRuntimeSite) -> bool:
     """Return whether a site looks like a root-level NUBO BO site."""
 
     point_policy = site.metadata.get("scan.point_policy")
@@ -67,18 +67,18 @@ def _sorted_keys(keys: Sequence[str]) -> list[str]:
     return sorted(keys, key=key_index)
 
 
-def _pseudoparam_label(site: HostRuntimeSiteData, key: str) -> str:
+def _pseudoparam_label(site: HostRuntimeSite, key: str) -> str:
     schema = site.pseudoparams[key]["variable"]
     return schema.get("description") or schema.get("name") or key
 
 
-def _parameter_label(site: HostRuntimeSiteData, key: str) -> str:
+def _parameter_label(site: HostRuntimeSite, key: str) -> str:
     schema = site.parameters[key]["param"]
     return schema.get("description") or schema["fqn"].split(".")[-1]
 
 
 def _choose_bo_input_keys(
-    site: HostRuntimeSiteData,
+    site: HostRuntimeSite,
     dims: int,
 ) -> tuple[str, list[str], list[str]]:
     pseudoparam_keys = _sorted_keys(site.pseudoparams.keys())
@@ -116,7 +116,7 @@ def _choose_bo_input_keys(
     )
 
 
-def decode_bo_site(site: HostRuntimeSiteData) -> dict[str, object]:
+def decode_bo_site(site: HostRuntimeSite) -> dict[str, object]:
     """Decode the persisted point streams and metadata needed for BO plotting."""
 
     point_policy = site.metadata.get("scan.point_policy")
@@ -138,11 +138,11 @@ def decode_bo_site(site: HostRuntimeSiteData) -> dict[str, object]:
     dims = int(backend["dims"])
     _, x_keys, x_labels = _choose_bo_input_keys(site, dims)
     x_obs = np.column_stack(
-        [np.asarray(site.point_data[key], dtype=float) for key in x_keys]
+        [np.asarray(site.raw_points[key], dtype=float) for key in x_keys]
     )
 
     channel_key = extractor["channel_key"]
-    objective = np.asarray(site.point_data[channel_key], dtype=float)
+    objective = np.asarray(site.raw_points[channel_key], dtype=float)
     minimise = bool(backend.get("minimise", True))
     objective_score = -objective if minimise else objective
 
@@ -151,10 +151,10 @@ def decode_bo_site(site: HostRuntimeSiteData) -> dict[str, object]:
         floor = float(backend.get("observation_noise_floor", 1e-6))
         objective_err = np.full_like(objective_score, floor, dtype=float)
     else:
-        objective_err = np.asarray(site.point_data[noise_channel_key], dtype=float)
+        objective_err = np.asarray(site.raw_points[noise_channel_key], dtype=float)
 
     decision_source = np.asarray(
-        site.point_data.get("metadata.decision_source", ["observed"] * len(objective_score))
+        site.raw_points.get("metadata.decision_source", ["observed"] * len(objective_score))
     )
 
     return {
@@ -274,7 +274,7 @@ def _draw_message_figure(
 
 def render_bo_site_to_figure(
     figure: Figure | None,
-    site: HostRuntimeSiteData,
+    site: HostRuntimeSite,
     *,
     grid_points: int = 60,
     fit_steps: int | None = None,
@@ -350,7 +350,7 @@ def render_bo_site_to_figure(
 def _plot_gp_corner(
     *,
     figure: Figure | None,
-    site: HostRuntimeSiteData,
+    site: HostRuntimeSite,
     gp,
     bounds: torch.Tensor,
     x_obs: np.ndarray,
@@ -552,7 +552,7 @@ class BoCornerPlotWidget(QtWidgets.QWidget):
             self._message.setText("matplotlib is not installed")
             self._message.show()
 
-    def render_site(self, site: HostRuntimeSiteData) -> str:
+    def render_site(self, site: HostRuntimeSite) -> str:
         """Redraw the BO dashboard for one runtime site."""
 
         if self._figure is None or self._canvas is None:

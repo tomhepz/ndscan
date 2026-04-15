@@ -34,7 +34,7 @@ The current plotting code is still shaped around the legacy flat dataset model:
 
 The prepared runtime now has a better structural source of truth:
 
-- append-only site point data in
+- append-only site raw points in
   [ndscan/runtime/persistence.py](/home/lab/artiq-files/install/ndscan/ndscan/runtime/persistence.py)
 - a site tree and segment model in
   [ndscan/schema/scan_site.py](/home/lab/artiq-files/install/ndscan/ndscan/schema/scan_site.py)
@@ -147,7 +147,7 @@ The runtime plotter should be built around these schema facts:
 
 - each site has a stable path: `site.path`
 - child sites point back to their parent site with `site.parent_path`
-- site point arrays live under `points.*`
+- site raw point arrays live under `points.*`
 - segmented child scans record:
   - `segments.start_index`
   - `segments.parent_point_index`
@@ -155,7 +155,7 @@ The runtime plotter should be built around these schema facts:
 - run completion is `state.completed`
 
 This is already exposed to offline tooling by
-[HostRuntimeSiteData](/home/lab/artiq-files/install/ndscan/ndscan/results/scan_site_reader.py#L147).
+[HostRuntimeSite](/home/lab/artiq-files/install/ndscan/ndscan/results/scan_site_reader.py#L147).
 
 The live in-memory model should look very similar:
 
@@ -170,14 +170,14 @@ classDiagram
     class RuntimeSite {
       +path
       +parent_path
-      +point_data
+      +raw_points
       +metadata
       +analysis_outputs
       +online_analysis_results
       +online_analysis_annotations
       +segments()
       +segments_for_parent_point(i)
-      +slice_point_data(start, stop)
+      +slice_raw_points(start, stop)
     }
 
     RuntimeSnapshot --> RuntimeSite
@@ -238,7 +238,7 @@ MVP policy:
 - default `y`: first result channel
 
 This matches the current offline helper logic in
-[HostRuntimeSiteData.choose_default_x_key()](/home/lab/artiq-files/install/ndscan/ndscan/results/scan_site_reader.py#L174),
+[HostRuntimeSite.choose_default_x_key()](/home/lab/artiq-files/install/ndscan/ndscan/results/scan_site_reader.py#L174),
 just extended to explicit dropdowns.
 
 ## Child-Site Slicing

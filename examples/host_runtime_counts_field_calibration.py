@@ -89,6 +89,8 @@ DEFAULT_RABI_FREQUENCY = 1.0
 DEFAULT_PULSE_DURATION = 0.48
 
 IMAGE_SHAPE = (64, 64)
+IMAGE_DTYPE = np.uint16
+ROI_COUNTS_DTYPE = np.uint32
 IMAGE_BACKGROUND_MEAN = 200.0
 IMAGE_BRIGHT_COUNTS_MEAN = 1500.0
 IMAGE_SPOT_SIGMA = 1.4
@@ -195,7 +197,7 @@ def _image_from_probabilities_and_locations(
 ) -> np.ndarray:
     """Draw one fluorescence image from spot locations and bright probabilities."""
 
-    image = rng.poisson(background_mean, size=shape).astype(np.int32)
+    image = rng.poisson(background_mean, size=shape).astype(np.uint32)
     for x0, y0, p_bright in locations:
         if rng.random() >= p_bright:
             continue
@@ -203,8 +205,8 @@ def _image_from_probabilities_and_locations(
         if amplitude <= 0:
             continue
         psf = _gaussian2d(shape, x0, y0, sigma)
-        image += rng.poisson(amplitude * psf).astype(np.int32)
-    return image
+        image += rng.poisson(amplitude * psf).astype(np.uint32)
+    return np.minimum(image, np.iinfo(IMAGE_DTYPE).max).astype(IMAGE_DTYPE)
 
 
 def _default_rois():
@@ -250,10 +252,14 @@ def _spot_locations_from_probabilities(rois, probabilities) -> list[tuple[float,
 def _sum_counts_in_rois(image: np.ndarray, rois) -> np.ndarray:
     """Return one fixed-shape ``(group, roi)`` counts array from an image and ROI boxes."""
 
-    counts = np.empty((len(rois), len(rois[0])), dtype=np.int32)
+    counts = np.empty((len(rois), len(rois[0])), dtype=ROI_COUNTS_DTYPE)
+    max_count = np.iinfo(ROI_COUNTS_DTYPE).max
     for group_index, roi_group in enumerate(rois):
         for roi_index, (y0, y1, x0, x1) in enumerate(roi_group):
-            counts[group_index, roi_index] = int(np.sum(image[y0:y1, x0:x1]))
+            counts[group_index, roi_index] = min(
+                int(np.sum(image[y0:y1, x0:x1])),
+                max_count,
+            )
     return counts
 
 

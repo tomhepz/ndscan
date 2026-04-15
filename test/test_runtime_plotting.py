@@ -135,11 +135,11 @@ class RuntimeLiveSnapshotTest(unittest.TestCase):
         child = snapshot.get_site(("scan_x",))
 
         self.assertEqual(root.fragment_fqn, "RootFragment")
-        self.assertEqual(list(root.point_data["x"]), [0.0, 1.0])
+        self.assertEqual(list(root.raw_points["x"]), [0.0, 1.0])
         self.assertEqual([site.path for site in snapshot.child_sites(())], [("scan_x",)])
         self.assertEqual(len(child.segments_for_parent_point(1)), 1)
         self.assertEqual(
-            child.slice_point_data(2, 4)["child_value"],
+            child.slice_raw_points(2, 4)["child_value"],
             [40.0, 50.0],
         )
 
@@ -2089,6 +2089,25 @@ class RuntimeLiveSnapshotTest(unittest.TestCase):
         self.assertIsNone(viewer._pending_values)
         self.assertEqual(viewer._snapshot.get_site(()).num_points, 3)
         self.assertEqual(viewer._status.text(), "Live prepared-runtime scan")
+
+    def test_runtime_viewer_can_render_offline_snapshot(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            app = QtWidgets.QApplication([])
+
+        prefix = "ndscan.rid_0.site.root."
+        snapshot = snapshot_from_live_values(prefix, self._make_basic_root_values())
+        viewer = RuntimePlotViewer()
+        viewer.set_snapshot(snapshot, status_text="Loaded test snapshot")
+
+        self.assertEqual(viewer._status.text(), "Loaded test snapshot")
+        self.assertFalse(viewer._pause_checkbox.isVisible())
+        self.assertEqual(len(viewer._columns), 1)
+        self.assertEqual(viewer._columns[0]._site.path, ())
+
+        with self.assertRaises(RuntimeError):
+            viewer.data_changed(self._make_basic_root_values())
 
     def test_runtime_viewer_preserves_child_axis_selection_when_parent_point_changes(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

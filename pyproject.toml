@@ -26,10 +26,12 @@ dependencies = [
 [project.scripts]
 ndscan_dataset_janitor = "ndscan.dataset_janitor:main"
 ndscan_show = "ndscan.show:main"
+ndscan_runtime_show = "ndscan.plots.runtime.show:main"
 ndscan_to_txt = "ndscan.to_txt:main"
 
 [dependency-groups]
 dev = [
+    "ipykernel>=7.2.0",
     "matplotlib>=3.8.0",
     "poethepoet>=0.22.1",
     "ruff>=0.14.11",

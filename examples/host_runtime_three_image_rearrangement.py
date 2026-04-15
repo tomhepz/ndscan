@@ -49,6 +49,8 @@ __all__ = [
     "IMAGE_SHAPE",
     "IMAGE_SHAPES",
     "DEFAULT_THRESHOLD_COUNTS",
+    "IMAGING_READOUT_BLOB_NAME",
+    "IMAGING_READOUT_BLOB_VERSION",
     "ThreeImageRearrangementShotFragment",
     "ThreeImageRearrangementStatisticsFragment",
     "ThreeImageRearrangementDashboardFragment",
@@ -74,29 +76,30 @@ DEFAULT_INITIAL_LOAD_PROBABILITY = 0.5
 DEFAULT_RESONANCE_FREQUENCY = 10.0
 DEFAULT_SPECTROSCOPY_WIDTH = 0.22
 DEFAULT_SPECTROSCOPY_CONTRAST = 0.92
-DEFAULT_THRESHOLD_COUNTS = 3500
+DEFAULT_THRESHOLD_COUNTS = 4000
 
+IMAGE_DTYPE = np.uint16
+ROI_COUNTS_DTYPE = np.uint32
+OCCUPANCY_DEBUG_DTYPE = np.uint8
 IMAGE_BACKGROUND_MEAN = 180.0
-IMAGE_BRIGHT_COUNTS_MEAN = 1400.0
+IMAGE_BRIGHT_COUNTS_MEAN = 2800.0
 IMAGE_SPOT_SIGMA = 1.35
 
 GROUP_X_PITCH = 12
 GROUP_X_START = 10
-ROI_LAYOUT_SPECS_BY_IMAGE = (
-    (
-        {"y_centre": 22, "height": 4, "width": 4},
-        {"y_centre": 46, "height": 6, "width": 5},
-    ),
-    (
-        {"y_centre": 18, "height": 4, "width": 4},
-        {"y_centre": 40, "height": 6, "width": 5},
-        {"y_centre": 62, "height": 5, "width": 6},
-    ),
-    (
-        {"y_centre": 20, "height": 5, "width": 4},
-        {"y_centre": 42, "height": 5, "width": 6},
-        {"y_centre": 60, "height": 4, "width": 6},
-    ),
+ROI_BOX_HEIGHT = 4
+ROI_BOX_WIDTH = 4
+ROI_Y_CENTRES_BY_IMAGE = (
+    (22, 46),
+    (18, 40, 62),
+    (20, 42, 60),
+)
+ROI_LAYOUT_SPECS_BY_IMAGE = tuple(
+    tuple(
+        {"y_centre": y_centre, "height": ROI_BOX_HEIGHT, "width": ROI_BOX_WIDTH}
+        for y_centre in image_y_centres
+    )
+    for image_y_centres in ROI_Y_CENTRES_BY_IMAGE
 )
 NUM_ROIS_BY_IMAGE = tuple(len(specs) for specs in ROI_LAYOUT_SPECS_BY_IMAGE)
 NUM_ROIS = max(NUM_ROIS_BY_IMAGE)
@@ -107,6 +110,8 @@ if COMMON_IMAGE12_ROIS < 2:
         "Images 1 and 2 must share at least two ROI indices for the built-in pair statistics"
     )
 DEBUG_DATASET_PREFIX = "debug.imaging"
+IMAGING_READOUT_BLOB_NAME = "lab.imaging_readout"
+IMAGING_READOUT_BLOB_VERSION = 1
 
 
 def _build_rois_for_image(
@@ -147,6 +152,42 @@ def _num_rois_for_image(image_index: int) -> int:
 
 def _debug_dataset_name(name: str) -> str:
     return f"{DEBUG_DATASET_PREFIX}.{name}"
+
+
+def _rois_to_jsonable(rois: list[list[tuple[int, int, int, int]]]) -> list[list[list[int]]]:
+    return [[list(bounds) for bounds in group] for group in rois]
+
+
+def _build_imaging_readout_blob(
+    *,
+    threshold_parameter_fqn: str,
+    image_channel_paths: dict[int, str],
+    counts_channel_paths: dict[int, str],
+) -> dict[str, object]:
+    """Return one lab-facing imaging metadata blob for offline consumers."""
+
+    return {
+        "namespace": IMAGING_READOUT_BLOB_NAME,
+        "version": IMAGING_READOUT_BLOB_VERSION,
+        "kind": "roi_threshold_imaging",
+        "num_groups": NUM_GROUPS,
+        "images": {
+            f"image{image_index}": {
+                "image_channel": image_channel_paths[image_index],
+                "counts_channel": counts_channel_paths[image_index],
+                "shape": list(IMAGE_SHAPES[image_index]),
+                "image_dim_names": ["y", "x"],
+                "counts_dim_names": ["group", "roi"],
+                "rois": _rois_to_jsonable(_build_rois_for_image(image_index)),
+            }
+            for image_index in range(NUM_IMAGES)
+        },
+        "occupancy_rule": {
+            "kind": "threshold_counts",
+            "threshold_parameter_fqn": threshold_parameter_fqn,
+            "threshold_parameter_path": "threshold_counts",
+        },
+    }
 
 
 def _occupancy_probability_name(image_index: int) -> str:
@@ -232,7 +273,7 @@ def _render_image_from_occupancy(
 ) -> np.ndarray:
     """Render one fluorescence image from a boolean ``(group, roi)`` occupancy table."""
 
-    image = rng.poisson(background_mean, size=shape).astype(np.int32)
+    image = rng.poisson(background_mean, size=shape).astype(np.uint32)
     for group_index, roi_group in enumerate(rois):
         for roi_index, (y0, y1, x0, x1) in enumerate(roi_group):
             if not occupied[group_index, roi_index]:
@@ -243,24 +284,28 @@ def _render_image_from_occupancy(
             if amplitude <= 0:
                 continue
             psf = _gaussian2d(shape, x_centre, y_centre, sigma)
-            image += rng.poisson(amplitude * psf).astype(np.int32)
-    return image
+            image += rng.poisson(amplitude * psf).astype(np.uint32)
+    return np.minimum(image, np.iinfo(IMAGE_DTYPE).max).astype(IMAGE_DTYPE)
 
 
 def _sum_counts_in_rois(image: np.ndarray, rois) -> np.ndarray:
     """Return one fixed-shape ``(group, roi)`` counts array from an image."""
 
-    counts = np.empty((len(rois), len(rois[0])), dtype=np.int32)
+    counts = np.empty((len(rois), len(rois[0])), dtype=ROI_COUNTS_DTYPE)
+    max_count = np.iinfo(ROI_COUNTS_DTYPE).max
     for group_index, roi_group in enumerate(rois):
         for roi_index, (y0, y1, x0, x1) in enumerate(roi_group):
-            counts[group_index, roi_index] = int(np.sum(image[y0:y1, x0:x1]))
+            counts[group_index, roi_index] = min(
+                int(np.sum(image[y0:y1, x0:x1])),
+                max_count,
+            )
     return counts
 
 
 def _threshold_counts_to_occupancy(counts: np.ndarray, threshold: int) -> np.ndarray:
     """Infer a boolean occupancy table from ROI counts."""
 
-    return np.asarray(counts, dtype=np.int32) >= int(threshold)
+    return np.asarray(counts, dtype=np.uint32) >= int(threshold)
 
 
 def _plan_left_compaction(
@@ -693,14 +738,14 @@ class ThreeImageRearrangementShotFragment(ExpFragment):
             "counts_image1": counts1,
             "counts_image2": counts2,
             "threshold_counts": int(self.threshold_counts.get()),
-            "occupied_image0": inferred0.astype(np.int8),
+            "occupied_image0": inferred0.astype(OCCUPANCY_DEBUG_DTYPE),
             "occupied_image1": _threshold_counts_to_occupancy(
                 counts1, int(self.threshold_counts.get())
-            ).astype(np.int8),
+            ).astype(OCCUPANCY_DEBUG_DTYPE),
             "occupied_image2": _threshold_counts_to_occupancy(
                 counts2, int(self.threshold_counts.get())
-            ).astype(np.int8),
-            "rearranged_target_image1": occupied1.astype(np.int8),
+            ).astype(OCCUPANCY_DEBUG_DTYPE),
+            "rearranged_target_image1": occupied1.astype(OCCUPANCY_DEBUG_DTYPE),
             "rearrangement_moves": rearrangement_moves,
         }
         for name, value in debug_values.items():
@@ -808,13 +853,30 @@ class ThreeImageRearrangementStatisticsFragment(ExpFragment):
     """Repeat one three-image shot and republish occupancy statistics as point data."""
 
     def build_fragment(self):
-        self.repeat_scan = setattr_prepared_child_scan(
-            self,
+        self.setattr_fragment(
             "shot",
             ThreeImageRearrangementShotFragment,
-            scan_name="repeat_scan",
+            detached=True,
+        )
+        self.repeat_scan = prepare_child_scan(
+            self,
+            self.shot,
+            name="repeat_scan",
             extra_metadata={
-                "analysis_note": "threshold three-image ROI counts into occupancy probabilities"
+                "analysis_note": "threshold three-image ROI counts into occupancy probabilities",
+                IMAGING_READOUT_BLOB_NAME: _build_imaging_readout_blob(
+                    threshold_parameter_fqn=self.shot.threshold_counts.parameter.fqn,
+                    image_channel_paths={
+                        0: self.shot.image0.path,
+                        1: self.shot.image1.path,
+                        2: self.shot.image2.path,
+                    },
+                    counts_channel_paths={
+                        0: self.shot.counts_image0.path,
+                        1: self.shot.counts_image1.path,
+                        2: self.shot.counts_image2.path,
+                    },
+                ),
             },
         )
         self.setattr_param(

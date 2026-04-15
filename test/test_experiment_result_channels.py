@@ -90,3 +90,12 @@ class ArrayChannelTest(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             channel.push([1, 2, 3])
+
+    def test_push_preserves_integer_numpy_dtype(self):
+        channel = ArrayChannel("image", element_type="int", shape=(2, 2))
+        sink = ArraySink()
+        channel.set_sink(sink)
+
+        channel.push(np.asarray([[1, 2], [3, 4]], dtype=np.uint16))
+
+        self.assertEqual(sink.get_last().dtype, np.dtype(np.uint16))
