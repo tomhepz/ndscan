@@ -19,8 +19,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+import matplotlib.pyplot as plt
 import numpy as np
 
 from examples._roi_condition_stats import (
@@ -30,8 +30,6 @@ from examples._roi_condition_stats import (
 )
 from examples.lab_offline_results_helpers import LabNdscanRun
 from ndscan.results.scan_site_reader import HostRuntimeSite
-from ndscan.results.series import average_series, series_for_selector
-
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -154,9 +152,9 @@ class ThreeImageReadout:
             {
                 "name": logical_name,
                 "image_channel": self.image_channel(image_spec),
-                "average_image": average_series(
-                    self.site,
-                    self.image_channel(image_spec),
+                "average_image": np.asarray(
+                    np.mean(self.site.series(self.image_channel(image_spec)), axis=0),
+                    dtype=float,
                 ),
                 "rois": image_spec["rois"],
             }
@@ -224,15 +222,15 @@ def build_saved_vs_recomputed_probability_payload(
     given_syntax: str,
     event_syntax: str,
 ) -> dict[str, Any]:
-    x_selector = parent_site.choose_default_x_path() if x is None else x
-    if x_selector is None:
+    x_path = parent_site.choose_default_x_path() if x is None else x
+    if x_path is None:
         raise ValueError(
             f"Site {'/'.join(parent_site.path) or '<root>'} does not have a default "
-            "x selector"
+            "x path"
         )
 
-    x_values = np.asarray(series_for_selector(parent_site, x_selector), dtype=float)
-    saved_y_values = np.asarray(series_for_selector(parent_site, saved_y), dtype=float)
+    x_values = np.asarray(parent_site.series(x_path), dtype=float)
+    saved_y_values = np.asarray(parent_site.series(saved_y), dtype=float)
 
     threshold = readout.threshold_value()
     given_condition = parse_condition_syntax(given_syntax)
@@ -272,8 +270,8 @@ def build_saved_vs_recomputed_probability_payload(
     recomputed_sorted = np.asarray(recomputed_y_values[order], dtype=float)
 
     return {
-        "x_selector": x_selector,
-        "saved_y_selector": saved_y,
+        "x_path": x_path,
+        "saved_y_path": saved_y,
         "given_syntax": given_syntax,
         "event_syntax": event_syntax,
         "threshold": threshold,
@@ -358,7 +356,7 @@ def plot_saved_vs_recomputed_probability(
         payload["saved_y_values"],
         marker="o",
         linewidth=1.6,
-        label=f"Saved live result: {payload['saved_y_selector']}",
+        label=f"Saved live result: {payload['saved_y_path']}",
     )
     axes[0].plot(
         payload["x_values"],
@@ -383,7 +381,7 @@ def plot_saved_vs_recomputed_probability(
         color="tab:green",
         linewidth=1.2,
     )
-    axes[1].set_xlabel(str(payload["x_selector"]))
+    axes[1].set_xlabel(str(payload["x_path"]))
     axes[1].set_ylabel("saved - offline")
 
     figure.suptitle(

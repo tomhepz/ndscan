@@ -4,9 +4,10 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
-from examples.host_runtime_live_viewer_demo import HostRuntimeLiveViewerDemo
 from mock_environment import HasEnvironmentCase
 
+from examples.host_runtime_live_viewer_demo import HostRuntimeLiveViewerDemo
+from ndscan._qt import QtGui, QtWidgets
 from ndscan.define.fragment import ExpFragment
 from ndscan.define.result_channels import FloatChannel
 from ndscan.plots.runtime.fitting import (
@@ -17,26 +18,25 @@ from ndscan.plots.runtime.fitting import (
 from ndscan.plots.runtime.live import snapshot_from_live_values
 from ndscan.plots.runtime.viewer import (
     _ARRAY_SERIES_GROUP_KEY,
-    _DisplayedPointSelection,
     _NO_GROUP_KEY,
-    _PLOT_MODE_BO,
     _PLOT_MODE_1D,
     _PLOT_MODE_2D_IMAGE,
     _PLOT_MODE_2D_SCATTER,
+    _PLOT_MODE_BO,
     _REPEAT_COMBINE_SEM,
     _REPEAT_COMBINE_STD,
-    _SeriesUiState,
-    _SiteColumnWidget,
     RuntimePlotViewer,
     _default_x_choices,
     _default_y_choices,
+    _DisplayedPointSelection,
     _group_by_choices,
     _series_error_bar_pen,
+    _SeriesUiState,
+    _SiteColumnWidget,
     _wrap_overlay_text,
 )
 from ndscan.runtime.api import make_fragment_prepared_scan_exp
 from ndscan.scan.request import ScanRequest
-from ndscan._qt import QtGui, QtWidgets
 
 
 class AppletLaunchFragment(ExpFragment):
@@ -1576,9 +1576,9 @@ class RuntimeLiveSnapshotTest(unittest.TestCase):
 
         snapshot = snapshot_from_live_values(prefix, values)
         child = snapshot.get_site(("scan_x",))
-        self.assertEqual(len(child.segment_final_analysis), 2)
+        self.assertEqual(len(child.segment_analyses), 2)
         self.assertEqual(
-            child.final_analysis_for_segment(0).annotations[0]["kind"],
+            child.analysis_for_segment(0).annotations[0]["kind"],
             "artifact_curve",
         )
 

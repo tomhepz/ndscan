@@ -10,44 +10,43 @@ from functools import reduce
 from typing import Any
 
 import numpy as np
-
 from artiq.language import HasEnvironment, host_only, portable, rpc
 
-from .context import (
-    RunContext,
-    _KernelParentScanContextProvider,
-    _current_effective_scan_context,
-    current_run_context,
-    make_child_scan_site,
-    _persistent_kernel_parent_scan_context,
-)
-from .executors import (
-    HostScanProgramBuilder,
-    KernelStreamingExecutor,
-    _PointResultCollector,
-    _ResidentKernelBatchState,
-    _ResidentKernelPointRunner,
-    _execute_scan_request_inspection,
-    _publish_completed_batch,
-)
-from .program import (
-    ScanInspection,
-    ScanOutputs,
-    _can_use_kernel_streaming_executor,
-    _collect_parameter_mappings,
-    _fragment_uses_kernel_execution,
-    _fragment_tree_needs_param_initialisation,
-    _install_scan_axis_stores,
-    _build_bound_axes,
-    _build_bound_parameters,
-)
 from ..define.fragment import ExpFragment, Fragment
-from ..define.parameters import ParamHandle, ParamStore
+from ..define.parameters import ParamStore
 from ..define.result_channels import FloatChannel, IntChannel, ResultChannel
 from ..scan.mapping import ParameterMapping
 from ..scan.request import ScanRequest
 from ..schema.scan_site import ScanSite
 from ..utils import merge_no_duplicates
+from .context import (
+    RunContext,
+    _current_effective_scan_context,
+    _KernelParentScanContextProvider,
+    _persistent_kernel_parent_scan_context,
+    current_run_context,
+    make_child_scan_site,
+)
+from .executors import (
+    HostScanProgramBuilder,
+    KernelStreamingExecutor,
+    _execute_scan_request_inspection,
+    _PointResultCollector,
+    _publish_completed_batch,
+    _ResidentKernelBatchState,
+    _ResidentKernelPointRunner,
+)
+from .program import (
+    ScanInspection,
+    ScanOutputs,
+    _build_bound_axes,
+    _build_bound_parameters,
+    _can_use_kernel_streaming_executor,
+    _collect_parameter_mappings,
+    _fragment_tree_needs_param_initialisation,
+    _fragment_uses_kernel_execution,
+    _install_varying_parameter_stores,
+)
 
 __all__ = [
     "PreparedScan",
@@ -748,10 +747,9 @@ class PreparedChildScan(_PreparedScanHandleBase):
         effective_request = _merge_child_inherited_parameter_mappings(
             self._request, self._current_inherited_parameter_mappings()
         )
-        axis_handles = [
-            axis for axis in effective_request.axes if isinstance(axis, ParamHandle)
-        ]
-        axis_bindings = _install_scan_axis_stores(axis_handles)
+        varying_param_bindings = _install_varying_parameter_stores(
+            self._fragment, effective_request
+        )
         try:
             axes = _build_bound_axes(effective_request.axes)
             parameter_mappings = _collect_parameter_mappings(
@@ -767,7 +765,7 @@ class PreparedChildScan(_PreparedScanHandleBase):
                     "vary point-to-point; pure pseudoparam scans with no mapped "
                     "parameter targets are not yet supported"
                 )
-                for binding in axis_bindings:
+                for binding in varying_param_bindings:
                     binding.restore()
                 return
 
@@ -777,9 +775,9 @@ class PreparedChildScan(_PreparedScanHandleBase):
                 max_transitory_error_retries=self._max_transitory_error_retries,
             )
             self._kernel_runner_ready = True
-            self._kernel_axis_bindings = axis_bindings
+            self._kernel_axis_bindings = varying_param_bindings
         except BaseException:
-            for binding in axis_bindings:
+            for binding in varying_param_bindings:
                 binding.restore()
             raise
 

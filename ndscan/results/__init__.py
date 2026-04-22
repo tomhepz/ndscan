@@ -1,37 +1,25 @@
 """Public helpers for reading and navigating prepared-runtime result files."""
 
 from .scan_site_reader import (
-    HostRuntimeSegmentFinalAnalysis,
+    HostRuntimeSegmentAnalysis,
     HostRuntimeSite,
     HostRuntimeSiteSegment,
     HostRuntimeSnapshot,
+    PlotAxisChoices,
+    PlotChoices,
+    SeriesDescription,
     read_host_runtime_snapshot,
 )
-from .series import (
-    average_series,
-    build_1d_errorbar_payload,
-    build_1d_series_payload,
-    format_series_selector,
-    parse_series_selector,
-    series_dict,
-    series_for_selector,
-    series_slices_along_axis,
-    slice_series,
-)
+from .series import series_slices_along_axis
 
 __all__ = [
-    "HostRuntimeSegmentFinalAnalysis",
+    "HostRuntimeSegmentAnalysis",
     "HostRuntimeSite",
     "HostRuntimeSiteSegment",
     "HostRuntimeSnapshot",
-    "average_series",
-    "build_1d_errorbar_payload",
-    "build_1d_series_payload",
-    "format_series_selector",
-    "parse_series_selector",
-    "series_dict",
-    "series_for_selector",
+    "PlotAxisChoices",
+    "PlotChoices",
+    "SeriesDescription",
     "series_slices_along_axis",
     "read_host_runtime_snapshot",
-    "slice_series",
 ]

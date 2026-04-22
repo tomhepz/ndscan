@@ -50,13 +50,26 @@ def _site_path_from_argument(value: str) -> tuple[str, ...]:
     return tuple(part for part in value.split("/") if part)
 
 
-def _label_for_x(site, kind: str, key: str) -> str:
-    if kind == "pseudoparam":
-        schema = site.pseudoparams[key]["variable"]
-        return schema.get("description") or schema["name"]
+def _default_plot_x_values_and_label(
+    site: HostRuntimeSite, raw_points: dict[str, list]
+) -> tuple[np.ndarray, str]:
+    plot_choices = site.describe_plot_choices()
+    default_x = plot_choices.x.default
+    if default_x is None:
+        first_series = next(iter(raw_points.values()), [])
+        return np.arange(len(first_series)), "point_index"
 
-    schema = site.parameters[key]["param"]
-    return schema.get("description") or schema["fqn"].split(".")[-1]
+    storage_key = default_x.storage_key
+    if storage_key is None:
+        first_series = next(iter(raw_points.values()), [])
+        return np.arange(len(first_series)), default_x.label
+
+    values = raw_points.get(storage_key)
+    if values is None:
+        first_series = next(iter(raw_points.values()), [])
+        return np.arange(len(first_series)), default_x.label
+
+    return np.asarray(values), default_x.label
 
 
 def _label_for_channel(site, key: str) -> str:
@@ -85,15 +98,7 @@ def _binary_channel_summary(values: np.ndarray) -> str | None:
 def _x_data_for_site(site: HostRuntimeSite, raw_points: dict[str, list]):
     """Return default x data and label for one site's raw point arrays."""
 
-    x_kind, x_key = site.choose_default_x_key()
-    if x_kind is None or x_key is None:
-        first_series = next(iter(raw_points.values()), [])
-        return np.arange(len(first_series)), "point index"
-
-    if x_kind == "pseudoparam":
-        return np.asarray(raw_points[x_key]), _label_for_x(site, x_kind, x_key)
-
-    return np.asarray(raw_points[x_key]), _label_for_x(site, x_kind, x_key)
+    return _default_plot_x_values_and_label(site, raw_points)
 
 
 def _merge_segment_raw_points(
@@ -246,13 +251,7 @@ def main() -> None:
     selection_chain = []
 
     def rebuild_figure():
-        x_kind, x_key = site.choose_default_x_key()
-        if x_kind is None or x_key is None:
-            x_values = np.arange(site.metadata["state.num_points"])
-            x_label = "point index"
-        else:
-            x_values = np.asarray(site.raw_points[x_key])
-            x_label = _label_for_x(site, x_kind, x_key)
+        x_values, x_label = _default_plot_x_values_and_label(site, site.raw_points)
 
         direct_child_sites = snapshot.child_sites(site.path)
         visible_panels = _build_visible_site_panels(snapshot, selection_chain)

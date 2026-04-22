@@ -19,7 +19,10 @@ import numpy as np
 __all__ = [
     "HostRuntimeSnapshot",
     "HostRuntimeSiteSegment",
-    "HostRuntimeSegmentFinalAnalysis",
+    "HostRuntimeSegmentAnalysis",
+    "SeriesDescription",
+    "PlotAxisChoices",
+    "PlotChoices",
     "HostRuntimeSite",
     "read_host_runtime_snapshot",
 ]
@@ -44,6 +47,61 @@ _STRUCTURED_ARRAY_KEYS = {
 }
 _POINT_INDEX_PATH = "point_index"
 _POINT_INDEX_ALIASES = {_POINT_INDEX_PATH, "__point_index__"}
+
+
+def _strip_optional_string(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped if stripped else None
+
+
+def _series_choice_label(path: str, description: str | None, unit: str | None) -> str:
+    unit_suffix = f" / {unit}" if unit else ""
+    if description is None or description == path:
+        return f"{path}{unit_suffix}"
+    return f"{path} ({description}{unit_suffix})"
+
+
+def _is_numeric_array_channel_schema(schema: dict[str, Any]) -> bool:
+    return schema.get("type") == "array" and schema.get("element_type") in {"float", "int"}
+
+
+def _is_numeric_parameter_schema(schema: dict[str, Any]) -> bool:
+    param_schema = schema.get("param", {})
+    return param_schema.get("type", "float") in {"float", "int"}
+
+
+def _is_numeric_pseudoparam_schema(schema: dict[str, Any]) -> bool:
+    variable = schema.get("variable", {})
+    return variable.get("type", "float") in {"float", "int"}
+
+
+def _is_numeric_channel_schema(schema: dict[str, Any]) -> bool:
+    return schema.get("type") in {"float", "int"} or _is_numeric_array_channel_schema(schema)
+
+
+def _is_numeric_point_stream(values: Any) -> bool:
+    try:
+        array = np.asarray(values)
+    except (TypeError, ValueError):
+        return False
+    if array.ndim != 1:
+        return False
+    try:
+        np.asarray(values, dtype=float)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _point_stream_varies(values: Any) -> bool:
+    if not _is_numeric_point_stream(values):
+        return False
+    array = np.asarray(values, dtype=float)
+    if len(array) < 2:
+        return False
+    return not np.allclose(array, array[0], equal_nan=True)
 
 
 def _join_path(base: str, name: str) -> str:
@@ -226,11 +284,11 @@ def _online_annotations_for_prefix(
     }
 
 
-def _segment_final_analysis_for_prefix(
+def _segment_analyses_for_prefix(
     dataset_values: dict[str, Any], prefix: str
-) -> list["HostRuntimeSegmentFinalAnalysis"]:
+) -> list["HostRuntimeSegmentAnalysis"]:
     raw_feedback = dataset_values.get(prefix + "segments.analysis.final_feedback", [])
-    return [HostRuntimeSegmentFinalAnalysis.from_dict(item) for item in raw_feedback]
+    return [HostRuntimeSegmentAnalysis.from_dict(item) for item in raw_feedback]
 
 
 @dataclass(frozen=True)
@@ -249,15 +307,15 @@ class HostRuntimeSiteSegment:
 
 
 @dataclass(frozen=True)
-class HostRuntimeSegmentFinalAnalysis:
-    """Final analysis payload attached to one finished site segment."""
+class HostRuntimeSegmentAnalysis:
+    """Analysis payload attached to one finished site segment."""
 
     outputs: dict[str, Any]
     artifacts: dict[str, Any]
     annotations: list[dict[str, Any]]
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | str | bytes) -> "HostRuntimeSegmentFinalAnalysis":
+    def from_dict(cls, raw: dict[str, Any] | str | bytes) -> "HostRuntimeSegmentAnalysis":
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8")
         if isinstance(raw, str):
@@ -267,6 +325,42 @@ class HostRuntimeSegmentFinalAnalysis:
             artifacts=dict(raw.get("artifacts", {})),
             annotations=list(raw.get("annotations", [])),
         )
+
+
+@dataclass(frozen=True)
+class SeriesDescription:
+    """User-facing description of one public per-point series."""
+
+    path: str
+    kind: str
+    storage_key: str | None
+    shape: tuple[int, ...]
+    dtype: np.dtype
+    label: str
+    description: str | None
+    unit: str | None
+    scale: Any | None
+    is_numeric: bool
+    point_shape: tuple[int, ...] | None = None
+    dim_names: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
+class PlotAxisChoices:
+    """Plotting choices for one axis."""
+
+    choices: tuple[SeriesDescription, ...]
+    default_path: str | None
+    default: SeriesDescription | None
+
+
+@dataclass(frozen=True)
+class PlotChoices:
+    """User-facing numeric plot choices plus viewer-like defaults."""
+
+    x: PlotAxisChoices
+    y: PlotAxisChoices
+    z: PlotAxisChoices
 
 
 @dataclass(frozen=True)
@@ -291,7 +385,7 @@ class HostRuntimeSite:
     online_analysis_artifacts: dict[str, Any]
     online_analysis_annotations: dict[str, list[dict[str, Any]]]
     annotations: list[dict[str, Any]]
-    segment_final_analysis: list[HostRuntimeSegmentFinalAnalysis]
+    segment_analyses: list[HostRuntimeSegmentAnalysis]
     segmented: bool
     metadata: dict[str, Any]
 
@@ -355,11 +449,125 @@ class HostRuntimeSite:
                 matches.append(("pseudoparam", key))
         for key, schema in self.parameters.items():
             if _parameter_series_path(key, schema) == path:
-                matches.append(("param", key))
+                matches.append(("parameter", key))
         for key, schema in self.channels.items():
             if _channel_series_path(key, schema) == path:
                 matches.append(("channel", key))
         return matches
+
+    def _series_display_metadata(
+        self,
+        *,
+        path: str,
+        kind: str,
+        schema: Mapping[str, Any] | None,
+        values: Any,
+    ) -> dict[str, Any]:
+        description = None
+        unit = None
+        scale = None
+        declared_numeric = False
+
+        if kind == "pseudoparam" and isinstance(schema, Mapping):
+            variable = schema.get("variable", {})
+            if isinstance(variable, Mapping):
+                description = _strip_optional_string(variable.get("description"))
+                spec = variable.get("spec", {})
+                if isinstance(spec, Mapping):
+                    unit = _strip_optional_string(spec.get("unit"))
+                    scale = spec.get("scale")
+            declared_numeric = _is_numeric_pseudoparam_schema(dict(schema))
+        elif kind == "parameter" and isinstance(schema, Mapping):
+            param = schema.get("param", {})
+            if isinstance(param, Mapping):
+                description = _strip_optional_string(param.get("description"))
+                spec = param.get("spec", {})
+                if isinstance(spec, Mapping):
+                    unit = _strip_optional_string(spec.get("unit"))
+                    scale = spec.get("scale")
+            declared_numeric = _is_numeric_parameter_schema(dict(schema))
+        elif kind == "channel" and isinstance(schema, Mapping):
+            description = _strip_optional_string(schema.get("description"))
+            unit = _strip_optional_string(schema.get("unit"))
+            scale = schema.get("scale")
+            declared_numeric = _is_numeric_channel_schema(dict(schema))
+
+        return {
+            "description": description,
+            "unit": unit,
+            "scale": scale,
+            "label": _series_choice_label(path, description, unit),
+            "is_numeric": declared_numeric or _is_numeric_point_stream(values),
+        }
+
+    def _describe_series_entry(
+        self,
+        *,
+        path: str,
+        kind: str,
+        storage_key: str | None,
+        values: Any,
+        schema: Mapping[str, Any] | None = None,
+    ) -> SeriesDescription:
+        array = np.asarray(values)
+        display_metadata = self._series_display_metadata(
+            path=path,
+            kind=kind,
+            schema=schema,
+            values=values,
+        )
+        point_shape = None
+        dim_names = None
+        if isinstance(schema, Mapping):
+            if "shape" in schema:
+                point_shape = tuple(int(size) for size in schema["shape"])
+            if "dim_names" in schema:
+                dim_names = tuple(schema["dim_names"])
+        return SeriesDescription(
+            path=path,
+            kind=kind,
+            storage_key=storage_key,
+            shape=tuple(int(size) for size in array.shape),
+            dtype=np.dtype(array.dtype),
+            label=display_metadata["label"],
+            description=display_metadata["description"],
+            unit=display_metadata["unit"],
+            scale=display_metadata["scale"],
+            is_numeric=bool(display_metadata["is_numeric"]),
+            point_shape=point_shape,
+            dim_names=dim_names,
+        )
+
+    def _describe_runtime_series_entry(
+        self,
+        *,
+        path: str,
+        storage_key: str | None,
+        values: Any,
+        kind: str,
+    ) -> SeriesDescription:
+        description = self._describe_series_entry(
+            path=path,
+            kind=kind,
+            storage_key=storage_key,
+            values=values,
+        )
+        if path == _POINT_INDEX_PATH:
+            description = SeriesDescription(
+                path=description.path,
+                kind=description.kind,
+                storage_key=description.storage_key,
+                shape=description.shape,
+                dtype=description.dtype,
+                label=path,
+                description="Point index",
+                unit=description.unit,
+                scale=description.scale,
+                is_numeric=description.is_numeric,
+                point_shape=description.point_shape,
+                dim_names=description.dim_names,
+            )
+        return description
 
     def get_channel_storage_key(self, channel_path: str) -> str | None:
         """Return the storage key for one semantic channel path, if present."""
@@ -436,8 +644,12 @@ class HostRuntimeSite:
             return values
         return values.astype(dtype, copy=False)
 
-    def describe_series(self) -> list[dict[str, Any]]:
-        """Return a compact description of all plottable per-point series."""
+    def describe_series(self) -> list[SeriesDescription]:
+        """Return a compact description of all plottable per-point series.
+
+        Each entry includes the public path plus display-oriented metadata such as
+        ``label``, ``description``, ``unit``, ``scale``, and ``is_numeric``.
+        """
 
         descriptions = []
         semantic_keys = set()
@@ -445,27 +657,19 @@ class HostRuntimeSite:
             if key not in self.raw_points:
                 continue
             semantic_keys.add(key)
-            values = np.asarray(self.raw_points[key])
-            description = {
-                "path": path,
-                "kind": kind,
-                "key": key,
-                "shape": tuple(int(size) for size in values.shape),
-                "dtype": str(values.dtype),
-            }
-            if isinstance(schema, Mapping):
-                if "shape" in schema:
-                    description["point_shape"] = tuple(
-                        int(size) for size in schema["shape"]
-                    )
-                if "dim_names" in schema:
-                    description["dim_names"] = tuple(schema["dim_names"])
-            descriptions.append(description)
+            descriptions.append(
+                self._describe_series_entry(
+                    path=path,
+                    kind=kind,
+                    storage_key=key,
+                    values=self.raw_points[key],
+                    schema=schema,
+                )
+            )
 
         for key in sorted(self.raw_points):
             if key in semantic_keys:
                 continue
-            values = np.asarray(self.raw_points[key])
             if key in {"acquired_at_unix", _POINT_INDEX_PATH}:
                 kind = "runtime"
             elif key.startswith("metadata."):
@@ -473,36 +677,283 @@ class HostRuntimeSite:
             else:
                 kind = "raw_points"
             descriptions.append(
-                {
-                    "path": key,
-                    "kind": kind,
-                    "key": key,
-                    "shape": tuple(int(size) for size in values.shape),
-                    "dtype": str(values.dtype),
-                }
+                self._describe_runtime_series_entry(
+                    path=key,
+                    storage_key=key,
+                    values=self.raw_points[key],
+                    kind=kind,
+                )
             )
 
         if _POINT_INDEX_PATH not in self.raw_points:
             descriptions.append(
-                {
-                    "path": _POINT_INDEX_PATH,
-                    "kind": "runtime",
-                    "key": None,
-                    "shape": (self.num_points,),
-                    "dtype": str(np.dtype(np.int64)),
-                }
+                self._describe_runtime_series_entry(
+                    path=_POINT_INDEX_PATH,
+                    storage_key=None,
+                    values=np.arange(self.num_points, dtype=np.int64),
+                    kind="runtime",
+                )
             )
         return descriptions
 
-    def choose_default_x_path(self) -> str | None:
-        """Return a simple default x-data path for plotting."""
+    def _numeric_plot_choice_descriptions(self) -> list[SeriesDescription]:
+        choices: list[SeriesDescription] = []
+        seen = set[str]()
 
-        kind, key = self.choose_default_x_key()
-        if kind is None or key is None:
+        def add_choice(
+            *,
+            path: str,
+            kind: str,
+            storage_key: str | None,
+            values: Any,
+            schema: Mapping[str, Any] | None = None,
+            declared_numeric: bool = False,
+        ) -> None:
+            if path in seen:
+                return
+            if values is None:
+                if not declared_numeric:
+                    return
+            elif not _is_numeric_point_stream(values) and not declared_numeric:
+                return
+            if kind in {"pseudoparam", "parameter", "channel"}:
+                description = self._describe_series_entry(
+                    path=path,
+                    kind=kind,
+                    storage_key=storage_key,
+                    values=values,
+                    schema=schema,
+                )
+            else:
+                description = self._describe_runtime_series_entry(
+                    path=path,
+                    storage_key=storage_key,
+                    values=values,
+                    kind=kind,
+                )
+            choices.append(description)
+            seen.add(path)
+
+        for key, schema in self.pseudoparams.items():
+            add_choice(
+                path=_pseudoparam_series_path(key, schema),
+                kind="pseudoparam",
+                storage_key=key,
+                values=self.raw_points.get(key),
+                schema=schema,
+                declared_numeric=_is_numeric_pseudoparam_schema(schema),
+            )
+
+        for key, schema in self.parameters.items():
+            if not schema.get("is_scanned", False):
+                continue
+            add_choice(
+                path=_parameter_series_path(key, schema),
+                kind="parameter",
+                storage_key=key,
+                values=self.raw_points.get(key),
+                schema=schema,
+                declared_numeric=_is_numeric_parameter_schema(schema),
+            )
+
+        for key, schema in self.parameters.items():
+            if schema.get("is_scanned", False):
+                continue
+            add_choice(
+                path=_parameter_series_path(key, schema),
+                kind="parameter",
+                storage_key=key,
+                values=self.raw_points.get(key),
+                schema=schema,
+                declared_numeric=_is_numeric_parameter_schema(schema),
+            )
+
+        for key, schema in self.channels.items():
+            add_choice(
+                path=_channel_series_path(key, schema),
+                kind="channel",
+                storage_key=key,
+                values=self.raw_points.get(key),
+                schema=schema,
+                declared_numeric=_is_numeric_channel_schema(schema),
+            )
+
+        for key in sorted(self.raw_points.keys()):
+            if key in self.pseudoparams or key in self.parameters or key in self.channels:
+                continue
+            if key in {"acquired_at_unix", _POINT_INDEX_PATH}:
+                kind = "runtime"
+            elif key.startswith("metadata."):
+                kind = "point_metadata"
+            else:
+                kind = "raw_points"
+            add_choice(
+                path=key,
+                kind=kind,
+                storage_key=key,
+                values=self.raw_points[key],
+            )
+
+        add_choice(
+            path=_POINT_INDEX_PATH,
+            kind="runtime",
+            storage_key=None,
+            values=np.arange(self.num_points, dtype=np.int64),
+            declared_numeric=True,
+        )
+
+        return choices
+
+    def _default_plot_x_path(self, choices: list[SeriesDescription]) -> str | None:
+        if not choices:
             return None
-        if kind == "pseudoparam":
-            return _pseudoparam_series_path(key, self.pseudoparams[key])
-        return _parameter_series_path(key, self.parameters[key])
+        choice_paths = [entry.path for entry in choices]
+        non_point_index_paths = [path for path in choice_paths if path != _POINT_INDEX_PATH]
+        if self.num_points == 0:
+            return non_point_index_paths[0] if non_point_index_paths else choice_paths[0]
+
+        preferred = []
+
+        def add_paths(paths) -> None:
+            for path in paths:
+                if path in choice_paths and path not in preferred:
+                    preferred.append(path)
+
+        def varies(path: str) -> bool:
+            return _point_stream_varies(self._series_for_path(path))
+
+        add_paths(
+            _pseudoparam_series_path(key, schema)
+            for key, schema in self.pseudoparams.items()
+            if varies(_pseudoparam_series_path(key, schema))
+        )
+        add_paths(
+            _parameter_series_path(key, schema)
+            for key, schema in self.parameters.items()
+            if schema.get("is_scanned", False) and varies(_parameter_series_path(key, schema))
+        )
+        add_paths(
+            _parameter_series_path(key, schema)
+            for key, schema in self.parameters.items()
+            if not schema.get("is_scanned", False)
+            and varies(_parameter_series_path(key, schema))
+        )
+        if "acquired_at_unix" in choice_paths and varies("acquired_at_unix"):
+            preferred.append("acquired_at_unix")
+        if _POINT_INDEX_PATH in choice_paths:
+            preferred.append(_POINT_INDEX_PATH)
+        add_paths(
+            _channel_series_path(key, schema)
+            for key, schema in self.channels.items()
+            if varies(_channel_series_path(key, schema))
+        )
+        add_paths(
+            key
+            for key in sorted(self.raw_points.keys())
+            if key not in self.pseudoparams
+            and key not in self.parameters
+            and key not in self.channels
+            and key != "acquired_at_unix"
+            and varies(key)
+        )
+        add_paths(non_point_index_paths)
+        return preferred[0] if preferred else choice_paths[0]
+
+    def _default_plot_y_path(
+        self, choices: list[SeriesDescription], *, x_path: str | None
+    ) -> str | None:
+        if not choices:
+            return None
+        choice_paths = [entry.path for entry in choices]
+        excluded = {x_path} if x_path is not None else set()
+        preferred = [
+            _channel_series_path(key, schema)
+            for key, schema in self.channels.items()
+            if (
+                key in self.raw_points and _is_numeric_point_stream(self.raw_points[key])
+            )
+            or _is_numeric_channel_schema(schema)
+        ]
+        for path in preferred:
+            if path in choice_paths and path not in excluded:
+                return path
+        for path in choice_paths:
+            if path not in excluded:
+                return path
+        return choice_paths[0]
+
+    def _default_plot_z_path(
+        self,
+        choices: list[SeriesDescription],
+        *,
+        x_path: str | None,
+        y_path: str | None,
+    ) -> str | None:
+        if not choices:
+            return None
+        choice_paths = [entry.path for entry in choices]
+        excluded = {path for path in (x_path, y_path) if path is not None}
+        preferred = [
+            _channel_series_path(key, schema)
+            for key, schema in self.channels.items()
+            if (
+                key in self.raw_points and _is_numeric_point_stream(self.raw_points[key])
+            )
+            or _is_numeric_channel_schema(schema)
+        ]
+        for path in preferred:
+            if path in choice_paths and path not in excluded:
+                return path
+        for path in choice_paths:
+            if path not in excluded:
+                return path
+        return choice_paths[0]
+
+    def describe_plot_choices(self) -> PlotChoices:
+        """Return user-facing numeric plot choices plus viewer-like defaults.
+
+        Choices are addressed by the same public series paths accepted by
+        :meth:`series`. The default x/y/z paths follow the current runtime-viewer
+        preference order as closely as possible without depending on the GUI layer.
+        """
+
+        choices = self._numeric_plot_choice_descriptions()
+        choices_by_path = {entry.path: entry for entry in choices}
+        default_x_path = self._default_plot_x_path(choices)
+        default_y_path = self._default_plot_y_path(choices, x_path=default_x_path)
+        default_z_path = self._default_plot_z_path(
+            choices,
+            x_path=default_x_path,
+            y_path=default_y_path,
+        )
+
+        all_choices = tuple(choices)
+        return PlotChoices(
+            x=PlotAxisChoices(
+                choices=all_choices,
+                default_path=default_x_path,
+                default=choices_by_path.get(default_x_path),
+            ),
+            y=PlotAxisChoices(
+                choices=all_choices,
+                default_path=default_y_path,
+                default=choices_by_path.get(default_y_path),
+            ),
+            z=PlotAxisChoices(
+                choices=all_choices,
+                default_path=default_z_path,
+                default=choices_by_path.get(default_z_path),
+            ),
+        )
+
+    def choose_default_x_path(self) -> str | None:
+        """Return the default x-data path for plotting.
+
+        This is a lightweight shortcut for
+        ``site.describe_plot_choices().x.default_path``.
+        """
+
+        return self.describe_plot_choices().x.default_path
 
     def available_metadata_blob_names(self) -> list[str]:
         """Return names of all persisted ``extra.*`` metadata blobs on this site."""
@@ -537,8 +988,14 @@ class HostRuntimeSite:
                 f"Site {'/'.join(self.path) or '<root>'} does not define metadata blob {name!r}"
             ) from exc
 
-    def choose_default_x_key(self) -> tuple[str | None, str | None]:
-        """Return a simple default x-data choice for plotting.
+    def choose_default_x_source(self) -> tuple[str | None, str | None]:
+        """Return the schema-level x-source heuristic for advanced callers.
+
+        This helper only reports the preferred pseudoparameter/parameter schema entry.
+        It does not account for richer plotting defaults such as
+        ``acquired_at_unix`` or ``point_index`` when those are more useful for the
+        visible data. Most callers should use :meth:`describe_plot_choices` or
+        :meth:`choose_default_x_path` instead.
 
         Preference order:
         1. first pseudoparam
@@ -552,10 +1009,10 @@ class HostRuntimeSite:
 
         for key, schema in self.parameters.items():
             if schema.get("is_scanned", False):
-                return "param", key
+                return "parameter", key
 
         if self.parameters:
-            return "param", next(iter(self.parameters))
+            return "parameter", next(iter(self.parameters))
 
         return None, None
 
@@ -606,13 +1063,13 @@ class HostRuntimeSite:
             if segment.parent_point_index == parent_point_index
         ]
 
-    def final_analysis_for_segment(
+    def analysis_for_segment(
         self, segment_index: int
-    ) -> HostRuntimeSegmentFinalAnalysis | None:
-        """Return the persisted final analysis payload for one segment, if present."""
+    ) -> HostRuntimeSegmentAnalysis | None:
+        """Return the persisted analysis payload for one segment, if present."""
 
-        if 0 <= segment_index < len(self.segment_final_analysis):
-            return self.segment_final_analysis[segment_index]
+        if 0 <= segment_index < len(self.segment_analyses):
+            return self.segment_analyses[segment_index]
         return None
 
     def slice_raw_points(
@@ -689,7 +1146,7 @@ def read_host_runtime_snapshot(path: str | Path) -> HostRuntimeSnapshot:
             online_analysis_artifacts=_online_artifacts_for_prefix(datasets, prefix),
             online_analysis_annotations=_online_annotations_for_prefix(datasets, prefix),
             annotations=datasets.get(prefix + "analysis.annotations", []),
-            segment_final_analysis=_segment_final_analysis_for_prefix(datasets, prefix),
+            segment_analyses=_segment_analyses_for_prefix(datasets, prefix),
             segmented=(prefix + "segments.start_index") in datasets,
             metadata={
                 key[len(prefix) :]: value

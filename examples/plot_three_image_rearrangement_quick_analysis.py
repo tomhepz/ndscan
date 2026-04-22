@@ -7,8 +7,7 @@ figure styling are useful for the lab book.
 The script only uses the generic helpers in ``lab_offline_results_helpers.py``:
 
 - open a prepared-runtime HDF5 file,
-- address point data by semantic selectors,
-- plot one scalar probability with error bars,
+- pull saved series arrays by semantic path,
 - split one array-valued probability by group and plot several traces.
 """
 
@@ -25,7 +24,6 @@ from examples._roi_condition_stats import (
 from examples.lab_offline_results_helpers import LabNdscanRun
 from examples.plot_three_image_rearrangement_snapshot import ThreeImageReadout
 
-
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -39,20 +37,20 @@ SITE_PATH = ()
 IMAGE_SITE_PATH = ("repeat_scan",)
 IMAGING_BLOB_NAME = "lab.imaging_readout"
 
-X_SELECTOR = "shot/probe_frequency"
+X_PATH = "shot/probe_frequency"
 
-AVERAGE_Y_SELECTOR = "bright_pair_probability_image2_given_pair_image1"
-AVERAGE_YERR_SELECTOR = "bright_pair_probability_error_image2_given_pair_image1"
+AVERAGE_Y_PATH = "bright_pair_probability_image2_given_pair_image1"
+AVERAGE_YERR_PATH = "bright_pair_probability_error_image2_given_pair_image1"
 
-GROUP_Y_SELECTOR = "bright_pair_probability_image2_given_pair_image1_by_group"
-GROUP_YERR_SELECTOR = "bright_pair_probability_error_image2_given_pair_image1_by_group"
+GROUP_Y_PATH = "bright_pair_probability_image2_given_pair_image1_by_group"
+GROUP_YERR_PATH = "bright_pair_probability_error_image2_given_pair_image1_by_group"
 GROUP_INDICES = range(4)
 
 # Optional x-axis transform for lab-book plots. For example, set X_OFFSET to the
 # carrier frequency and X_SCALE to 1e3 to plot detuning in kHz.
 X_OFFSET = None
 X_SCALE = 1.0
-X_LABEL = X_SELECTOR
+X_LABEL = X_PATH
 
 # Edit freely for lab-book markers, cooling points, fit centres, etc.
 VERTICAL_MARKERS = [
@@ -93,17 +91,16 @@ def _apply_common_axis_markup(axis: plt.Axes, *, show_xlabel: bool = True) -> No
 
 
 def plot_average_trace(site) -> tuple[plt.Figure, plt.Axes]:
-    payload = site.errorbar(
-        x=X_SELECTOR,
-        y=AVERAGE_Y_SELECTOR,
-        yerr=AVERAGE_YERR_SELECTOR,
-    )
+    x_values = np.asarray(site.series(X_PATH), dtype=float)
+    y_values = np.asarray(site.series(AVERAGE_Y_PATH), dtype=float)
+    y_errors = np.asarray(site.series(AVERAGE_YERR_PATH), dtype=float)
+    order = np.argsort(x_values)
 
     figure, axis = plt.subplots(figsize=(6.4, 4.2), constrained_layout=True)
     axis.errorbar(
-        _plot_x(payload["x_values"]),
-        payload["y_values"],
-        yerr=payload.get("yerr_values"),
+        _plot_x(x_values[order]),
+        y_values[order],
+        yerr=y_errors[order],
         marker="o",
         linestyle="",
         color="k",
@@ -111,24 +108,24 @@ def plot_average_trace(site) -> tuple[plt.Figure, plt.Axes]:
         label="average",
     )
     axis.set_ylabel("probability")
-    axis.set_title(AVERAGE_Y_SELECTOR)
+    axis.set_title(AVERAGE_Y_PATH)
     _apply_common_axis_markup(axis)
     axis.legend()
     return figure, axis
 
 
 def plot_group_traces(site) -> tuple[plt.Figure, plt.Axes]:
-    x_values = np.asarray(site.series(X_SELECTOR), dtype=float)
+    x_values = np.asarray(site.series(X_PATH), dtype=float)
     order = np.argsort(x_values)
     x_plot = _plot_x(x_values[order])
 
     group_values = site.split_array_series(
-        GROUP_Y_SELECTOR,
+        GROUP_Y_PATH,
         axis=0,
         indices=GROUP_INDICES,
     )
     group_errors = site.split_array_series(
-        GROUP_YERR_SELECTOR,
+        GROUP_YERR_PATH,
         axis=0,
         indices=GROUP_INDICES,
     )
@@ -146,7 +143,7 @@ def plot_group_traces(site) -> tuple[plt.Figure, plt.Axes]:
         )
 
     axis.set_ylabel("probability")
-    axis.set_title(GROUP_Y_SELECTOR)
+    axis.set_title(GROUP_Y_PATH)
     _apply_common_axis_markup(axis)
     axis.legend()
     return figure, axis
@@ -213,7 +210,7 @@ def build_adhoc_conditional_payload(
 
     order = np.argsort(x_values)
     return {
-        "x_selector": x,
+        "x_path": x,
         "given_syntax": given_syntax,
         "event_syntax": event_syntax,
         "threshold": threshold,
@@ -233,7 +230,7 @@ def plot_adhoc_condition(
     payload = build_adhoc_conditional_payload(
         site,
         readout,
-        x=X_SELECTOR,
+        x=X_PATH,
         given_syntax=ADHOC_GIVEN,
         event_syntax=ADHOC_EVENT,
     )

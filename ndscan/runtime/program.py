@@ -12,21 +12,19 @@ from typing import Any
 
 import numpy as np
 
-from artiq.language import HasEnvironment
-
-from .analysis import HostScanAnalysisEngine
-from .persistence import ScanSiteDatasetWriter
 from ..define.fragment import ExpFragment
 from ..define.parameters import ParamHandle, ParamStore
 from ..define.result_channels import ResultChannel
 from ..define.utils import is_kernel
 from ..scan.mapping import ParameterMapping, ScanVariable
-from ..scan.request import ExecutionPolicy, ScanRequest
 from ..scan.point_policy import (
     BasePoint,
     BatchFeedback,
     PointPolicy,
 )
+from ..scan.request import ExecutionPolicy, ScanRequest
+from .analysis import HostScanAnalysisEngine
+from .persistence import ScanSiteDatasetWriter
 
 __all__ = [
     "BoundScanAxis",
@@ -167,8 +165,8 @@ class _ResolvedExecutionPoint:
 
 
 @dataclass
-class _ScanAxisBinding:
-    """Temporary rebinding of one logical scan axis onto a dedicated store."""
+class _TransientParamBinding:
+    """Temporary rebinding of one per-point-varying parameter onto a fresh store."""
 
     handles: tuple[ParamHandle, ...]
     original_stores: tuple[ParamStore, ...]
@@ -861,31 +859,58 @@ def _fragment_tree_needs_param_initialisation(fragment: ExpFragment) -> bool:
     return False
 
 
-def _install_scan_axis_stores(
-    axis_handles: Sequence[ParamHandle],
-) -> list[_ScanAxisBinding]:
-    bindings = []
+def _collect_varying_parameter_handles(
+    fragment: ExpFragment,
+    request: ScanRequest,
+) -> list[ParamHandle]:
+    """Return parameter handles whose values vary point-by-point for this request.
+
+    Directly scanned parameters and mapping targets are treated the same here. Both are
+    concrete values chosen for one resolved execution point, so both need transient
+    stores that are insulated from the fragment's default-value stores.
+    """
+
+    handles = []
     seen = set[tuple[int, str]]()
-    for handle in axis_handles:
+
+    def add(handle: ParamHandle) -> None:
         key = (id(handle.owner), handle.name)
         if key in seen:
-            raise ValueError(
-                f"Scan axis '{handle.owner._stringize_path()}/{handle.name}' was specified more than once"
-            )
+            return
         seen.add(key)
+        handles.append(handle)
 
+    for axis in request.axes:
+        if isinstance(axis, ParamHandle):
+            add(axis)
+
+    for mapping in tuple(fragment._parameter_mappings) + tuple(request.parameter_mappings):
+        for target in mapping.targets:
+            add(target)
+
+    return handles
+
+
+def _install_varying_parameter_stores(
+    fragment: ExpFragment,
+    request: ScanRequest,
+) -> list[_TransientParamBinding]:
+    bindings = []
+    for handle in _collect_varying_parameter_handles(fragment, request):
         affected_handles = tuple(handle.owner._get_all_handles_for_param(handle.name))
         original_stores = tuple(bound_handle._store for bound_handle in affected_handles)
         if any(store is None for store in original_stores):
             raise ValueError(
-                f"Cannot scan parameter '{handle.name}' before its stores are initialised"
+                "Cannot vary parameter "
+                f"'{handle.owner._stringize_path()}/{handle.name}' before its stores "
+                "are initialised"
             )
 
         scan_store = type(handle._store)(handle._store.identity, handle.get())
         for bound_handle in affected_handles:
             bound_handle.set_store(scan_store)
 
-        bindings.append(_ScanAxisBinding(affected_handles, original_stores))
+        bindings.append(_TransientParamBinding(affected_handles, original_stores))
     return bindings
 
 

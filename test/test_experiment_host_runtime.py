@@ -8,26 +8,26 @@ from unittest.mock import patch
 
 import h5py
 import numpy as np
-import ndscan.experiment as experiment_facade
 from artiq.experiment import kernel
 from artiq.language.core import TerminationRequested
-from examples.host_runtime_grouped_line_family import HostRuntimeGroupedLineFamily
+from mock_environment import HasEnvironmentCase
+from sipyco import pyon
+
 import examples._roi_condition_stats as roi_condition_stats
 import examples.host_runtime_counts_field_calibration as counts_field_calibration
 import examples.host_runtime_interleaved_spectroscopy_patterns as interleaved_patterns
 import examples.host_runtime_three_image_rearrangement as three_image_rearrangement
+import ndscan.experiment as experiment_facade
 from examples.host_runtime_field_shift_spectroscopy import (
-    HostRuntimeFieldShiftSpectroscopy,
     TRUE_CENTER_AT_ZERO,
     TRUE_SHIFT_PER_FIELD,
+    HostRuntimeFieldShiftSpectroscopy,
 )
+from examples.host_runtime_grouped_line_family import HostRuntimeGroupedLineFamily
 from examples.host_runtime_prepared_root_linear_scan import (
     HostRuntimePreparedRootLinearScan,
 )
 from examples.host_runtime_rabi_flop_2d import HostRuntimeRabiFlop2D
-from mock_environment import HasEnvironmentCase
-from sipyco import pyon
-
 from ndscan.dashboard.submission import HostSubmissionBackend, select_submission_backend
 from ndscan.define import annotations
 from ndscan.define.default_analysis import AnalysisFeedback, CustomAnalysis, OnlineFit
@@ -57,7 +57,6 @@ from ndscan.scan.point_policy import (
     ConcatPointPolicy,
     ExplicitPointPolicy,
     GradientDescentPointPolicy,
-    PointPolicy,
     ProductPointPolicy,
     RecursiveMidpointPointPolicy1D,
     RepeatPointPolicy,
@@ -73,8 +72,7 @@ from ndscan.submission.host_scan_schema import (
     compile_host_scan_schema,
     compile_host_scan_spec,
 )
-from ndscan.utils import PARAMS_ARG_KEY
-from ndscan.utils import FIT_OBJECTS
+from ndscan.utils import FIT_OBJECTS, PARAMS_ARG_KEY
 
 _REAL_NP_LINSPACE = np.linspace
 
@@ -836,6 +834,35 @@ class PhysicalDriveFragment(ExpFragment):
 
     def run_once(self):
         self.result.push(2.0 * self.drive.get())
+
+
+class NestedMappedChildLeaf(ExpFragment):
+    """Leaf used to test mapped parameters flowing through a nested child scan."""
+
+    def build_fragment(self):
+        self.setattr_param("value", FloatParam, "value", 10.0)
+        self.setattr_result("result", FloatChannel)
+
+    def run_once(self):
+        self.result.push(self.value.get())
+
+
+class NestedMappedChildParent(ExpFragment):
+    """Parent launching a prepared child scan over one detached leaf fragment."""
+
+    def build_fragment(self):
+        self.child_scan = setattr_prepared_child_scan(
+            self,
+            "child",
+            NestedMappedChildLeaf,
+            scan_name="child_scan",
+        )
+        self.setattr_result("child_value", FloatChannel)
+
+    def run_once(self):
+        self.child_scan.configure(ScanRequest.single())
+        self.child_scan.execute()
+        self.child_value.push(self.child_scan.inspect().values[self.child.result][0])
 
 
 class WrapperRebindFragment(ExpFragment):
@@ -1743,6 +1770,33 @@ class HostRuntimeCase(HasEnvironmentCase):
             [0.0, 1.0, 2.0],
         )
 
+    def test_ad_hoc_mapping_to_detached_child_param_survives_nested_child_scan(self):
+        fragment = self.create(NestedMappedChildParent, [])
+        logical_value = ScanVariable(
+            "logical_value",
+            description="Logical scan axis for the detached child parameter",
+        )
+        request = ScanRequest.cartesian(
+            [(logical_value, [1.0, 2.0, 3.0])]
+        ).with_parameter_mappings(
+            [
+                ParameterMapping.single_target(
+                    fragment.child.value,
+                    [logical_value],
+                    lambda values: values[logical_value] + 100.0,
+                    description="Drive the detached child parameter from a logical axis",
+                )
+            ]
+        )
+
+        session = PreparedScan(fragment, fragment, request)
+        result = _execute_and_inspect(session)
+
+        prefix = result.site_prefix
+        self.assertEqual(self.d(prefix, "points.pseudoparam_0"), [1.0, 2.0, 3.0])
+        self.assertEqual(self.d(prefix, "points.param_0"), [101.0, 102.0, 103.0])
+        self.assertEqual(self.d(prefix, "points.channel_0"), [101.0, 102.0, 103.0])
+
     def test_wrapper_fragment_rebind_param_uses_same_runtime_mapping_path(self):
         fragment = self.create(WrapperRebindFragment, [])
         request = ScanRequest.cartesian(
@@ -1934,6 +1988,53 @@ class HostRuntimeCase(HasEnvironmentCase):
             },
         )
 
+    def test_schema_compiled_rebind_to_detached_child_param_survives_nested_child_scan(self):
+        fragment = self.create(NestedMappedChildParent, [])
+        request, overrides = compile_host_scan_schema(
+            fragment,
+            {
+                "version": 1,
+                "mode": {"type": "grid"},
+                "entries": [
+                    {
+                        "id": "logical_value",
+                        "kind": "pseudoparam",
+                        "mode": {
+                            "type": "scan",
+                            "generator": {
+                                "type": "list",
+                                "range": {
+                                    "values": [1.0, 2.0, 3.0],
+                                    "randomise_order": False,
+                                },
+                            },
+                        },
+                    },
+                    {
+                        "id": "child_value",
+                        "kind": "param",
+                        "target": {
+                            "fqn": fragment.child.value.parameter.fqn,
+                            "path": "*",
+                        },
+                        "mode": {
+                            "type": "rebind",
+                            "expr": "logical_value + 100.0",
+                        },
+                    },
+                ],
+                "execution": {},
+            },
+        )
+
+        session = PreparedScan(fragment, fragment, request, overrides=overrides)
+        result = _execute_and_inspect(session)
+
+        prefix = result.site_prefix
+        self.assertEqual(self.d(prefix, "points.pseudoparam_0"), [1.0, 2.0, 3.0])
+        self.assertEqual(self.d(prefix, "points.param_0"), [101.0, 102.0, 103.0])
+        self.assertEqual(self.d(prefix, "points.channel_0"), [101.0, 102.0, 103.0])
+
     def test_parameter_mapping_from_text_compiles_to_normal_runtime_mapping(self):
         fragment = self.create(PhysicalDriveFragment, [])
         logical_drive = ScanVariable("logical_drive")
@@ -2052,7 +2153,7 @@ class HostRuntimeCase(HasEnvironmentCase):
         )
 
         session = PreparedScan(fragment, fragment, request)
-        result = _execute_and_inspect(session)
+        _execute_and_inspect(session)
 
         prefix = "ndscan.rid_0.site.root."
         self.assertEqual(

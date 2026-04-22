@@ -54,7 +54,7 @@ The main public objects are:
 - `HostRuntimeSnapshot`
 - `HostRuntimeSite`
 - `HostRuntimeSiteSegment`
-- `HostRuntimeSegmentFinalAnalysis`
+- `HostRuntimeSegmentAnalysis`
 
 The live viewer also converts live flat dataset mappings into the same
 `HostRuntimeSnapshot`/`HostRuntimeSite` structure via:
@@ -93,6 +93,7 @@ The main user-facing `HostRuntimeSite` methods for analysis scripts are:
 ```python
 site.available_series_paths()
 site.describe_series()
+site.describe_plot_choices()
 site.series("shot/probe_frequency")
 site.series("some_result_channel")
 site.series("point_index")
@@ -114,26 +115,36 @@ a parameter stream, pseudoparameter stream, result channel, runtime stream such 
 `slice_raw_points(...)`, which deliberately returns storage-keyed raw point arrays for
 segment-level work.
 
+`describe_series()` now returns `SeriesDescription` dataclasses exposing display-oriented
+metadata such as labels, units, scales, and whether a saved series is numeric.
+`describe_plot_choices()` returns a `PlotChoices` dataclass exposing the numeric
+plot-choice pool plus viewer-like default x/y/z selections by public series path.
+
+The intended layering is:
+
+- `describe_plot_choices()` is the public plotting-oriented entry point
+- `choose_default_x_path()` is a lightweight convenience shortcut
+- `choose_default_x_source()` is an advanced schema-level helper and should generally
+  not be needed in ordinary plotting scripts
+
 ### Series Helpers
 
 Generic pure-Python helpers live in:
 
 - [ndscan/results/series.py](/home/lab/artiq-files/install/ndscan/ndscan/results/series.py)
 
-They provide small building blocks for plotting-oriented scripts:
+The current intention is to keep this layer small. Offline scripts should usually use
+`site.series(...)` plus normal NumPy slicing, sorting, and averaging directly.
+
+The one helper currently kept public is:
 
 ```python
-from ndscan.results import (
-    average_series,
-    build_1d_errorbar_payload,
-    build_1d_series_payload,
-    series_dict,
-    series_for_selector,
-    series_slices_along_axis,
-)
+from ndscan.results import series_slices_along_axis
 ```
 
-These helpers remain domain-neutral. They know about the `ndscan` site-tree schema, but
+This is still useful because splitting one saved `(points, ..., ...)` array-valued
+series into several traces by array axis is a small but repetitive piece of indexing
+logic. It remains domain-neutral: it knows about the `ndscan` site-tree schema, but
 not about lab-specific imaging, ROIs, thresholds, or physics.
 
 ## Repository Boundary
@@ -299,7 +310,7 @@ root_site = snapshot.get_site(())
 
 print("Image-site series:")
 for item in image_site.describe_series():
-    print(f"{item['kind']:14} {item['path']:30} shape={item['shape']}")
+    print(f"{item.kind:14} {item.path:30} shape={item.shape}")
 
 print("Image-site metadata blobs:")
 for name, blob in image_site.metadata_blobs().items():

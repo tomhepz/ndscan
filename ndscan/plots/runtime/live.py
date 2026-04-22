@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 
 from ...results.scan_site_reader import (
-    HostRuntimeSegmentFinalAnalysis,
+    HostRuntimeSegmentAnalysis,
     HostRuntimeSite,
     HostRuntimeSnapshot,
 )
@@ -193,11 +193,11 @@ def _online_annotations_for_prefix(
     }
 
 
-def _segment_final_analysis_for_prefix(
+def _segment_analyses_for_prefix(
     dataset_values: dict[str, Any], prefix: str
-) -> list[HostRuntimeSegmentFinalAnalysis]:
+) -> list[HostRuntimeSegmentAnalysis]:
     raw_feedback = dataset_values.get(prefix + "segments.analysis.final_feedback", [])
-    return [HostRuntimeSegmentFinalAnalysis.from_dict(item) for item in raw_feedback]
+    return [HostRuntimeSegmentAnalysis.from_dict(item) for item in raw_feedback]
 
 
 def snapshot_from_live_values(
@@ -242,7 +242,7 @@ def snapshot_from_live_values(
                 datasets, site_prefix
             ),
             annotations=datasets.get(site_prefix + "analysis.annotations", []),
-            segment_final_analysis=_segment_final_analysis_for_prefix(
+            segment_analyses=_segment_analyses_for_prefix(
                 datasets, site_prefix
             ),
             segmented=(site_prefix + "segments.start_index") in datasets,

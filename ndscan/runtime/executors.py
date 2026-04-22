@@ -10,17 +10,27 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-
 from artiq.coredevice.exceptions import RTIOUnderflow
-from artiq.language import HasEnvironment, host_only, kernel, kernel_from_string, portable, rpc
+from artiq.language import (
+    HasEnvironment,
+    host_only,
+    kernel,
+    kernel_from_string,
+    portable,
+    rpc,
+)
 
+from ..define.fragment import ExpFragment, RestartKernelTransitoryError, TransitoryError
+from ..define.result_channels import ResultChannel, SingleUseSink
+from ..define.utils import is_kernel
+from ..scan.request import ScanRequest
 from .analysis import HostScanAnalysisEngine
 from .context import (
     ActiveScanContext,
     PreviewCoordinator,
     RunContext,
-    _KernelParentScanContextProvider,
     _current_effective_scan_context,
+    _KernelParentScanContextProvider,
     _push_kernel_parent_scan_context,
     _push_run_context,
     _push_scan_context,
@@ -35,26 +45,18 @@ from .program import (
     PointObservation,
     ScanInspection,
     _BoundParameterMapping,
-    _HostObservationTransport,
-    _HostPointBatchSource,
-    _HostAnalysisAdapter,
-    _ResolvedExecutionPoint,
     _build_bound_axes,
     _build_bound_parameters,
     _can_use_kernel_streaming_executor,
     _collect_parameter_mappings,
     _fragment_tree_needs_param_initialisation,
-    _install_scan_axis_stores,
+    _install_varying_parameter_stores,
     _missing_kernel_core_devices,
     _publish_completed_batch,
     _resolve_execution_batch,
     _resolve_execution_point,
+    _ResolvedExecutionPoint,
 )
-from ..define.fragment import ExpFragment, RestartKernelTransitoryError, TransitoryError
-from ..define.parameters import ParamHandle
-from ..define.result_channels import ResultChannel, SingleUseSink
-from ..define.utils import is_kernel
-from ..scan.request import ScanRequest
 
 logger = logging.getLogger(__name__)
 
@@ -71,9 +73,7 @@ def _execute_scan_request_inspection(
 ) -> ScanInspection:
     if _fragment_tree_needs_param_initialisation(fragment):
         fragment.init_params(overrides={} if overrides is None else overrides)
-    axis_bindings = _install_scan_axis_stores(
-        [axis for axis in request.axes if isinstance(axis, ParamHandle)]
-    )
+    varying_param_bindings = _install_varying_parameter_stores(fragment, request)
     try:
         builder = HostScanProgramBuilder(owner)
         program = builder.build(fragment, request)
@@ -86,7 +86,7 @@ def _execute_scan_request_inspection(
         )
         return runner.run()
     finally:
-        for binding in axis_bindings:
+        for binding in varying_param_bindings:
             binding.restore()
 
 

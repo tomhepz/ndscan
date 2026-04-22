@@ -5,8 +5,7 @@ repository. It should stay generic across many different experiment types:
 
 - open a prepared-runtime HDF5 file through the ndscan site-tree reader,
 - access sites by path,
-- pull semantic selector arrays,
-- build simple 1D/errorbar payloads,
+- pull saved series arrays by semantic path,
 - split array-valued series along an array axis,
 - resolve fixed parameter values by FQN.
 
@@ -29,12 +28,7 @@ from ndscan.results.scan_site_reader import (
     HostRuntimeSnapshot,
     read_host_runtime_snapshot,
 )
-from ndscan.results.series import (
-    build_1d_errorbar_payload,
-    series_dict,
-    series_for_selector,
-    series_slices_along_axis,
-)
+from ndscan.results.series import series_slices_along_axis
 
 __all__ = [
     "LabNdscanRun",
@@ -64,7 +58,7 @@ class LabNdscanRun:
 
 @dataclass(frozen=True)
 class LabNdscanSite:
-    """Convenience wrapper for semantic selector-based access to one site."""
+    """Small lab-facing wrapper around one offline site."""
 
     site: HostRuntimeSite
 
@@ -72,29 +66,8 @@ class LabNdscanSite:
     def path(self) -> tuple[str, ...]:
         return self.site.path
 
-    def series(self, selector: str) -> np.ndarray:
-        return series_for_selector(self.site, selector)
-
-    def arrays(self, selectors: Mapping[str, str] | list[str] | tuple[str, ...]):
-        return series_dict(self.site, selectors)
-
-    def errorbar(
-        self,
-        *,
-        x: str | None = None,
-        y: str,
-        yerr: str | None = None,
-        yerr_lower: str | None = None,
-        yerr_upper: str | None = None,
-    ) -> dict[str, Any]:
-        return build_1d_errorbar_payload(
-            self.site,
-            x=x,
-            y=y,
-            yerr=yerr,
-            yerr_lower=yerr_lower,
-            yerr_upper=yerr_upper,
-        )
+    def series(self, path: str, *, dtype: Any | None = None) -> np.ndarray:
+        return self.site.series(path, dtype=dtype)
 
     def split_array_series(
         self,

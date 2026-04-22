@@ -43,8 +43,8 @@ print("Available series on the image site:")
 print("---------------------")
 for item in site.describe_series():
     print(
-        f"{item['kind']:14} {item['path']:28} "
-        f"shape={item['shape']} dtype={item['dtype']}"
+        f"{item.kind:14} {item.path:28} "
+        f"shape={item.shape} dtype={item.dtype}"
     )
 print("---------------------")
 
@@ -93,9 +93,22 @@ print("Available series on the root site:")
 print("---------------------")
 for item in root_site.describe_series():
     print(
-        f"{item['kind']:14} {item['path']:60} "
-        f"shape={item['shape']} dtype={item['dtype']}"
+        f"{item.kind:14} {item.path:60} "
+        f"shape={item.shape} dtype={item.dtype}"
     )
+print("---------------------")
+
+root_series = {
+    item.path: item
+    for item in root_site.describe_series()
+}
+root_plot_choices = root_site.describe_plot_choices()
+
+print()
+print("Default plot choices on the root site:")
+print("---------------------")
+print(f"default x: {root_plot_choices.x.default_path}")
+print(f"default y: {root_plot_choices.y.default_path}")
 print("---------------------")
 
 x_values = root_site.series(X_PATH, dtype=float)
@@ -130,7 +143,7 @@ average_axis.errorbar(
     color="k",
     capsize=2,
 )
-average_axis.set_title(f"{TRAP_PROBABILITY_CHANNEL}, roi {ROI_INDEX}")
+average_axis.set_title(f"{root_series[TRAP_PROBABILITY_CHANNEL].label}, roi {ROI_INDEX}")
 average_axis.set_ylabel("mean over selected groups")
 average_axis.set_ylim(-0.05, 1.05)
 
@@ -145,7 +158,7 @@ for plot_index, group_index in enumerate(GROUPS_TO_PLOT):
         label=f"group {group_index}",
     )
 
-group_axis.set_xlabel(X_PATH)
+group_axis.set_xlabel(root_series[X_PATH].label)
 group_axis.set_ylabel("group probability")
 group_axis.set_ylim(-0.05, 1.05)
 group_axis.legend()
@@ -206,7 +219,7 @@ else:
         zorder=10,
         label=f"point {parent_point_index}",
     )
-    parent_axis.set_xlabel(X_PATH)
+    parent_axis.set_xlabel(root_series[X_PATH].label)
     parent_axis.set_ylabel("mean probability")
     parent_axis.set_title("Parent scan site")
     parent_axis.set_ylim(-0.05, 1.05)

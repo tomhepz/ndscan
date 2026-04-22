@@ -17,8 +17,8 @@ The code is organised in three layers:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import textwrap
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -29,14 +29,13 @@ pg.setConfigOption('foreground', 'k')
 
 from ..._qt import QtCore, QtGui, QtWidgets
 from ...fits.sensible import artifact_summary, curve_points_for_artifact
-from ...utils import FIT_OBJECTS
-from .. import colormaps
 from ...results.scan_site_reader import (
-    HostRuntimeSegmentFinalAnalysis,
-    HostRuntimeSnapshot,
     HostRuntimeSite,
     HostRuntimeSiteSegment,
+    HostRuntimeSnapshot,
 )
+from ...utils import FIT_OBJECTS
+from .. import colormaps
 from .bo_mpl import BoCornerPlotWidget, site_supports_bo_corner_plot
 from .fitting import FitBackend, FitRequest, FitResult, default_fit_backend
 from .live import snapshot_from_live_values
@@ -273,7 +272,7 @@ def _annotation_artifact_map_for_display(
 
     segment_artifacts = dict[str, Any]()
     for segment in target_segments:
-        feedback = site.final_analysis_for_segment(segment.index)
+        feedback = site.analysis_for_segment(segment.index)
         if feedback is not None:
             segment_artifacts.update(feedback.artifacts)
 
@@ -1285,7 +1284,7 @@ def _annotation_specs_for_display(
 
     segment_final_specs = []
     for segment in target_segments:
-        feedback = site.final_analysis_for_segment(segment.index)
+        feedback = site.analysis_for_segment(segment.index)
         if feedback is None:
             continue
         segment_final_specs.extend(

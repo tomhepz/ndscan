@@ -7,10 +7,11 @@ from unittest.mock import patch
 
 import h5py
 import numpy as np
-
+from artiq.language import units
 from mock_environment import ExpFragmentCase
 
 import examples._roi_condition_stats as roi_condition_stats
+import examples.host_runtime_results_api_demo as results_api_demo
 import examples.host_runtime_three_image_rearrangement as three_image_rearrangement
 import examples.lab_offline_results_helpers as lab_results_helpers
 import examples.plot_three_image_rearrangement_quick_analysis as three_image_quick
@@ -18,14 +19,8 @@ import examples.plot_three_image_rearrangement_snapshot as three_image_plot
 from ndscan.define.fragment import ExpFragment
 from ndscan.define.parameters import FloatParam
 from ndscan.define.result_channels import FloatChannel
-from ndscan.results.series import (
-    build_1d_errorbar_payload,
-    build_1d_series_payload,
-    format_series_selector,
-    series_dict,
-    series_slices_along_axis,
-)
 from ndscan.results.scan_site_reader import read_host_runtime_snapshot
+from ndscan.results.series import series_slices_along_axis
 from ndscan.runtime.api import PreparedScan, prepare_child_scan
 from ndscan.scan.mapping import ParameterMapping, ScanVariable
 from ndscan.scan.point_policy import BasePoint, ExplicitPointPolicy
@@ -186,7 +181,6 @@ class ScanSiteReaderCase(ExpFragmentCase):
         self.assertEqual(site.path, ())
         self.assertEqual(list(site.raw_points["param_0"]), [0.0, 1.0, 2.0])
         self.assertEqual(list(site.raw_points["channel_0"]), [1.0, 2.0, 3.0])
-        self.assertEqual(site.choose_default_x_key(), ("param", "param_0"))
         self.assertEqual(site.choose_default_x_path(), "value")
         self.assertEqual(site.available_parameter_paths(), ["value"])
         self.assertEqual(site.available_channel_paths(), ["result"])
@@ -209,7 +203,7 @@ class ScanSiteReaderCase(ExpFragmentCase):
         self.assertEqual(np.asarray(site.series("acquired_at_unix")).shape, (3,))
         self.assertEqual(
             [
-                (item["path"], item["kind"], item["shape"], item["dtype"])
+                (item.path, item.kind, item.shape, str(item.dtype))
                 for item in site.describe_series()
             ],
             [
@@ -219,25 +213,26 @@ class ScanSiteReaderCase(ExpFragmentCase):
                 ("point_index", "runtime", (3,), "int64"),
             ],
         )
-        self.assertEqual(format_series_selector("result", [0, 1]), "result[0,1]")
-        self.assertEqual(
-            {
-                key: list(value)
-                for key, value in series_dict(
-                    site,
-                    {"x": "value", "y": "result"},
-                ).items()
-            },
-            {"x": [0.0, 1.0, 2.0], "y": [1.0, 2.0, 3.0]},
-        )
+        descriptions = {
+            item.path: item
+            for item in site.describe_series()
+        }
+        self.assertEqual(descriptions["value"].label, "value")
+        self.assertIsNone(descriptions["value"].unit)
+        self.assertEqual(descriptions["value"].scale, 1)
+        self.assertEqual(descriptions["value"].is_numeric, True)
+        self.assertEqual(descriptions["result"].label, "result")
         self.assertEqual(list(lab_site.series("value")), [0.0, 1.0, 2.0])
+        self.assertEqual(list(lab_site.series("result")), [1.0, 2.0, 3.0])
+        plot_choices = site.describe_plot_choices()
         self.assertEqual(
-            {
-                key: list(value)
-                for key, value in lab_site.arrays({"x": "value", "y": "result"}).items()
-            },
-            {"x": [0.0, 1.0, 2.0], "y": [1.0, 2.0, 3.0]},
+            [item.path for item in plot_choices.x.choices],
+            ["value", "result", "acquired_at_unix", "point_index"],
         )
+        self.assertEqual(plot_choices.x.default_path, "value")
+        self.assertEqual(plot_choices.y.default_path, "result")
+        self.assertEqual(plot_choices.x.default.label, "value")
+        self.assertEqual(plot_choices.y.default.label, "result")
 
     def test_raises_clear_error_for_missing_channel_path(self):
         fragment = self.create(PlainAddOneFragment)
@@ -280,7 +275,7 @@ class ScanSiteReaderCase(ExpFragmentCase):
         site = snapshot.get_site(())
         self.assertEqual(list(site.raw_points["pseudoparam_0"]), [0.0, 1.0, 2.0])
         self.assertEqual(list(site.raw_points["param_0"]), [0.5, 1.5, 2.5])
-        self.assertEqual(site.choose_default_x_key(), ("pseudoparam", "pseudoparam_0"))
+        self.assertEqual(site.choose_default_x_path(), "laser_frequency")
 
     def test_reads_fixed_pseudoparams_from_schema_compiled_scan(self):
         fragment = self.create(PhysicalDriveFragment)
@@ -547,7 +542,58 @@ class ScanSiteReaderCase(ExpFragmentCase):
                 three_image_rearrangement.NUM_GROUPS,
             )
 
-    def test_three_image_plot_helper_builds_1d_payload_from_semantic_paths(self):
+    def test_three_image_series_descriptions_include_display_metadata(self):
+        with (
+            patch.object(three_image_rearrangement, "POINT_DELAY_S", 0.0),
+            patch.object(three_image_rearrangement, "DEFAULT_NUM_SHOTS", 5),
+        ):
+            fragment = self.create(
+                three_image_rearrangement.ThreeImageRearrangementStatisticsFragment
+            )
+            request = ScanRequest.cartesian(
+                [
+                    (
+                        fragment.shot.probe_frequency,
+                        [9.7, 10.0, 10.3],
+                    )
+                ],
+                metadata={"demo_name": "three_image_series_display_metadata"},
+            )
+            session = PreparedScan(fragment, fragment, request)
+            session.execute()
+
+        with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
+            self._write_snapshot(fragment, tmp.name)
+            snapshot = read_host_runtime_snapshot(tmp.name)
+
+        site = snapshot.get_site(())
+        descriptions = {
+            item.path: item
+            for item in site.describe_series()
+        }
+        probe_frequency = descriptions["shot/probe_frequency"]
+        self.assertEqual(probe_frequency.description, "Probe frequency")
+        self.assertEqual(probe_frequency.unit, "MHz")
+        self.assertEqual(probe_frequency.scale, units.MHz)
+        self.assertEqual(
+            probe_frequency.label,
+            "shot/probe_frequency (Probe frequency / MHz)",
+        )
+        self.assertEqual(probe_frequency.is_numeric, True)
+
+        plot_choices = site.describe_plot_choices()
+        self.assertEqual(plot_choices.x.default_path, "shot/probe_frequency")
+        self.assertEqual(
+            plot_choices.x.default.label,
+            "shot/probe_frequency (Probe frequency / MHz)",
+        )
+        self.assertIsNotNone(plot_choices.y.default_path)
+        self.assertNotEqual(
+            plot_choices.y.default_path,
+            plot_choices.x.default_path,
+        )
+
+    def test_three_image_plot_helper_direct_series_access_supports_simple_plotting(self):
         with (
             patch.object(three_image_rearrangement, "POINT_DELAY_S", 0.0),
             patch.object(three_image_rearrangement, "DEFAULT_NUM_SHOTS", 5),
@@ -573,22 +619,18 @@ class ScanSiteReaderCase(ExpFragmentCase):
 
         site = snapshot.get_site(())
         descriptions = {
-            item["path"]: item
+            item.path: item
             for item in site.describe_series()
         }
         self.assertEqual(
-            descriptions["bright_probability_image2_given_bright_image1_by_trap"][
-                "point_shape"
-            ],
+            descriptions["bright_probability_image2_given_bright_image1_by_trap"].point_shape,
             (
                 three_image_rearrangement.NUM_GROUPS,
                 three_image_rearrangement.COMMON_IMAGE12_ROIS,
             ),
         )
         self.assertEqual(
-            descriptions["bright_probability_image2_given_bright_image1_by_trap"][
-                "dim_names"
-            ],
+            descriptions["bright_probability_image2_given_bright_image1_by_trap"].dim_names,
             ("group", "roi"),
         )
         self.assertEqual(
@@ -601,29 +643,19 @@ class ScanSiteReaderCase(ExpFragmentCase):
                 three_image_rearrangement.COMMON_IMAGE12_ROIS,
             ),
         )
-        payload = build_1d_series_payload(
-            site,
-            x="shot/probe_frequency",
-            y="bright_pair_probability_image2_given_pair_image1",
+        x_values = np.asarray(site.series("shot/probe_frequency"), dtype=float)
+        y_values = np.asarray(
+            site.series("bright_pair_probability_image2_given_pair_image1"),
+            dtype=float,
         )
-
-        np.testing.assert_allclose(payload["x_values"], np.array([9.7, 10.0, 10.3]))
-        self.assertEqual(payload["x_selector"], "shot/probe_frequency")
-        self.assertEqual(
-            payload["y_selector"], "bright_pair_probability_image2_given_pair_image1"
+        y_errors = np.asarray(
+            site.series("bright_pair_probability_error_image2_given_pair_image1"),
+            dtype=float,
         )
-        self.assertEqual(np.asarray(payload["y_values"]).shape, (3,))
-        error_payload = build_1d_errorbar_payload(
-            site,
-            x="shot/probe_frequency",
-            y="bright_pair_probability_image2_given_pair_image1",
-            yerr="bright_pair_probability_error_image2_given_pair_image1",
-        )
-        self.assertEqual(
-            error_payload["yerr_selector"],
-            "bright_pair_probability_error_image2_given_pair_image1",
-        )
-        self.assertEqual(np.asarray(error_payload["yerr_values"]).shape, (3,))
+        order = np.argsort(x_values)
+        np.testing.assert_allclose(x_values[order], np.array([9.7, 10.0, 10.3]))
+        self.assertEqual(y_values.shape, (3,))
+        self.assertEqual(y_errors.shape, (3,))
         group_slices = series_slices_along_axis(
             site,
             "bright_pair_probability_image2_given_pair_image1_by_group",
@@ -723,6 +755,104 @@ class ScanSiteReaderCase(ExpFragmentCase):
         self.assertEqual(
             ad_hoc_payload["event_syntax"],
             "2[0] | 1[0]",
+        )
+
+    def test_results_api_demo_snapshot_exposes_generic_offline_surface(self):
+        demo_repeat_count = 6
+        with (
+            patch.object(
+                results_api_demo,
+                "ROOT_LOGICAL_FREQUENCY_POINTS_MHZ",
+                [-0.6, 0.0, 0.6],
+            ),
+            patch.object(results_api_demo, "DEFAULT_REPEAT_COUNT", demo_repeat_count),
+            patch.object(results_api_demo, "ROOT_MAX_POINTS_PER_BATCH", 2),
+            patch.object(results_api_demo, "REPEAT_MAX_POINTS_PER_BATCH", 3),
+        ):
+            fragment = self.create(results_api_demo.ResultsApiDemoFragment)
+            session = PreparedScan(
+                fragment,
+                fragment,
+                results_api_demo.build_results_api_demo_request(fragment),
+            )
+            session.execute()
+
+        with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
+            self._write_snapshot(fragment, tmp.name)
+            snapshot = read_host_runtime_snapshot(tmp.name)
+
+        root_site = snapshot.get_site(())
+        repeat_site = snapshot.get_site(("repeat_scan",))
+
+        self.assertEqual([site.path for site in snapshot.child_sites(())], [("repeat_scan",)])
+        self.assertEqual(root_site.available_pseudoparam_paths(), [])
+        self.assertIn("logical_frequency", root_site.available_parameter_paths())
+        self.assertIn("shot/drive_frequency", root_site.available_parameter_paths())
+        self.assertIn("mean_signal", root_site.available_channel_paths())
+        self.assertEqual(root_site.choose_default_x_path(), "logical_frequency")
+
+        root_descriptions = {item.path: item for item in root_site.describe_series()}
+        self.assertEqual(
+            root_descriptions["mean_trace"].point_shape,
+            (results_api_demo.TRACE_LENGTH,),
+        )
+        self.assertEqual(
+            root_descriptions["mean_trace"].dim_names,
+            ("sample",),
+        )
+
+        self.assertIn("demo_config", root_site.available_metadata_blob_names())
+        self.assertEqual(
+            root_site.require_metadata_blob("demo_config")["trace_length"],
+            results_api_demo.TRACE_LENGTH,
+        )
+        self.assertIn("scan.parameter_mappings", root_site.metadata)
+        self.assertIn("scan.point_policy", root_site.metadata)
+        self.assertIn("carrier_frequency", root_site.fixed_pseudoparams)
+        logical_frequency_values = np.asarray(
+            root_site.series("logical_frequency"), dtype=float
+        )
+        drive_frequency_values = np.asarray(
+            root_site.series("shot/drive_frequency"), dtype=float
+        )
+        np.testing.assert_allclose(
+            drive_frequency_values,
+            logical_frequency_values
+            + results_api_demo.CARRIER_FREQUENCY_MHZ * units.MHz,
+        )
+        mean_signal_values = np.asarray(root_site.series("mean_signal"), dtype=float)
+        self.assertGreater(mean_signal_values[-1], mean_signal_values[0])
+
+        self.assertEqual(set(root_site.analysis_outputs), {"fit_slope", "fit_intercept"})
+        self.assertIn("signal_line_fit", root_site.analysis_artifacts)
+        self.assertIn("running_signal_fit", root_site.online_analysis_results)
+        self.assertIn("running_signal_fit", root_site.online_analysis_artifacts)
+
+        repeat_plot_choices = repeat_site.describe_plot_choices()
+        self.assertIn(
+            repeat_plot_choices.x.default_path,
+            {"shot/drive_frequency", "acquired_at_unix", "point_index"},
+        )
+        self.assertIn("repeat_config", repeat_site.available_metadata_blob_names())
+        self.assertIn("repeat_stats", repeat_site.online_analysis_results)
+        self.assertIn("repeat_stats", repeat_site.online_analysis_artifacts)
+
+        segments = repeat_site.segments_for_parent_point(0)
+        self.assertEqual(len(segments), 1)
+        segment_analysis = repeat_site.analysis_for_segment(segments[0].index)
+        self.assertIsNotNone(segment_analysis)
+        self.assertIn("mean_signal", segment_analysis.outputs)
+        self.assertIn("repeat_statistics_summary", segment_analysis.artifacts)
+
+        segment_raw_points = repeat_site.slice_raw_points(
+            segments[0].start_index,
+            segments[0].stop_index,
+        )
+        shot_trace_key = repeat_site.require_channel_storage_key("shot/shot_trace")
+        raw_trace_values = np.asarray(segment_raw_points[shot_trace_key], dtype=float)
+        self.assertEqual(
+            raw_trace_values.shape,
+            (demo_repeat_count, results_api_demo.TRACE_LENGTH),
         )
 
     def test_three_image_saved_statistic_can_be_recomputed_offline_from_raw_counts(self):
