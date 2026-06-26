@@ -353,9 +353,21 @@ plt.xlabel("repeat index in selected child segment")
 plt.ylabel("shot/counts_image2[group=0, roi=1]")
 ```
 
+`segments_for_parent_point(...)` returns a list because one parent point can launch the
+same child site more than once. Each child execution becomes a separate segment on that
+site, all linked back to the same `parent_point_index`.
+
+This does **not** mean one child site should be reused for arbitrarily different child
+requests. A site path has one scalar metadata/schema record but an append-only flat
+point stream. Reusing the same child site is only safe when the child executions keep
+the same logical schema, for example the same scanned parameter set and the same result
+channels. If later executions scan genuinely different things, they should usually be
+modelled as different child scan sites rather than extra segments on one site.
+
 A concrete example of this style is:
 
 - [examples/plot_three_image_rearrangement_first_images.py](/home/lab/artiq-files/install/ndscan/examples/plot_three_image_rearrangement_first_images.py)
+- [examples/plot_host_runtime_reused_child_segments.py](/home/lab/artiq-files/install/ndscan/examples/plot_host_runtime_reused_child_segments.py)
 
 ## Lab-Helper Responsibilities
 

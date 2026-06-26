@@ -16,10 +16,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ..define.parameters import ParamHandle
 from ..submission.expression import compile_expression
+
+if TYPE_CHECKING:
+    from ..define.parameters import ParamHandle
 
 __all__ = [
     "ScanVariable",
@@ -198,12 +200,13 @@ class ParameterMapping:
                 + ", ".join(sorted(overlap))
             )
 
+        param_handle_type = _param_handle_type()
         dynamic_symbols: dict[str, ParamHandle | ScanVariable] = {}
         fixed_symbols: dict[str, Any] = {}
         for name, value in symbol_map.items():
             if not isinstance(name, str):
                 raise TypeError("Expression symbol names must be strings")
-            if isinstance(value, (ParamHandle, ScanVariable)):
+            if isinstance(value, (param_handle_type, ScanVariable)):
                 dynamic_symbols[name] = value
             else:
                 fixed_symbols[name] = value
@@ -268,9 +271,10 @@ class ParameterMapping:
                 "Multi-target ParameterMapping.evaluate() must return a mapping"
             )
 
+        param_handle_type = _param_handle_type()
         converted = {}
         for key, value in result.items():
-            if not isinstance(key, ParamHandle):
+            if not isinstance(key, param_handle_type):
                 raise TypeError(
                     "ParameterMapping result keys must be ParamHandle objects"
                 )
@@ -305,6 +309,7 @@ class ParameterMapping:
     ) -> dict[str, Any]:
         """Return serialisable metadata describing this mapping."""
 
+        param_handle_type = _param_handle_type()
         dependencies = []
         for dependency in self.dependencies:
             if dependency in axis_keys:
@@ -318,7 +323,7 @@ class ParameterMapping:
                 )
                 continue
 
-            if isinstance(dependency, ParamHandle):
+            if isinstance(dependency, param_handle_type):
                 dependencies.append(
                     {
                         "kind": "param",
@@ -349,12 +354,18 @@ class ParameterMapping:
         }
 
 
+def _param_handle_type() -> type["ParamHandle"]:
+    from ..define.parameters import ParamHandle
+
+    return ParamHandle
+
+
 def _param_key(handle: ParamHandle) -> tuple[int, str]:
     return (id(handle.owner), handle.name)
 
 
 def _dependency_name(dependency: ParamHandle | ScanVariable) -> str:
-    if isinstance(dependency, ParamHandle):
+    if isinstance(dependency, _param_handle_type()):
         return f"{dependency.owner._stringize_path()}/{dependency.name}"
     return dependency.name
 

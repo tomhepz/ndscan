@@ -19,24 +19,45 @@ from artiq.experiment import *
 
 from ..define import (
     annotations as define_annotations,
+)
+from ..define import (
     default_analysis as define_default_analysis,
+)
+from ..define import (
     fragment as define_fragment,
+)
+from ..define import (
     parameters as define_parameters,
+)
+from ..define import (
     result_channels as define_result_channels,
 )
 from ..legacy import (
     entry_point as legacy_entry_point,
+)
+from ..legacy import (
     scan_generator as legacy_scan_generator,
+)
+from ..legacy import (
     scan_runner as legacy_scan_runner,
+)
+from ..legacy import (
     subscan as legacy_subscan,
 )
+from ..runtime import api as runtime_api
+from ..runtime import persistence as runtime_persistence
+from ..runtime.api import *
+from ..runtime.persistence import *
 from ..scan import mapping as scan_mapping
 from ..scan import point_policy as scan_point_policy
 from ..scan import request as scan_request
+from ..scan.mapping import *
+from ..scan.point_policy import *
+from ..scan.request import *
 from ..submission import expression as submission_expression
 from ..submission import host_scan_schema as submission_host_scan_schema
-from ..runtime import api as runtime_api
-from ..runtime import persistence as runtime_persistence
+from ..submission.expression import *
+from ..submission.host_scan_schema import *
 from .default_analysis import *
 from .entry_point import *
 from .fragment import *
@@ -45,13 +66,6 @@ from .result_channels import *
 from .scan_generator import *
 from .scan_runner import *
 from .subscan import *
-from ..scan.mapping import *
-from ..scan.point_policy import *
-from ..scan.request import *
-from ..submission.expression import *
-from ..submission.host_scan_schema import *
-from ..runtime.api import *
-from ..runtime.persistence import *
 
 annotations = define_annotations
 
@@ -72,13 +86,3 @@ __all__.extend(legacy_scan_runner.__all__)
 __all__.extend(legacy_subscan.__all__)
 __all__.extend(runtime_api.__all__)
 __all__.extend(runtime_persistence.__all__)
-
-# The optimiser backends depend on optional third-party libraries. Import them when
-# available, but do not make the whole experiment package unavailable otherwise.
-try:
-    from ..scan import optimisation
-    from ..scan.optimisation import *
-
-    __all__.extend(optimisation.__all__)
-except ModuleNotFoundError:
-    optimisation = None

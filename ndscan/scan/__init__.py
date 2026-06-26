@@ -18,11 +18,3 @@ __all__ = []
 __all__.extend(mapping.__all__)
 __all__.extend(point_policy.__all__)
 __all__.extend(request.__all__)
-
-try:
-    from . import optimisation
-    from .optimisation import *
-
-    __all__.extend(optimisation.__all__)
-except ModuleNotFoundError:
-    optimisation = None
