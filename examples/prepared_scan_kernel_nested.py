@@ -19,9 +19,9 @@ point batches at every level.
 
 After a run, inspect datasets such as:
 
-- ``ndscan.rid_<rid>.site.root.scan_p.points.param_0``
-- ``ndscan.rid_<rid>.site.root.scan_p.scan_x.points.param_0``
-- ``ndscan.rid_<rid>.site.root.scan_p.scan_x.points.channel_0``
+- ``ndscan.rid_<rid>.site.root.subscans.scan_p.points.param_0``
+- ``ndscan.rid_<rid>.site.root.subscans.scan_p.subscans.scan_x.points.param_0``
+- ``ndscan.rid_<rid>.site.root.subscans.scan_p.subscans.scan_x.points.channel_0``
 
 to see the ``p`` and ``x`` hierarchy in the saved data.
 """

@@ -18,6 +18,7 @@ import numpy as np
 
 __all__ = [
     "ScanSiteSnapshot",
+    "ScanSiteBatch",
     "ScanSiteSegment",
     "ScanSiteSegmentAnalysis",
     "SeriesDescription",
@@ -32,6 +33,7 @@ _STRUCTURED_KEYS = {
     "site.path",
     "site.parent_path",
     "scan.point_policy",
+    "scan.axes",
     "scan.pseudoparams",
     "scan.fixed_pseudoparams",
     "scan.parameters",
@@ -292,6 +294,20 @@ def _segment_analyses_for_prefix(
 
 
 @dataclass(frozen=True)
+class ScanSiteBatch:
+    """One completed execution batch in flat point-index space."""
+
+    index: int
+    start_index: int
+    stop_index: int
+    start_unix_time: float | None
+
+    @property
+    def length(self) -> int:
+        return self.stop_index - self.start_index
+
+
+@dataclass(frozen=True)
 class ScanSiteSegment:
     """One logical segment within a segmented scan site."""
 
@@ -371,6 +387,7 @@ class ScanSiteData:
     path: tuple[str, ...]
     parent_path: tuple[str, ...] | None
     fragment_fqn: str
+    axes: list[dict[str, Any]]
     pseudoparams: dict[str, Any]
     fixed_pseudoparams: dict[str, Any]
     parameters: dict[str, Any]
@@ -392,6 +409,23 @@ class ScanSiteData:
     @property
     def num_points(self) -> int:
         return int(self.metadata.get("state.num_points", 0))
+
+    def axis_paths(self) -> list[str]:
+        """Return public series paths for the ordered logical scan axes."""
+
+        return [
+            str(axis.get("path") or axis.get("storage_key", ""))
+            for axis in self.axes
+        ]
+
+    def axis_storage_keys(self) -> list[str]:
+        """Return point-stream storage keys for the ordered logical scan axes."""
+
+        return [
+            str(axis["storage_key"])
+            for axis in self.axes
+            if "storage_key" in axis
+        ]
 
     def available_pseudoparam_paths(self) -> list[str]:
         """Return the semantic pseudoparameter paths available on this site."""
@@ -823,6 +857,11 @@ class ScanSiteData:
             return _point_stream_varies(self._series_for_path(path))
 
         add_paths(
+            path
+            for path in self.axis_paths()
+            if path in choice_paths and varies(path)
+        )
+        add_paths(
             _pseudoparam_series_path(key, schema)
             for key, schema in self.pseudoparams.items()
             if varies(_pseudoparam_series_path(key, schema))
@@ -1016,6 +1055,35 @@ class ScanSiteData:
 
         return None, None
 
+    def batches(self) -> list[ScanSiteBatch]:
+        """Return completed execution batches in flat point-index space."""
+
+        starts = list(self.metadata.get("batches.start_index", []))
+        start_unix_times = self.metadata.get("batches.start_unix_time", [])
+
+        result = []
+        for index, start_index in enumerate(starts):
+            start_index = int(start_index)
+            stop_index = (
+                int(starts[index + 1])
+                if index + 1 < len(starts)
+                else self.num_points
+            )
+            start_unix_time = (
+                float(start_unix_times[index])
+                if index < len(start_unix_times)
+                else None
+            )
+            result.append(
+                ScanSiteBatch(
+                    index=index,
+                    start_index=start_index,
+                    stop_index=stop_index,
+                    start_unix_time=start_unix_time,
+                )
+            )
+        return result
+
     def segments(self) -> list[ScanSiteSegment]:
         """Return the site's logical segments in flat point-index space."""
 
@@ -1132,6 +1200,7 @@ def read_scan_site_snapshot(path: str | Path) -> ScanSiteSnapshot:
             path=path_value,
             parent_path=None if parent_path is None else tuple(parent_path),
             fragment_fqn=datasets[prefix + "site.fragment_fqn"],
+            axes=list(datasets.get(prefix + "scan.axes", [])),
             pseudoparams=datasets.get(prefix + "scan.pseudoparams", {}),
             fixed_pseudoparams=datasets.get(prefix + "scan.fixed_pseudoparams", {}),
             parameters=datasets.get(prefix + "scan.parameters", {}),
@@ -1159,6 +1228,7 @@ def read_scan_site_snapshot(path: str | Path) -> ScanSiteSnapshot:
                 and not key.startswith(prefix + "analysis.online_artifact.")
                 and not key.startswith(prefix + "analysis.online_annotation.")
                 and not key.startswith(prefix + "segments.analysis.final_feedback")
+                and not key.startswith(prefix + "subscans.")
             },
         )
 

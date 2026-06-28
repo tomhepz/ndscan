@@ -24,7 +24,7 @@ from ndscan.results.series import series_slices_along_axis
 from ndscan.runtime.api import PreparedScan, prepare_child_scan
 from ndscan.scan.mapping import ParameterMapping, ScanVariable
 from ndscan.scan.point_policy import BasePoint, ExplicitPointPolicy
-from ndscan.scan.request import ScanRequest
+from ndscan.scan.request import ExecutionPolicy, ScanRequest
 from ndscan.submission.scan_submission_schema import compile_scan_submission_schema
 
 
@@ -166,7 +166,10 @@ class ScanSiteReaderCase(ExpFragmentCase):
         session = PreparedScan(
             fragment,
             fragment,
-            ScanRequest.cartesian([(fragment.value, [0.0, 1.0, 2.0])]),
+            ScanRequest.cartesian(
+                [(fragment.value, [0.0, 1.0, 2.0])],
+                execution_policy=ExecutionPolicy(max_points_per_batch=2),
+            ),
         )
         session.execute()
 
@@ -182,6 +185,35 @@ class ScanSiteReaderCase(ExpFragmentCase):
         self.assertEqual(list(site.raw_points["param_0"]), [0.0, 1.0, 2.0])
         self.assertEqual(list(site.raw_points["channel_0"]), [1.0, 2.0, 3.0])
         self.assertEqual(site.choose_default_x_path(), "value")
+        self.assertEqual(site.axis_paths(), ["value"])
+        self.assertEqual(site.axis_storage_keys(), ["param_0"])
+        self.assertEqual(
+            [
+                (batch.start_index, batch.stop_index, batch.length)
+                for batch in site.batches()
+            ],
+            [(0, 2, 2), (2, 3, 1)],
+        )
+        self.assertEqual(
+            [batch.start_unix_time is not None for batch in site.batches()],
+            [True, True],
+        )
+        self.assertEqual(
+            site.axes,
+            [
+                {
+                    "index": 0,
+                    "axis_key": "axis_0",
+                    "storage_key": "param_0",
+                    "kind": "parameter",
+                    "path": "value",
+                    "description": "value",
+                    "unit": None,
+                    "scale": 1.0,
+                    "type": "float",
+                }
+            ],
+        )
         self.assertEqual(site.available_parameter_paths(), ["value"])
         self.assertEqual(site.available_channel_paths(), ["result"])
         self.assertEqual(
@@ -276,6 +308,8 @@ class ScanSiteReaderCase(ExpFragmentCase):
         self.assertEqual(list(site.raw_points["pseudoparam_0"]), [0.0, 1.0, 2.0])
         self.assertEqual(list(site.raw_points["param_0"]), [0.5, 1.5, 2.5])
         self.assertEqual(site.choose_default_x_path(), "laser_frequency")
+        self.assertEqual(site.axis_paths(), ["laser_frequency"])
+        self.assertEqual(site.axis_storage_keys(), ["pseudoparam_0"])
 
     def test_reads_fixed_pseudoparams_from_schema_compiled_scan(self):
         fragment = self.create(PhysicalDriveFragment)
@@ -358,6 +392,10 @@ class ScanSiteReaderCase(ExpFragmentCase):
         self.assertIn((), snapshot.sites)
         self.assertIn(("child_scan",), snapshot.sites)
 
+        root_site = snapshot.get_site(())
+        self.assertFalse(
+            any(key.startswith("subscans.") for key in root_site.metadata)
+        )
         child_site = snapshot.get_site(("child_scan",))
         self.assertEqual(child_site.parent_path, ())
         self.assertTrue(child_site.segmented)

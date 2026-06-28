@@ -18,6 +18,7 @@ _STRUCTURED_KEYS = {
     "site.path",
     "site.parent_path",
     "scan.point_policy",
+    "scan.axes",
     "scan.pseudoparams",
     "scan.fixed_pseudoparams",
     "scan.parameters",
@@ -224,6 +225,7 @@ def snapshot_from_live_values(
             path=path_value,
             parent_path=None if parent_path is None else tuple(parent_path),
             fragment_fqn=datasets.get(site_prefix + "site.fragment_fqn", "<unknown>"),
+            axes=list(datasets.get(site_prefix + "scan.axes", [])),
             pseudoparams=datasets.get(site_prefix + "scan.pseudoparams", {}),
             fixed_pseudoparams=datasets.get(site_prefix + "scan.fixed_pseudoparams", {}),
             parameters=datasets.get(site_prefix + "scan.parameters", {}),
@@ -257,6 +259,7 @@ def snapshot_from_live_values(
                 and not key.startswith(site_prefix + "analysis.online_artifact.")
                 and not key.startswith(site_prefix + "analysis.online_annotation.")
                 and not key.startswith(site_prefix + "segments.analysis.final_feedback")
+                and not key.startswith(site_prefix + "subscans.")
             },
         )
 

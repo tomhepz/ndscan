@@ -10,6 +10,7 @@ kept in the prepared runtime.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -56,6 +57,10 @@ class ScanSiteDatasetWriter:
 
         self._point_sinks = dict[str, AppendingDatasetSink]()
         self._analysis_result_sinks = dict[str, ScalarDatasetSink]()
+        self._batch_start_sink = self._make_appending_sink("batches.start_index")
+        self._batch_start_time_sink = self._make_appending_sink(
+            "batches.start_unix_time"
+        )
         self._starts_sink = (
             self._make_appending_sink("segments.start_index") if site.segmented else None
         )
@@ -216,6 +221,8 @@ class ScanSiteDatasetWriter:
         if not observations:
             return
 
+        batch_start_index = self._next_point_index
+        batch_start_unix_time = time.time()
         for observation in observations:
             for key, value in observation.pseudoparam_values.items():
                 self._get_point_sink(key).push(value)
@@ -230,6 +237,8 @@ class ScanSiteDatasetWriter:
                     observation.acquired_at_unix
                 )
             self._next_point_index += 1
+        self._batch_start_sink.push(batch_start_index)
+        self._batch_start_time_sink.push(batch_start_unix_time)
         self._push_scalar("state.num_points", self._next_point_index)
 
     def set_completed(self, completed: bool = True) -> None:

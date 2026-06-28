@@ -2611,40 +2611,40 @@ class RuntimeAppletLaunchTest(HasEnvironmentCase):
         exp.run()
 
         dataset_keys = set(self.dataset_db.data.keys())
-        self.assertIn("ndscan.rid_0.site.root.scan_outer.site.path", dataset_keys)
+        self.assertIn("ndscan.rid_0.site.root.subscans.scan_outer.site.path", dataset_keys)
         self.assertIn(
-            "ndscan.rid_0.site.root.scan_outer.coarse_scan.site.path",
+            "ndscan.rid_0.site.root.subscans.scan_outer.subscans.coarse_scan.site.path",
             dataset_keys,
         )
         self.assertIn(
-            "ndscan.rid_0.site.root.scan_outer.fine_scan.site.path",
+            "ndscan.rid_0.site.root.subscans.scan_outer.subscans.fine_scan.site.path",
             dataset_keys,
         )
         for actual, expected in zip(
-            self.dataset_db.get("ndscan.rid_0.site.root.scan_outer.points.channel_0"),
+            self.dataset_db.get("ndscan.rid_0.site.root.subscans.scan_outer.points.channel_0"),
             [-1.8, -0.8, 0.2, 1.1, 2.0],
             strict=True,
         ):
             self.assertAlmostEqual(actual, expected)
         for actual, expected in zip(
-            self.dataset_db.get("ndscan.rid_0.site.root.scan_outer.points.channel_1"),
+            self.dataset_db.get("ndscan.rid_0.site.root.subscans.scan_outer.points.channel_1"),
             [-1.8, -0.8, 0.2, 1.1, 2.0],
             strict=True,
         ):
             self.assertAlmostEqual(actual, expected)
         self.assertEqual(
-            self.dataset_db.get("ndscan.rid_0.site.root.scan_outer.coarse_scan.points.param_1"),
+            self.dataset_db.get("ndscan.rid_0.site.root.subscans.scan_outer.subscans.coarse_scan.points.param_1"),
             [-1.8] * 9 + [-0.8] * 9 + [0.2] * 9 + [1.1] * 9 + [2.0] * 9,
         )
         self.assertEqual(
-            self.dataset_db.get("ndscan.rid_0.site.root.scan_outer.coarse_scan.points.param_2"),
+            self.dataset_db.get("ndscan.rid_0.site.root.subscans.scan_outer.subscans.coarse_scan.points.param_2"),
             [0.10] * 9 + [0.16] * 9 + [0.24] * 9 + [0.33] * 9 + [0.45] * 9,
         )
         self.assertEqual(
-            self.dataset_db.get("ndscan.rid_0.site.root.scan_outer.fine_scan.points.param_1"),
+            self.dataset_db.get("ndscan.rid_0.site.root.subscans.scan_outer.subscans.fine_scan.points.param_1"),
             [-1.8] * 7 + [-0.8] * 7 + [0.2] * 7 + [1.1] * 7 + [2.0] * 7,
         )
         self.assertEqual(
-            self.dataset_db.get("ndscan.rid_0.site.root.scan_outer.fine_scan.points.param_2"),
+            self.dataset_db.get("ndscan.rid_0.site.root.subscans.scan_outer.subscans.fine_scan.points.param_2"),
             [0.10] * 7 + [0.16] * 7 + [0.24] * 7 + [0.33] * 7 + [0.45] * 7,
         )

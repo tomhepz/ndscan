@@ -1139,6 +1139,27 @@ class NestedChildScanParent(ExpFragment):
         self.child_total.push(sum(child_result.values[self.child.result]))
 
 
+class ReservedNameChildScanParent(ExpFragment):
+    """Parent fragment with a child scan named like a per-site dataset group."""
+
+    def build_fragment(self):
+        self.setattr_param("outer", FloatParam, "outer", 0.0)
+        self.setattr_fragment("child", PlainAddOneFragment, detached=True)
+        self.child_scan = prepare_child_scan(self, self.child, name="points")
+        self.setattr_result("child_total", FloatChannel)
+
+    def run_once(self):
+        self.child_scan.configure(
+            ScanRequest.explicit(
+                [self.child.value],
+                [[self.outer.get()], [self.outer.get() + 1.0]],
+            )
+        )
+        self.child_scan.execute()
+        child_result = self.child_scan.inspect()
+        self.child_total.push(sum(child_result.values[self.child.result]))
+
+
 class PreparedChildScanParent(ExpFragment):
     """Parent fragment that uses the prepared child-scan API."""
 
@@ -1552,6 +1573,22 @@ class PreparedScanCase(HasEnvironmentCase):
         self.assertEqual(self.d(prefix, "state.num_points"), 3)
         self.assertEqual(self.j(prefix, "site.path"), [])
         self.assertEqual(
+            self.j(prefix, "scan.axes"),
+            [
+                {
+                    "index": 0,
+                    "axis_key": "axis_0",
+                    "storage_key": "param_0",
+                    "kind": "parameter",
+                    "path": "value",
+                    "description": "value",
+                    "unit": None,
+                    "scale": 1.0,
+                    "type": "float",
+                }
+            ],
+        )
+        self.assertEqual(
             self.j(prefix, "scan.parameters"),
             {
                 "param_0": {
@@ -1700,6 +1737,22 @@ class PreparedScanCase(HasEnvironmentCase):
         self.assertEqual(self.d(prefix, "points.pseudoparam_0"), [0.0, 1.0, 2.0])
         self.assertEqual(self.d(prefix, "points.param_0"), [0.5, 1.5, 2.5])
         self.assertEqual(self.d(prefix, "points.channel_0"), [1.0, 3.0, 5.0])
+        self.assertEqual(
+            self.j(prefix, "scan.axes"),
+            [
+                {
+                    "index": 0,
+                    "axis_key": "axis_0",
+                    "storage_key": "pseudoparam_0",
+                    "kind": "pseudoparam",
+                    "path": "laser_frequency",
+                    "description": "Logical scan axis for the compensated drive",
+                    "unit": None,
+                    "scale": None,
+                    "type": "float",
+                }
+            ],
+        )
         self.assertEqual(
             self.j(prefix, "scan.pseudoparams"),
             {
@@ -2105,8 +2158,12 @@ class PreparedScanCase(HasEnvironmentCase):
             execution_policy=ExecutionPolicy(max_points_per_batch=4),
         )
 
-        session = PreparedScan(fragment, fragment, request)
-        result = _execute_and_inspect(session)
+        with patch(
+            "ndscan.runtime.persistence.time.time",
+            side_effect=[2000.0, 2001.0, 2002.0],
+        ):
+            session = PreparedScan(fragment, fragment, request)
+            result = _execute_and_inspect(session)
         point_policy = session._last_request.point_policy
 
         prefix = "ndscan.rid_0.site.root."
@@ -2133,6 +2190,11 @@ class PreparedScanCase(HasEnvironmentCase):
         self.assertIsNotNone(result.runtime_stats.first_executor_entry_elapsed_s)
         self.assertGreaterEqual(result.runtime_stats.total_executor_elapsed_s, 0.0)
         self.assertGreaterEqual(result.runtime_stats.total_batch_finalize_elapsed_s, 0.0)
+        self.assertEqual(self.d(prefix, "batches.start_index"), [0, 2, 4])
+        self.assertEqual(
+            self.d(prefix, "batches.start_unix_time"),
+            [2000.0, 2001.0, 2002.0],
+        )
         self.assertEqual(self.d(prefix, "points.param_0"), [0.0, 1.0, 2.0, 3.0, 4.0])
         self.assertEqual(self.d(prefix, "points.channel_0"), [1.0, 2.0, 3.0, 4.0, 5.0])
 
@@ -2329,13 +2391,13 @@ class PreparedScanCase(HasEnvironmentCase):
             with h5py.File(preview_path, "r") as preview_file:
                 datasets = preview_file["datasets"]
                 self.assertEqual(
-                    datasets["ndscan.rid_0.site.root.child_scan.points.param_0"][
+                    datasets["ndscan.rid_0.site.root.subscans.child_scan.points.param_0"][
                         ()
                     ].tolist(),
                     [10.0, 11.0],
                 )
                 self.assertEqual(
-                    datasets["ndscan.rid_0.site.root.child_scan.points.channel_0"][
+                    datasets["ndscan.rid_0.site.root.subscans.child_scan.points.channel_0"][
                         ()
                     ].tolist(),
                     [11.0, 12.0],
@@ -2524,7 +2586,7 @@ class PreparedScanCase(HasEnvironmentCase):
         result = _execute_and_inspect(session)
 
         prefix = result.site_prefix
-        self.assertEqual(prefix, "ndscan.rid_0.site.root.zipped_demo.")
+        self.assertEqual(prefix, "ndscan.rid_0.site.root.subscans.zipped_demo.")
         self.assertEqual(
             self.d(prefix, "points.param_0"),
             [1.0, 2.0, 3.0],
@@ -2705,7 +2767,7 @@ class PreparedScanCase(HasEnvironmentCase):
         exp.prepare()
         exp.run()
 
-        field_prefix = "ndscan.rid_0.site.root.scan_field."
+        field_prefix = "ndscan.rid_0.site.root.subscans.scan_field."
         freq_prefix = field_prefix + "scan_frequency."
 
         self.assertEqual(len(self.d(field_prefix, "points.param_0")), 5)
@@ -2821,7 +2883,7 @@ class PreparedScanCase(HasEnvironmentCase):
             exp.prepare()
             exp.run()
 
-        field_prefix = "ndscan.rid_0.site.root.scan_field."
+        field_prefix = "ndscan.rid_0.site.root.subscans.scan_field."
         freq_prefix = field_prefix + "scan_frequency."
         repeat_prefix = freq_prefix + "repeat_scan."
 
@@ -3347,7 +3409,7 @@ class PreparedScanCase(HasEnvironmentCase):
         session.execute()
 
         root_prefix = "ndscan.rid_0.site.root."
-        child_prefix = "ndscan.rid_0.site.root.child_scan."
+        child_prefix = "ndscan.rid_0.site.root.subscans.child_scan."
 
         self.assertEqual(self.d(root_prefix, "points.param_0"), [10.0, 20.0])
         self.assertEqual(
@@ -3374,6 +3436,25 @@ class PreparedScanCase(HasEnvironmentCase):
             [11.0, 12.0, 21.0, 22.0],
         )
 
+    def test_child_scan_name_can_match_reserved_site_dataset_key(self):
+        parent = self.create(ReservedNameChildScanParent, [])
+        request = ScanRequest.explicit([parent.outer], [[10.0]])
+
+        session = PreparedScan(parent, parent, request)
+        session.execute()
+
+        root_prefix = "ndscan.rid_0.site.root."
+        child_prefix = "ndscan.rid_0.site.root.subscans.points."
+
+        self.assertEqual(self.j(child_prefix, "site.path"), ["points"])
+        self.assertEqual(self.j(child_prefix, "site.parent_path"), [])
+        self.assertEqual(self.d(root_prefix, "points.param_0"), [10.0])
+        self.assertEqual(self.d(child_prefix, "points.param_0"), [10.0, 11.0])
+        self.assertEqual(
+            self.d(child_prefix, "segments.parent_point_index"),
+            [0],
+        )
+
     def test_prepared_child_scan_uses_same_runtime_core(self):
         parent = self.create(PreparedChildScanParent, [])
         request = ScanRequest.explicit([parent.outer], [[10.0], [20.0]])
@@ -3382,7 +3463,7 @@ class PreparedScanCase(HasEnvironmentCase):
         session.execute()
 
         root_prefix = "ndscan.rid_0.site.root."
-        child_prefix = "ndscan.rid_0.site.root.child_scan."
+        child_prefix = "ndscan.rid_0.site.root.subscans.child_scan."
 
         self.assertEqual(self.d(root_prefix, "points.param_0"), [10.0, 20.0])
         self.assertEqual(
@@ -3420,7 +3501,7 @@ class PreparedScanCase(HasEnvironmentCase):
         session.execute()
 
         root_prefix = "ndscan.rid_0.site.root."
-        child_prefix = "ndscan.rid_0.site.root.child_scan."
+        child_prefix = "ndscan.rid_0.site.root.subscans.child_scan."
 
         self.assertEqual(self.d(root_prefix, "points.channel_0"), [14.0])
         self.assertEqual(self.d(child_prefix, "segments.start_index"), [0, 2])
@@ -3451,7 +3532,7 @@ class PreparedScanCase(HasEnvironmentCase):
         self.assertTrue(hasattr(parent, "child"))
         self.assertIn(parent.child, parent._detached_subfragments)
 
-        child_prefix = "ndscan.rid_0.site.root.child_scan."
+        child_prefix = "ndscan.rid_0.site.root.subscans.child_scan."
         self.assertEqual(self.j(child_prefix, "site.path"), ["child_scan"])
         self.assertEqual(
             self.d(child_prefix, "points.param_0"),
@@ -3505,7 +3586,7 @@ class PreparedScanCase(HasEnvironmentCase):
         session = PreparedScan(parent, parent, request)
         session.execute()
 
-        child_prefix = "ndscan.rid_0.site.root.child_scan."
+        child_prefix = "ndscan.rid_0.site.root.subscans.child_scan."
         self.assertEqual(
             self.d(child_prefix, "segments.parent_point_index"),
             [0, 1, 2],
@@ -3519,7 +3600,7 @@ class PreparedScanCase(HasEnvironmentCase):
         session.execute()
 
         root_prefix = "ndscan.rid_0.site.root."
-        child_prefix = "ndscan.rid_0.site.root.inner."
+        child_prefix = "ndscan.rid_0.site.root.subscans.inner."
 
         self.assertEqual(
             self.j(root_prefix, "scan.fixed_parameters"),
@@ -3602,7 +3683,7 @@ class PreparedScanCase(HasEnvironmentCase):
             session.execute()
 
         root_prefix = "ndscan.rid_0.site.root."
-        child_prefix = "ndscan.rid_0.site.root.child_scan."
+        child_prefix = "ndscan.rid_0.site.root.subscans.child_scan."
         self.assertEqual(self.d(root_prefix, "site.start_unix_time"), 1.0)
         self.assertEqual(self.d(root_prefix, "points.acquired_at_unix"), [6.0, 11.0])
         self.assertEqual(self.d(child_prefix, "site.start_unix_time"), 7.0)
@@ -3623,8 +3704,8 @@ class PreparedScanCase(HasEnvironmentCase):
         session.execute()
 
         root_prefix = "ndscan.rid_0.site.root."
-        middle_prefix = "ndscan.rid_0.site.root.middle_scan."
-        leaf_prefix = "ndscan.rid_0.site.root.middle_scan.leaf_scan."
+        middle_prefix = "ndscan.rid_0.site.root.subscans.middle_scan."
+        leaf_prefix = "ndscan.rid_0.site.root.subscans.middle_scan.subscans.leaf_scan."
 
         self.assertEqual(
             self.d(root_prefix, "points.channel_0"),
@@ -3674,7 +3755,7 @@ class PreparedScanCase(HasEnvironmentCase):
         session = PreparedScan(parent, parent, ScanRequest.single())
         session.execute()
 
-        child_prefix = "ndscan.rid_0.site.root.custom_child."
+        child_prefix = "ndscan.rid_0.site.root.subscans.custom_child."
         self.assertEqual(self.d(child_prefix, "points.channel_0"), [3.0])
         self.assertEqual(self.d(child_prefix, "extra.from_request"), "request")
         self.assertEqual(self.d(child_prefix, "extra.from_call"), "call")
@@ -3687,8 +3768,8 @@ class PreparedScanCase(HasEnvironmentCase):
         result = _execute_and_inspect(session)
 
         root_prefix = "ndscan.rid_0.site.root."
-        p_prefix = "ndscan.rid_0.site.root.scan_p."
-        x_prefix = "ndscan.rid_0.site.root.scan_p.scan_x."
+        p_prefix = "ndscan.rid_0.site.root.subscans.scan_p."
+        x_prefix = "ndscan.rid_0.site.root.subscans.scan_p.subscans.scan_x."
 
         self.assertAlmostEqual(
             self.d(root_prefix, "points.channel_0")[0],

@@ -15,7 +15,7 @@ that site, but are still used in ``run_once()``:
 After a run, inspect:
 
 - ``ndscan.rid_<rid>.site.root.scan.fixed_parameters``
-- ``ndscan.rid_<rid>.site.root.inner.scan.fixed_parameters``
+- ``ndscan.rid_<rid>.site.root.subscans.inner.scan.fixed_parameters``
 
 The root entry should contain only the parent's fixed parameter. The child site should
 contain only the child's fixed parameters.

@@ -524,6 +524,10 @@ class ScanProgram:
         metadata = {
             "site.fragment_fqn": self.fragment.fqn,
             "scan.point_policy": self.point_source.describe(),
+            "scan.axes": [
+                _axis_metadata(index, axis)
+                for index, axis in enumerate(self.axes)
+            ],
             "scan.parameters": {
                 parameter.key: parameter.metadata()
                 for parameter in self.parameters
@@ -568,6 +572,56 @@ def _parameter_value_for_metadata(value: Any) -> Any:
     if isinstance(value, np.floating):
         return float(value)
     return value
+
+
+def _join_metadata_path(base: str, name: str) -> str:
+    base = base.strip("/")
+    name = name.strip("/")
+    if base and name:
+        return base + "/" + name
+    if name:
+        return name
+    return base
+
+
+def _axis_schema_display_metadata(
+    *,
+    kind: str,
+    axis: BoundScanAxis,
+) -> dict[str, Any]:
+    if kind == "parameter":
+        spec = axis.schema.get("spec", {})
+        name = str(axis.schema.get("fqn", axis.point_key)).rsplit(".", 1)[-1]
+        path = _join_metadata_path(axis.path, name)
+        description = axis.schema.get("description")
+        value_type = axis.schema.get("type", "float")
+    else:
+        spec = axis.schema.get("spec", {})
+        name = str(axis.schema.get("name", axis.point_key))
+        path = _join_metadata_path(axis.path, name)
+        description = axis.schema.get("description")
+        value_type = axis.schema.get("type", "float")
+
+    unit = spec.get("unit") if isinstance(spec, Mapping) else None
+    scale = spec.get("scale") if isinstance(spec, Mapping) else None
+    return {
+        "path": path,
+        "description": description,
+        "unit": unit,
+        "scale": scale,
+        "type": value_type,
+    }
+
+
+def _axis_metadata(index: int, axis: BoundScanAxis) -> dict[str, Any]:
+    kind = "parameter" if isinstance(axis.source, ParamHandle) else "pseudoparam"
+    return {
+        "index": index,
+        "axis_key": axis.key,
+        "storage_key": axis.point_key,
+        "kind": kind,
+        **_axis_schema_display_metadata(kind=kind, axis=axis),
+    }
 
 
 def _collect_fixed_parameter_metadata(

@@ -421,7 +421,7 @@ class KernelStreamingPreparedScanCase(KernelEmulatorCase):
 
         scheduler = fragment.get_device("scheduler")
         rid = getattr(scheduler, "rid", 0)
-        prefix = f"ndscan.rid_{rid}.site.root.child_scan."
+        prefix = f"ndscan.rid_{rid}.site.root.subscans.child_scan."
 
         self.assertEqual(fragment.get_dataset(prefix + "segments.start_index"), [0, 2])
         self.assertEqual(
@@ -456,7 +456,7 @@ class KernelStreamingPreparedScanCase(KernelEmulatorCase):
 
         scheduler = fragment.get_device("scheduler")
         rid = getattr(scheduler, "rid", 0)
-        prefix = f"ndscan.rid_{rid}.site.root.child_scan."
+        prefix = f"ndscan.rid_{rid}.site.root.subscans.child_scan."
 
         self.assertEqual(fragment.get_dataset(prefix + "segments.start_index"), [0, 2])
         self.assertEqual(
@@ -492,8 +492,8 @@ class KernelStreamingPreparedScanCase(KernelEmulatorCase):
 
         scheduler = fragment.get_device("scheduler")
         rid = getattr(scheduler, "rid", 0)
-        child_prefix = f"ndscan.rid_{rid}.site.root.child_scan."
-        grandchild_prefix = f"ndscan.rid_{rid}.site.root.child_scan.grandchild_scan."
+        child_prefix = f"ndscan.rid_{rid}.site.root.subscans.child_scan."
+        grandchild_prefix = f"ndscan.rid_{rid}.site.root.subscans.child_scan.subscans.grandchild_scan."
 
         self.assertEqual(
             fragment.get_dataset(child_prefix + "segments.parent_point_index"), [0, 1]
@@ -553,8 +553,8 @@ class KernelStreamingPreparedScanCase(KernelEmulatorCase):
 
         scheduler = fragment.get_device("scheduler")
         rid = getattr(scheduler, "rid", 0)
-        child_prefix = f"ndscan.rid_{rid}.site.root.scan_p."
-        grandchild_prefix = f"ndscan.rid_{rid}.site.root.scan_p.scan_x."
+        child_prefix = f"ndscan.rid_{rid}.site.root.subscans.scan_p."
+        grandchild_prefix = f"ndscan.rid_{rid}.site.root.subscans.scan_p.subscans.scan_x."
 
         self.assertEqual(
             fragment.get_dataset(child_prefix + "points.param_0"),
@@ -665,8 +665,8 @@ class KernelStreamingPreparedScanCase(KernelEmulatorCase):
 
         scheduler = fragment.get_device("scheduler")
         rid = getattr(scheduler, "rid", 0)
-        child_prefix = f"ndscan.rid_{rid}.site.root.scan_p."
-        inner_prefix = f"ndscan.rid_{rid}.site.root.scan_p.scan_x."
+        child_prefix = f"ndscan.rid_{rid}.site.root.subscans.scan_p."
+        inner_prefix = f"ndscan.rid_{rid}.site.root.subscans.scan_p.subscans.scan_x."
 
         self.assertEqual(
             fragment.get_dataset(child_prefix + "points.channel_0"),

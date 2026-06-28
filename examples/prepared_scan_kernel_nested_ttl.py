@@ -19,9 +19,9 @@ points":
 The leaf also pushes the pulse width back into a result channel so the executed point
 stream is visible in saved data. Inspect datasets such as:
 
-- ``ndscan.rid_<rid>.site.root.scan_p.points.channel_0``
-- ``ndscan.rid_<rid>.site.root.scan_p.scan_x.points.channel_0``
-- ``ndscan.rid_<rid>.site.root.scan_p.scan_x.segments.parent_point_index``
+- ``ndscan.rid_<rid>.site.root.subscans.scan_p.points.channel_0``
+- ``ndscan.rid_<rid>.site.root.subscans.scan_p.subscans.scan_x.points.channel_0``
+- ``ndscan.rid_<rid>.site.root.subscans.scan_p.subscans.scan_x.segments.parent_point_index``
 
 This example uses ``ttl0`` because that device exists in the local ARTIQ setup used
 for testing here. If your setup prefers a different scope trigger/output line, change
