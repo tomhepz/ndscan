@@ -64,8 +64,10 @@ Then follow the execution path through `ndscan.runtime`:
 - `ndscan/runtime/adapters.py`: dashboard/code entry points.
 - `ndscan/runtime/prepared.py`: reusable `PreparedScan` and `PreparedChildScan`
   handles.
-- `ndscan/runtime/program.py`: binds a request to one fragment tree.
-- `ndscan/runtime/executors.py`: host and resident-kernel execution loops.
+- `ndscan/runtime/runner.py`: high-level build/run lifecycle for one scan site.
+- `ndscan/runtime/program.py`: bound runtime data model and batch publication.
+- `ndscan/runtime/binding.py`: axis/mapping validation and point-value resolution.
+- `ndscan/runtime/executors.py`: host and resident-kernel execution backends.
 - `ndscan/runtime/context.py`: current point/run context for child scans and previews.
 - `ndscan/runtime/persistence.py`: writes the scan-site dataset schema.
 - `ndscan/runtime/analysis.py`: default/online analysis execution.
@@ -77,14 +79,16 @@ ScanRequest
   -> ScanProgramBuilder
   -> ScanProgram
   -> ScanProgramRunner
+  -> point-policy batches resolved by binding.py
   -> HostExecutor or KernelStreamingExecutor
   -> PointObservation batches
   -> ScanSiteDatasetWriter
 ```
 
-`program.py` owns binding and metadata. `executors.py` owns point execution.
-`persistence.py` owns dataset writes. Keeping those responsibilities separate is the
-main way to stay oriented.
+`runner.py` owns the lifecycle. `binding.py` owns the step from logical scan point to
+concrete parameter values. `program.py` owns the bound data model and batch publication.
+`executors.py` owns point invocation mechanics. `persistence.py` owns dataset writes.
+Keeping those responsibilities separate is the main way to stay oriented.
 
 ### 4. Child Scans
 
@@ -133,8 +137,9 @@ If you want to add a new parameter type:
 
 - read `ndscan/define/parameters.py`,
 - check how stores expose `RpcType`, `to_rpc_type()`, and `set_from_rpc()`,
-- check `ndscan/runtime/program.py` and `ndscan/runtime/executors.py` for assumptions
-  about parameter RPC values.
+- check `ndscan/runtime/binding.py` and `ndscan/runtime/executors.py` for assumptions
+  about parameter RPC values,
+- check `ndscan/runtime/program.py` if the saved metadata needs to change.
 
 If you want to add a new point policy:
 
@@ -155,7 +160,8 @@ If you want to change child-scan behaviour:
 
 - read [child-scans-and-kernels.md](child-scans-and-kernels.md),
 - start in `ndscan/runtime/prepared.py`,
-- then inspect `ndscan/runtime/context.py` and `ndscan/runtime/executors.py`,
+- then inspect `ndscan/runtime/context.py`, `ndscan/runtime/runner.py`, and
+  `ndscan/runtime/executors.py`,
 - verify both host-parent and resident-kernel-parent cases.
 
 If you want to change plotting:

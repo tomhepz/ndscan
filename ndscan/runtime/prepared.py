@@ -5,8 +5,9 @@ This module contains the public handles users keep on fragments:
 - ``PreparedScan`` for a root scan launched from Python/dashboard adapter code,
 - ``PreparedChildScan`` for a scan launched naturally from inside another scan point.
 
-The heavy execution work lives in ``runtime.executors``. The handle classes here own
-configuration, output exposure, and the extra bookkeeping needed for child scans.
+The heavy execution work lives in ``runtime.runner`` and ``runtime.executors``. The
+handle classes here own configuration, output exposure, and the extra bookkeeping
+needed for child scans.
 """
 
 from __future__ import annotations
@@ -28,6 +29,15 @@ from ..scan.mapping import ParameterMapping
 from ..scan.request import ScanRequest
 from ..schema.scan_site import ScanSite
 from ..utils import merge_no_duplicates
+from .binding import (
+    _build_bound_axes,
+    _build_bound_parameters,
+    _can_use_kernel_streaming_executor,
+    _collect_parameter_mappings,
+    _fragment_tree_needs_param_initialisation,
+    _fragment_uses_kernel_execution,
+    _install_varying_parameter_stores,
+)
 from .context import (
     RunContext,
     _current_effective_scan_context,
@@ -37,25 +47,17 @@ from .context import (
     make_child_scan_site,
 )
 from .executors import (
-    ScanProgramBuilder,
     KernelStreamingExecutor,
-    _execute_scan_request_inspection,
     _PointResultCollector,
-    _publish_completed_batch,
     _ResidentKernelBatchState,
     _ResidentKernelPointRunner,
 )
 from .program import (
     ScanInspection,
     ScanOutputs,
-    _build_bound_axes,
-    _build_bound_parameters,
-    _can_use_kernel_streaming_executor,
-    _collect_parameter_mappings,
-    _fragment_tree_needs_param_initialisation,
-    _fragment_uses_kernel_execution,
-    _install_varying_parameter_stores,
+    _publish_completed_batch,
 )
+from .runner import ScanProgramBuilder, _execute_scan_request_inspection
 
 __all__ = [
     "PreparedScan",

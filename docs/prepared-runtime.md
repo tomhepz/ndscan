@@ -33,16 +33,17 @@ selection for a top-level scan.
 root scans, but writes a child scan site and can be acquired from host or kernel code.
 
 `ScanProgram`
-: Bound execution plan. It contains the fragment, bound axes, varying concrete
-parameters, channels, mappings, point source, analysis adapter, and observation
-transport.
+: Bound execution plan in `runtime.program`. It contains the fragment, bound axes,
+varying concrete parameters, channels, mappings, point source, analysis adapter, and
+observation transport.
 
 `ScanProgramBuilder`
-: Validates and binds a fragment/request pair.
+: Validates and binds a fragment/request pair in `runtime.runner`, using
+`runtime.binding` for axes, parameter mappings, and concrete point values.
 
 `ScanProgramRunner`
-: Owns the run loop, retry boundaries, executor selection, preview coordination, and
-batch finalisation.
+: Owns the run loop in `runtime.runner`: retry boundaries, executor selection, preview
+coordination, and batch finalisation.
 
 `ScanOutputs`
 : Stable named output surface returned by prepared scans.

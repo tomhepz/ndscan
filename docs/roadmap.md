@@ -24,8 +24,8 @@ implementation plans live in [archive/](archive/).
 
 - Keep `ScanProgram` as the single bound execution plan for host and kernel executors.
 - Avoid adding scan-navigation logic to the runtime; put it behind point policies.
-- Consider splitting `runtime.executors` into executor implementations and runner
-  control flow once behavior settles.
+- Keep `runtime.runner` as the scan-site lifecycle owner and `runtime.executors` as
+  point-invocation backends.
 
 ## Submission
 

@@ -43,7 +43,9 @@ Prepared execution:
 
 - adapters for code/dashboard `EnvExperiment` entry points,
 - `PreparedScan` and `PreparedChildScan`,
-- `ScanProgram`, `ScanProgramBuilder`, `ScanProgramRunner`,
+- `ScanProgramBuilder` and `ScanProgramRunner` in `runtime.runner`,
+- `ScanProgram` and bound runtime objects in `runtime.program`,
+- request/point binding helpers in `runtime.binding`,
 - `HostExecutor` and `KernelStreamingExecutor`,
 - persistence and preview snapshots,
 - default-analysis execution.
