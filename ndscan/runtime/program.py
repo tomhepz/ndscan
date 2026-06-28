@@ -1,4 +1,16 @@
-"""Binding and program-layer types for the prepared runtime."""
+"""Binding and program-layer types for the prepared runtime.
+
+This module is the bridge between a user-facing :class:`ScanRequest` and the execution
+backends in ``runtime.executors``. It owns the host-side meaning of a scan:
+
+- which logical axes exist,
+- which concrete fragment parameters are installed for each point,
+- which result channels are collected,
+- which metadata is written once per scan site.
+
+The code here deliberately does not run fragments. It prepares plain Python objects
+that both the host executor and resident-kernel executor can consume.
+"""
 
 from __future__ import annotations
 
@@ -77,7 +89,13 @@ class ScanOutputs:
 
 @dataclass(frozen=True)
 class BoundScanAxis:
-    """Runtime-bound scan input metadata."""
+    """Runtime-bound scan input metadata.
+
+    A scan axis may be either a real fragment parameter or a logical ``ScanVariable``.
+    The runtime treats both as axis coordinates, but persistence keeps them separate:
+    real parameters become ``points.param_*`` streams, while logical variables become
+    ``points.pseudoparam_*`` streams.
+    """
 
     source: ParamHandle | ScanVariable
     key: str
@@ -101,7 +119,12 @@ class BoundScanAxis:
 
 @dataclass(frozen=True)
 class BoundScanParameter:
-    """Runtime-bound actual fragment parameter recorded point-by-point."""
+    """Runtime-bound actual fragment parameter recorded point-by-point.
+
+    This is always a concrete ``ParamHandle``. Direct scan axes and mapping targets both
+    appear here because both produce installed fragment parameter values that matter for
+    offline reconstruction.
+    """
 
     handle: ParamHandle
     key: str
@@ -155,7 +178,12 @@ class PointObservation:
 
 @dataclass(frozen=True)
 class _ResolvedExecutionPoint:
-    """Concrete point installation plan shared by host and kernel executors."""
+    """Concrete point installation plan shared by host and kernel executors.
+
+    Point policies only choose logical axis values. Resolving a point applies direct
+    parameter axes and parameter mappings, producing the actual parameter values that
+    must be installed before ``device_setup()`` / ``run_once()`` execute.
+    """
 
     point: BasePoint
     axis_values: OrderedDict[str, Any]
@@ -277,7 +305,12 @@ class ScanInspection:
 
 
 class _PointBatchSource:
-    """Host-side batch source/fallback point-feedback seam."""
+    """Host-side adapter around a point policy.
+
+    The runtime asks this object for concrete batches and feeds observations back after
+    each completed batch. This keeps adaptive scan logic outside the fragment executor:
+    the executor only sees "run these points", not "decide where to go next".
+    """
 
     def __init__(self, point_policy: PointPolicy, execution_policy: ExecutionPolicy):
         self._point_policy = point_policy
@@ -322,7 +355,11 @@ class _PointBatchSource:
 
 
 class _AnalysisAdapter:
-    """Host-side analysis seam."""
+    """Host-side adapter around the analysis engine.
+
+    Batch publication calls analysis through this small interface so host execution,
+    kernel streaming, and prepared child scans all use the same finalisation path.
+    """
 
     def __init__(self, engine: ScanAnalysisEngine):
         self._engine = engine
@@ -355,7 +392,12 @@ class _AnalysisAdapter:
 
 
 class _ObservationTransport:
-    """Host-side persistence/preview seam for completed observations."""
+    """Host-side persistence/preview adapter for completed observations.
+
+    The runtime calls this with semantic events such as "append observations" and
+    "finish segment". The dataset writer below this layer owns the exact scan-site
+    dataset keys.
+    """
 
     def __init__(self, site_writer: ScanSiteDatasetWriter):
         self._site_writer = site_writer
@@ -467,6 +509,11 @@ def _publish_completed_batch(
     if not completed_batch:
         return
 
+    # This is the one place a completed batch becomes visible to the rest of ndscan:
+    # persist raw point streams, update the in-memory inspection object, run online
+    # analysis, feed the result back to the point policy, then write any preview.
+    # Keeping this order stable matters for adaptive scans: policies observe the same
+    # accumulated state that readers and plots will see after the batch is flushed.
     started_at = time.perf_counter()
     transport.append_observations(completed_batch)
     result.record_batch(completed_batch, axes, parameters, channels)
@@ -495,7 +542,13 @@ def _publish_completed_batch(
 
 
 class ScanProgram:
-    """Validated, fragment-bound scan submission plan."""
+    """Validated, fragment-bound scan submission plan.
+
+    ``ScanProgram`` is the prepared runtime's "compiled" host object. It is built once
+    for a request/site and then consumed by an execution backend. It contains no ARTIQ
+    kernel code itself, which keeps the binding/metadata logic testable without running
+    the core device.
+    """
 
     def __init__(
         self,
@@ -634,6 +687,9 @@ def _collect_fixed_parameter_metadata(
     fixed_parameters = []
 
     def walk(current: ExpFragment) -> None:
+        # Detached subfragments own their own scan sites. Including their parameters in
+        # the parent site's fixed-parameter metadata would make nested scans look as if
+        # their child parameters belonged to the parent point stream.
         for name, param in current._free_params.items():
             handle = getattr(current, name)
             key = _mapping_target_key(handle)
@@ -670,6 +726,8 @@ def _mapping_target_key(handle: ParamHandle) -> tuple[int, str]:
 def _build_bound_axes(
     axes: Sequence[ParamHandle | ScanVariable],
 ) -> list[BoundScanAxis]:
+    """Assign stable runtime/storage keys to the requested logical axes."""
+
     bound_axes = []
     seen = set[tuple[Any, ...]]()
     next_pseudoparam_index = 0
@@ -726,6 +784,8 @@ def _build_bound_parameters(
     axes: Sequence[BoundScanAxis],
     parameter_mappings: Sequence[_BoundParameterMapping],
 ) -> list[BoundScanParameter]:
+    """Return the concrete fragment parameters that vary point-by-point."""
+
     parameters = []
     seen = set[tuple[int, str]]()
     next_index = 0
@@ -775,6 +835,8 @@ def _collect_parameter_mappings(
     request: ScanRequest,
     axes: Sequence[BoundScanAxis],
 ) -> list[_BoundParameterMapping]:
+    """Validate and order parameter mappings for one fragment/request pair."""
+
     mappings = tuple(fragment._parameter_mappings) + tuple(request.parameter_mappings)
     if not mappings:
         return []
@@ -831,6 +893,8 @@ def _collect_parameter_mappings(
 def _order_parameter_mappings(
     mappings: Sequence[ParameterMapping],
 ) -> list[ParameterMapping]:
+    """Topologically order mappings so derived parameters are available to dependants."""
+
     producers = {}
     for mapping in mappings:
         for target in mapping.targets:
@@ -949,6 +1013,14 @@ def _install_varying_parameter_stores(
     fragment: ExpFragment,
     request: ScanRequest,
 ) -> list[_TransientParamBinding]:
+    """Temporarily isolate point-varying parameters from their default stores.
+
+    Fragment parameter handles normally share stores according to defaults/overrides.
+    During a scan, any parameter that changes point-by-point needs a fresh store so
+    setting the next point does not mutate the default-value store that should be
+    restored after execution.
+    """
+
     bindings = []
     for handle in _collect_varying_parameter_handles(fragment, request):
         affected_handles = tuple(handle.owner._get_all_handles_for_param(handle.name))
@@ -974,6 +1046,8 @@ def _resolve_execution_point(
     parameters: Sequence[BoundScanParameter],
     parameter_mappings: Sequence[_BoundParameterMapping],
 ) -> _ResolvedExecutionPoint:
+    """Apply axes and mappings to produce the concrete state for one point."""
+
     axis_map = OrderedDict(
         (axis.key, value) for axis, value in zip(axes, point.axis_values, strict=True)
     )

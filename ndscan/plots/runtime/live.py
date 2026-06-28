@@ -114,7 +114,12 @@ def _decode_live_value(key: str, raw: Any) -> Any:
 
 
 def _find_site_prefixes(dataset_values: dict[str, Any]) -> list[str]:
-    """Return site prefixes in parent-before-child order."""
+    """Return site prefixes in parent-before-child order.
+
+    Live applet updates arrive as one flat dataset mapping. Sorting parent sites first
+    makes the rebuilt snapshot stable even when child scan datasets appear before their
+    parent in the incoming dictionary.
+    """
     suffix = "site.path"
     prefixes = [
         key[: -len(suffix)]
@@ -259,6 +264,8 @@ def snapshot_from_live_values(
                 and not key.startswith(site_prefix + "analysis.online_artifact.")
                 and not key.startswith(site_prefix + "analysis.online_annotation.")
                 and not key.startswith(site_prefix + "segments.analysis.final_feedback")
+                # Child scan datasets are physically nested under ``subscans``. Keep
+                # them out of the parent site's free-form metadata view.
                 and not key.startswith(site_prefix + "subscans.")
             },
         )

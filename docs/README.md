@@ -2,6 +2,7 @@
 
 Current prepared-runtime docs:
 
+- [reading-guide.md](reading-guide.md): suggested order for reading the library.
 - [concepts.md](concepts.md): canonical vocabulary.
 - [module-map.md](module-map.md): package responsibilities and dependency boundaries.
 - [prepared-runtime.md](prepared-runtime.md): execution model.

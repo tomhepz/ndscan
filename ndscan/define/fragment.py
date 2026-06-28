@@ -1,3 +1,12 @@
+"""Composable experiment fragments.
+
+Fragments are the unit ndscan composes: each fragment owns parameters, result channels,
+subfragments, and the host/device lifecycle hooks used by the runtime. A root ARTIQ
+experiment can contain one fragment tree, while prepared child scans can detach a
+subfragment so it executes as its own scan site instead of as part of the parent's
+normal setup/run/cleanup traversal.
+"""
+
 import logging
 from collections import OrderedDict
 from collections.abc import Iterable
@@ -42,7 +51,13 @@ def _log_failed_cleanup(path: str) -> None:
 
 
 class Fragment(HasEnvironment):
-    """Main building block."""
+    """Base class for composable experiment fragments.
+
+    User fragments normally override ``build_fragment()``, optionally ``host_setup()``
+    / ``device_setup()`` / ``device_cleanup()``, and ``run_once()`` on ``ExpFragment``.
+    The base class owns registration of parameters, channels, subfragments, and the
+    generated subfragment setup/cleanup forwarding code.
+    """
 
     def build(self, fragment_path: list[str], *args, **kwargs):
         """Initialise this fragment instance; called from the ``HasEnvironment``
@@ -106,6 +121,9 @@ class Fragment(HasEnvironment):
 
         # Now that we know all subfragments, synthesise code for device_setup() and
         # device_cleanup() to forward to subfragments.
+        # ARTIQ kernels cannot cheaply do fully dynamic Python dispatch. Generating a
+        # small forwarding function once during build keeps setup/cleanup available in
+        # kernels while still letting the fragment tree be composed in normal Python.
         code = ""
         for s in self._subfragments:
             if s in self._detached_subfragments:

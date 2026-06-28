@@ -1,4 +1,16 @@
-"""Execution backends and controller loop for the prepared runtime."""
+"""Execution backends and controller loop for the prepared runtime.
+
+The prepared runtime has two execution shapes:
+
+- ``HostExecutor`` resolves and runs each point from the host, entering kernels point by
+  point when needed.
+- ``KernelStreamingExecutor`` keeps one resident kernel active and exchanges batches of
+  parameter values/results through RPCs.
+
+Both backends publish the same ``PointObservation`` objects. Everything above this
+module can therefore ignore whether a scan used host stepping or resident-kernel
+streaming.
+"""
 
 from __future__ import annotations
 
@@ -71,6 +83,8 @@ def _execute_scan_request_inspection(
     max_rtio_underflow_retries: int,
     max_transitory_error_retries: int,
 ) -> ScanInspection:
+    """Execute one prepared request and return its host-side inspection object."""
+
     if _fragment_tree_needs_param_initialisation(fragment):
         fragment.init_params(overrides={} if overrides is None else overrides)
     varying_param_bindings = _install_varying_parameter_stores(fragment, request)
@@ -91,7 +105,12 @@ def _execute_scan_request_inspection(
 
 
 class _PointResultCollector:
-    """Temporarily redirects selected result channels to ``SingleUseSink`` instances."""
+    """Temporarily redirect selected result channels to ``SingleUseSink`` instances.
+
+    User fragments push results to their normal ``ResultChannel`` objects. During point
+    execution we swap those sinks so the executor can tell whether every saved channel
+    produced exactly one value for the current point.
+    """
 
     def __init__(self, channels: Sequence[BoundResultChannel]):
         self._channels = tuple(channels)
@@ -129,7 +148,12 @@ class _PointResultCollector:
 
 
 class _ResidentKernelBatchState:
-    """Shared host-side state for one resident kernel execution region."""
+    """Shared host-side state for one resident kernel execution region.
+
+    The resident kernel cannot hold arbitrary Python objects, so the host keeps the
+    current resolved batch here. The kernel asks for RPC-friendly parameter arrays,
+    runs points, and calls back when each point is complete.
+    """
 
     def __init__(
         self,
@@ -171,6 +195,8 @@ class _ResidentKernelBatchState:
             self._current_next_point_index = next_point_index()
             self._update_host_param_stores()
 
+        # Return one array per concrete parameter. The generated kernel loop indexes
+        # these arrays in lockstep, which avoids an RPC round trip for every point.
         values = tuple([] for _ in self._parameters)
         for point in self._current_chunk:
             for index, value in enumerate(point.rpc_parameter_values):
@@ -181,6 +207,8 @@ class _ResidentKernelBatchState:
     def _update_host_param_stores(self) -> None:
         if not self._current_chunk:
             return
+        # Host-side setup code may inspect parameter values before the next kernel
+        # entry. Keep stores reflecting the first not-yet-run point in the chunk.
         point = self._current_chunk[0]
         for index, parameter in enumerate(self._parameters):
             parameter.handle._store.set_from_rpc(point.rpc_parameter_values[index])
@@ -221,7 +249,12 @@ class _BatchExecutionResult:
 
 
 class HostExecutor:
-    """Execute already-resolved points against a fragment from the prepared runtime."""
+    """Execute points against a fragment from the host side.
+
+    This backend is the general fallback. It may still enter a kernel for a point body,
+    but it returns to the host between points/batches, so it does not minimise
+    host/kernel crossings as aggressively as ``KernelStreamingExecutor``.
+    """
 
     def __init__(
         self,
@@ -304,7 +337,12 @@ class HostExecutor:
 
 
 class KernelStreamingExecutor:
-    """Execute a strict subset of scans through one resident kernel session."""
+    """Execute a strict subset of scans through one resident kernel session.
+
+    The resident kernel calls host RPCs only at chunk boundaries and point-completion
+    events. Those RPCs update host-side state and return to the same kernel; they do not
+    call back into another kernel.
+    """
 
     _STATUS_PROCEED = 0
     _STATUS_RESTART_HOST_CONTEXT = 1
@@ -371,6 +409,8 @@ class KernelStreamingExecutor:
         has_more_work,
         next_point_index,
     ) -> None:
+        """Run until the point policy finishes, pausing/restarting host setup as needed."""
+
         self._result = result
         self._next_batch = next_batch
         self._finish_completed_batch = finish_completed_batch
@@ -386,6 +426,9 @@ class KernelStreamingExecutor:
                 started_at = time.perf_counter()
                 self._fragment.host_setup()
                 try:
+                    # While inside the resident kernel, nested prepared child scans need
+                    # to know which parent point they are attached to. The provider gives
+                    # host-side child-scan code a live view of the current point index.
                     with _push_kernel_parent_scan_context(
                         _KernelParentScanContextProvider(
                             self._site_path,
@@ -452,7 +495,13 @@ class KernelStreamingExecutor:
 
 
 class _ResidentKernelPointRunner(HasEnvironment):
-    """Configurable resident kernel loop shared by top-level and prepared scans."""
+    """Configurable resident kernel loop shared by root and child scans.
+
+    ``configure_runner()`` builds a small kernel function specialised to the concrete
+    parameter types. This is the part that reduces recompilation pressure: once the
+    runner shape is compiled, new point values arrive through RPC arrays instead of by
+    regenerating kernel code.
+    """
 
     def build(
         self,
@@ -554,6 +603,8 @@ class _ResidentKernelPointRunner(HasEnvironment):
         self._run_chunk = self._build_run_chunk(len(parameters))
 
     def _build_run_chunk(self, num_parameters):
+        """Generate the resident-kernel inner loop for the current parameter layout."""
+
         param_decl = " ".join(f"p{idx}," for idx in range(num_parameters))
         code = ""
         code += f"({param_decl}) = self._get_param_values_chunk()\n"
@@ -664,7 +715,12 @@ class _PointInvocationRunner(HasEnvironment):
 
 
 class ScanProgramBuilder:
-    """Bind a code-first ``ScanRequest`` to a concrete fragment instance."""
+    """Bind a code-first ``ScanRequest`` to a concrete fragment instance.
+
+    The builder validates all cross-object relationships before execution starts:
+    policy dimensionality, result-channel collection, parameter mappings, kernel device
+    availability, and analysis binding.
+    """
 
     def __init__(self, owner: HasEnvironment):
         self._owner = owner
@@ -727,7 +783,7 @@ class ScanProgramBuilder:
 
 
 class ScanProgramRunner:
-    """Own the prepared scan loop."""
+    """Own the prepared scan loop for one root or child scan site."""
 
     def __init__(
         self,
@@ -769,6 +825,8 @@ class ScanProgramRunner:
         self._scheduler = owner.get_device("scheduler")
 
     def run(self) -> ScanInspection:
+        """Execute the program and publish its scan-site datasets."""
+
         run_context = self._resolved_run_context()
         preview = run_context.preview
         self._program.transport.register_preview(preview)
@@ -847,6 +905,9 @@ class ScanProgramRunner:
                             self._finish_completed_batch(completed_batch, result)
 
                             if restart_host_context:
+                                # A transitory error asked for host setup to be rebuilt.
+                                # Keep any uncompleted suffix of the batch and re-enter
+                                # the executor after recomputing defaults/setup.
                                 continue
 
                             current_batch = []

@@ -1,5 +1,9 @@
-"""
-Result handling building blocks.
+"""Result-channel building blocks used by fragments, analyses, and runtimes.
+
+Fragments push values to ``ResultChannel`` objects. A channel itself describes the
+series; its current ``sink`` decides where pushed values go. The prepared runtime
+temporarily swaps sinks while executing a point so it can collect exactly one value per
+saved channel, then writes those values into scan-site datasets.
 """
 
 from typing import Any
@@ -29,7 +33,7 @@ __all__ = [
 
 
 class ResultSink:
-    """ """
+    """Destination for values pushed through a ``ResultChannel``."""
 
     def push(self, value: Any) -> None:
         """Record a new value.
@@ -112,7 +116,7 @@ class ArraySink(ResultSink):
         self.data = []
 
 class TeeSink(ResultSink):
-    """Sink that forwards values two underlying sinks."""
+    """Sink that forwards each value to two underlying sinks."""
 
     def __init__(self, primary: ResultSink, secondary: ResultSink):
         self.primary = primary
@@ -140,6 +144,8 @@ class TeeSink(ResultSink):
 
 
 class AppendingDatasetSink(ResultSink, HasEnvironment):
+    """Sink that appends each value to one ARTIQ dataset array."""
+
     def build(self, key: str, broadcast: bool = True) -> None:
         """
         :param key: Dataset key to store results in. Set to an array on the first push,
@@ -198,7 +204,12 @@ class ScalarDatasetSink(ResultSink, HasEnvironment):
 
 
 class ResultChannel:
-    """
+    """Fragment-visible result series declaration.
+
+    A channel is metadata plus a mutable sink. User code normally keeps the channel
+    object and calls ``push()`` on it; runtimes and analyses decide what sink is attached
+    at that moment.
+
     :param path: The path to the channel in the fragment tree (e.g. ``"readout/p"``).
     :param description: A human-readable name of the channel. If non-empty, will be
         preferred to the path to e.g. display in plot axis labels.

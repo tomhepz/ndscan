@@ -3,6 +3,11 @@
 This module is intentionally small. It understands the current prepared-runtime scan-site
 schema and returns plain Python dataclasses so offline tools can inspect preview or
 final HDF5 snapshots without importing the experiment runtime itself.
+
+The reader keeps the persisted data mostly intact. Convenience methods can derive
+plotting choices, batch lengths, and segment ranges, but the dataclasses still expose
+the raw point streams and metadata so analysis code is not locked into one plotting
+view.
 """
 
 from __future__ import annotations
@@ -154,6 +159,8 @@ def _decode_json_string_list(values: list[Any]) -> list[Any]:
 
 
 def _decode_dataset_value(key: str, raw: Any) -> Any:
+    """Convert one HDF5 dataset payload into normal Python containers."""
+
     if isinstance(raw, np.ndarray):
         if raw.dtype.kind == "S":
             decoded = [item.decode("utf-8") for item in raw.tolist()]
@@ -213,6 +220,8 @@ def _read_datasets_group(group: h5py.Group) -> dict[str, Any]:
 
 
 def _find_site_prefixes(dataset_values: dict[str, Any]) -> list[str]:
+    """Return all site prefixes, with parents before descendants."""
+
     suffix = "site.path"
     prefixes = [
         key[: -len(suffix)]
@@ -223,6 +232,8 @@ def _find_site_prefixes(dataset_values: dict[str, Any]) -> list[str]:
 
 
 def _point_keys_for_prefix(dataset_values: dict[str, Any], prefix: str) -> dict[str, Any]:
+    """Extract the flat point streams for exactly one site."""
+
     point_prefix = prefix + "points."
     return {
         key[len(point_prefix) :]: value
@@ -1228,6 +1239,9 @@ def read_scan_site_snapshot(path: str | Path) -> ScanSiteSnapshot:
                 and not key.startswith(prefix + "analysis.online_artifact.")
                 and not key.startswith(prefix + "analysis.online_annotation.")
                 and not key.startswith(prefix + "segments.analysis.final_feedback")
+                # Child sites physically live under ``subscans``. The parent's
+                # metadata view should describe only the parent site, not every
+                # descendant dataset nested below the same string prefix.
                 and not key.startswith(prefix + "subscans.")
             },
         )

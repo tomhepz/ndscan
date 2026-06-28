@@ -1,4 +1,14 @@
-"""Execution context and preview coordination for the prepared runtime."""
+"""Execution context and preview coordination for the prepared runtime.
+
+Context objects answer two questions that are awkward to pass explicitly everywhere:
+
+- which scan point is currently executing, so child scans can record their parent point,
+- which root run owns preview-file cadence, so nested scans write one coherent preview.
+
+Normal host execution uses context variables. Resident-kernel execution also needs a
+small process-local stack because child scans can be entered through host RPCs while
+the parent point is still inside a kernel.
+"""
 
 from __future__ import annotations
 
@@ -31,7 +41,12 @@ __all__ = [
 
 @dataclass(frozen=True)
 class ActiveScanContext:
-    """Execution context for the point currently being run."""
+    """Execution context for the point currently being run.
+
+    ``site_path`` identifies the scan site and ``point_index`` is the flat index in
+    that site's ``points.*`` arrays. Nested scan segments store this index as their
+    parent link.
+    """
 
     site_path: tuple[str, ...]
     point_index: int
@@ -39,7 +54,11 @@ class ActiveScanContext:
 
 @dataclass(frozen=True)
 class _KernelParentScanContextProvider:
-    """Host-side view of a point currently executing inside a resident kernel."""
+    """Host-side view of a point currently executing inside a resident kernel.
+
+    The point index can advance while the kernel remains resident, so this stores a
+    getter rather than a fixed integer.
+    """
 
     site_path: tuple[str, ...]
     point_index_getter: Any
@@ -58,7 +77,12 @@ _persistent_kernel_parent_scan_context: list[_KernelParentScanContextProvider] =
 
 
 class PreviewCoordinator:
-    """Root-scoped coordination for preview HDF5 snapshots."""
+    """Root-scoped coordination for preview HDF5 snapshots.
+
+    Every active scan-site writer registers here. A preview write first flushes those
+    writers, then asks ARTIQ's dataset manager to write one HDF5 snapshot containing all
+    root and child scan sites seen so far.
+    """
 
     def __init__(
         self,
@@ -111,6 +135,8 @@ class PreviewCoordinator:
             for writer in tuple(self._writers):
                 writer.flush()
 
+            # Write through a temporary path and atomically replace the visible file so
+            # external readers never see a half-written preview.
             dataset_mgr = self._owner._HasEnvironment__dataset_mgr
             scheduler = self._owner.get_device("scheduler")
             directory = os.path.dirname(self._path)
@@ -161,6 +187,9 @@ def _current_effective_scan_context() -> ActiveScanContext | None:
     if context is not None:
         return context
 
+    # Kernel child-scan RPCs run on the host while the parent kernel is still active.
+    # Check that persistent stack before the normal contextvar stack used around kernel
+    # entry from the host side.
     if _persistent_kernel_parent_scan_context:
         return _persistent_kernel_parent_scan_context[-1].snapshot()
 

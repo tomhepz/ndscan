@@ -55,6 +55,9 @@ class ScanSiteDatasetWriter:
         self._site = site
         self.prefix = make_scan_site_prefix(owner, site)
 
+        # Point payload sinks are allocated lazily because their keys come from the
+        # bound request. Structural streams such as batch/segment starts are known once
+        # the site is created, so they are installed up front.
         self._point_sinks = dict[str, AppendingDatasetSink]()
         self._analysis_result_sinks = dict[str, ScalarDatasetSink]()
         self._batch_start_sink = self._make_appending_sink("batches.start_index")
@@ -125,6 +128,9 @@ class ScanSiteDatasetWriter:
         rid = getattr(scheduler, "rid", 0)
         self._push_scalar("site.source_id", f"{source_prefix}_{rid}")
 
+        # The logical hierarchy is stored explicitly instead of asking readers to parse
+        # dataset prefixes. This keeps future prefix-layout changes local to the schema
+        # module and writer.
         base_metadata = {
             "site.path": list(self._site.path),
             "state.completed": False,
@@ -224,6 +230,9 @@ class ScanSiteDatasetWriter:
         batch_start_index = self._next_point_index
         batch_start_unix_time = time.time()
         for observation in observations:
+            # Keep point streams separated by role. A logical pseudoparam, an installed
+            # fragment parameter, and a measured result may all have similar display
+            # names, but they mean different things to offline analysis.
             for key, value in observation.pseudoparam_values.items():
                 self._get_point_sink(key).push(value)
             for key, value in observation.parameter_values.items():

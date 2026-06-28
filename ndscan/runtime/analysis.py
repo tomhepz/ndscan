@@ -1,7 +1,7 @@
 """Internal analysis helpers for the prepared runtime.
 
 The new prepared runtime already had a clean execution loop, but the analysis-related
-logic had grown into a sizeable cluster inside `the old runtime monolith`:
+logic had grown into a sizeable cluster inside the legacy runtime path:
 
 - selecting the applicable default analyses,
 - building metadata for online/final analysis outputs,
@@ -73,7 +73,7 @@ class ScanAnalysisEngine:
       (online) or after the final point (final analysis).
 
     This helper keeps those phases together without mixing them into the main point
-    execution loop in `the old runtime monolith`.
+    execution loop.
     """
 
     def __init__(

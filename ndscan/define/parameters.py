@@ -3,6 +3,12 @@
 In practical use, these will be instantiated by calling :meth:`Fragment.setattr_param`
 with the appropriate type argument (:class:`FloatParam`, :class:`IntParam`,
 :class:`StringParam`, :class:`BoolParam`, :class:`EnumParam`).
+
+The important split is ``ParamHandle`` versus ``ParamStore``:
+
+- a handle is the attribute user code reads from a fragment,
+- a store holds the current value and can be shared by several handles,
+- the prepared runtime can temporarily swap stores to install per-point scan values.
 """
 
 # The ARTIQ compiler does not support templates or generics (neither in the sense
@@ -40,7 +46,12 @@ class InvalidDefaultError(ValueError):
 
 
 class ParamStore:
-    """
+    """Mutable value storage behind one or more ``ParamHandle`` objects.
+
+    Stores are deliberately concrete per value type rather than generic because ARTIQ
+    kernel compilation needs stable field and RPC types. The repeated subclasses are
+    noisy, but they make scanned values usable from both host and kernel code.
+
     :param identity: ``(fqn, path_spec)`` pair representing the identity of this param
         store, i.e. the override/default value it was created for.
     :param value: The initial value.
@@ -104,7 +115,7 @@ class ParamStore:
 
     @classmethod
     def value_from_pyon(cls, value):
-        """ """
+        """Convert a Pyon/default value into this store's Python value type."""
         return value
 
 
@@ -241,9 +252,12 @@ class BoolParamStore(ParamStore):
 
 
 class ParamHandle:
-    """
-    Each instance of this class corresponds to exactly one attribute of a fragment that
-    can be used to access the underlying parameter store.
+    """Fragment attribute used to access an underlying parameter store.
+
+    Each instance corresponds to exactly one attribute of a fragment. Several handles
+    may point to the same store when a parameter is rebound through a wrapper fragment.
+    That sharing is what lets parent-level overrides affect the underlying child
+    fragment without copying values around manually.
 
     :param owner: See :attr:`owner`.
     :param name: See :attr:`name`.

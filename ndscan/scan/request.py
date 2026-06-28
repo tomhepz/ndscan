@@ -39,7 +39,12 @@ __all__ = [
 
 @dataclass(frozen=True)
 class PreviewPolicy:
-    """Configuration for periodic preview HDF5 snapshots."""
+    """Configuration for periodic preview HDF5 snapshots.
+
+    Preview files are root-run state. Nested scans inherit the root preview coordinator
+    so a dashboard or applet sees one coherent HDF5 snapshot rather than separate files
+    for each child scan.
+    """
 
     path: str | None = None
     min_interval_s: float = 120.0
@@ -60,7 +65,12 @@ class PreviewPolicy:
 
 @dataclass(frozen=True)
 class ExecutionPolicy:
-    """Prepared-runtime scheduling and flush policy for one scan request."""
+    """Prepared-runtime scheduling and flush policy for one scan request.
+
+    This affects how points are grouped and previewed, not which points exist. The
+    point policy still owns the scan trajectory; the runtime may ask for several points
+    at a time to reduce host/kernel boundary traffic.
+    """
 
     max_points_per_batch: int | None = None
     preview_policy: PreviewPolicy | None = None
@@ -76,7 +86,13 @@ class ExecutionPolicy:
 
 @dataclass(frozen=True)
 class ScanRequest:
-    """User-facing prepared-runtime scan request."""
+    """User-facing prepared-runtime scan request.
+
+    A request is declarative. It names the logical axes, supplies a point policy, and
+    optionally adds parameter mappings, metadata, execution hints, and a scan-site
+    location. The runtime clones the request before execution because point policies can
+    carry mutable progress state.
+    """
 
     axes: tuple[ParamHandle | ScanVariable, ...]
     point_policy: PointPolicy

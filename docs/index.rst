@@ -15,6 +15,7 @@ Current architecture notes
 The current prepared-runtime architecture notes are maintained as Markdown files in
 the repository ``docs/`` directory:
 
+* ``docs/reading-guide.md``
 * ``docs/concepts.md``
 * ``docs/module-map.md``
 * ``docs/prepared-runtime.md``

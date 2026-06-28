@@ -1,4 +1,13 @@
-"""Prepared scan handles for root and nested execution."""
+"""Prepared scan handles for root and nested execution.
+
+This module contains the public handles users keep on fragments:
+
+- ``PreparedScan`` for a root scan launched from Python/dashboard adapter code,
+- ``PreparedChildScan`` for a scan launched naturally from inside another scan point.
+
+The heavy execution work lives in ``runtime.executors``. The handle classes here own
+configuration, output exposure, and the extra bookkeeping needed for child scans.
+"""
 
 from __future__ import annotations
 
@@ -58,7 +67,13 @@ __all__ = [
 
 
 class _PreparedScanHandleBase:
-    """Shared host-side prepared-scan behavior."""
+    """Shared host-side prepared-scan behavior.
+
+    A handle is intentionally reusable: user code may configure it with one
+    ``ScanRequest``, execute, inspect outputs, then configure it again. The request is
+    cloned immediately before execution so stateful point policies are not reused after
+    the runtime has consumed them.
+    """
 
     def __init__(
         self,
@@ -210,6 +225,8 @@ def _prepare_child_scan_request(
     segmented: bool,
     extra_metadata: Mapping[str, Any] | None,
 ) -> ScanRequest:
+    """Move a child request under the currently executing parent scan point."""
+
     base_site = request.site
     child_site = make_child_scan_site(
         name,
@@ -220,6 +237,9 @@ def _prepare_child_scan_request(
         },
     )
     if base_site.dataset_prefix is not None:
+        # Explicit dataset prefixes are an escape hatch for advanced callers. If one is
+        # supplied, preserve it exactly rather than nesting under the canonical site
+        # tree.
         child_site = ScanSite(
             path=child_site.path,
             parent_path=child_site.parent_path,
@@ -260,6 +280,8 @@ def _mapping_targets_belong_to_fragment(
 def _collect_prepared_child_owner_mappings(
     owner: HasEnvironment, fragment: ExpFragment
 ) -> tuple[ParameterMapping, ...]:
+    """Return owner-declared mappings that target this child fragment subtree."""
+
     if not isinstance(owner, Fragment):
         return ()
     return tuple(
@@ -273,6 +295,8 @@ def _merge_child_inherited_parameter_mappings(
     request: ScanRequest,
     inherited_parameter_mappings: Sequence[ParameterMapping],
 ) -> ScanRequest:
+    """Prepend parent-declared mappings so child requests see wrapper coordinates."""
+
     if not inherited_parameter_mappings:
         return request
     return ScanRequest(
@@ -290,6 +314,8 @@ def _merge_child_inherited_parameter_mappings(
 def _auto_detach_prepared_child_fragment(
     owner: HasEnvironment, fragment: ExpFragment
 ) -> None:
+    """Detach direct child-scan fragments from normal parent setup/cleanup traversal."""
+
     if not isinstance(owner, Fragment):
         return
     if fragment not in owner._subfragments:
@@ -343,6 +369,8 @@ def _resolve_declared_scan_output_channels(
     *,
     expose_outputs: Sequence[str] | None,
 ) -> dict[str, ResultChannel]:
+    """Validate fixed tuple outputs exposed by a prepared child scan."""
+
     all_channels = _collect_default_analysis_result_channels(fragment)
 
     if expose_outputs is None:
@@ -387,6 +415,13 @@ def _scan_outputs_from_inspection(
 def _make_prepared_child_get_outputs_methods(
     output_channels: Mapping[str, ResultChannel],
 ):
+    """Build ARTIQ-compatible methods for fixed child-scan tuple outputs.
+
+    ARTIQ needs concrete return annotations for RPC/portable methods. The output list
+    is only known when the child-scan handle class is created, so these methods are
+    generated dynamically with the correct tuple element types.
+    """
+
     if not output_channels:
         return {}
 
@@ -423,7 +458,12 @@ def _make_prepared_child_get_outputs_methods(
 
 
 class _PreparedChildKernelAcquireSession:
-    """Host-side lifecycle owner for one active prepared child kernel acquire."""
+    """Host-side lifecycle owner for one active prepared child kernel acquire.
+
+    ``PreparedChildScan.acquire()`` can be called from a parent kernel. The kernel calls
+    into this host object through RPCs to get parameter chunks and publish completed
+    batches, while the child fragment's point body still runs in the resident kernel.
+    """
 
     def __init__(
         self,
@@ -493,6 +533,9 @@ class _PreparedChildKernelAcquireSession:
                 self._program.request.site.path,
                 lambda: self._batch_state.current_next_point_index,
             )
+            # This stack is process-local host state used by RPCs called from an active
+            # resident kernel. It lets grandchildren discover the current child point
+            # even though the normal contextvar stack lives on the kernel entry side.
             _persistent_kernel_parent_scan_context.append(self._parent_provider)
         except BaseException:
             self.cleanup(completed=False)
@@ -552,6 +595,9 @@ class _PreparedChildKernelAcquireSession:
     def cleanup(self, *, completed: bool) -> None:
         provider = self._parent_provider
         if provider is not None:
+            # A mismatch here means nested kernel child scans have unwound in the wrong
+            # order. Failing loudly is better than writing child points against the
+            # wrong parent segment.
             if (
                 not _persistent_kernel_parent_scan_context
                 or _persistent_kernel_parent_scan_context[-1] is not provider
@@ -606,7 +652,12 @@ class _PreparedChildKernelAcquireSession:
 
 
 class PreparedChildScan(_PreparedScanHandleBase):
-    """Prepared child-scan handle for the prepared runtime."""
+    """Prepared child-scan handle for the prepared runtime.
+
+    Child scans use the same execution core and scan-site schema as root scans. The
+    only differences are how their site path is derived and, for kernel parents, how
+    ``acquire()`` enters the host-managed resident-kernel child session.
+    """
 
     def __init__(
         self,
