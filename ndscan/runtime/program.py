@@ -548,6 +548,11 @@ class ScanProgram:
     for a request/site and then consumed by an execution backend. It contains no ARTIQ
     kernel code itself, which keeps the binding/metadata logic testable without running
     the core device.
+
+    When reading the runtime loop, think of this object as the bundle of everything the
+    runner needs to know but should not rediscover every batch: the fragment to call,
+    the bound scan axes, the concrete varying parameters, result channels, point source,
+    analysis engine, and persistence transport.
     """
 
     def __init__(

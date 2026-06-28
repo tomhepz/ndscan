@@ -34,7 +34,18 @@ __all__ = [
 
 
 class ScanArgumentInterface(HasEnvironment):
-    """Expose prepared-runtime submissions through the existing ndscan dashboard channel."""
+    """Bridge the ARTIQ dashboard argument payload to a prepared ``ScanRequest``.
+
+    The dashboard still exchanges one ndscan argument value with the experiment. This
+    helper builds the default payload from a fragment's parameters/result channels, then
+    later resolves the edited payload into the runtime objects the prepared path needs:
+
+    - a compiled ``ScanRequest`` from the ``scan_submission`` entry,
+    - concrete ``ParamStore`` overrides from the dashboard override entries.
+
+    It does not implement dashboard widgets itself; it owns the data contract between
+    those widgets and ``PreparedScan``.
+    """
 
     def build(
         self,

@@ -128,6 +128,9 @@ class _PreparedScanHandleBase:
     def execute(self) -> ScanOutputs:
         if self._request is None:
             raise RuntimeError(self._not_configured_message())
+        # From the user's point of view this is "run the scan". Internally the point
+        # policy is allowed to carry progress state, so take a fresh execution copy
+        # before handing it to the runtime.
         self._last_request = self._prepare_execution_request(
             _clone_scan_request_for_execution(self._request)
         )
