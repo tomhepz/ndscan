@@ -23,7 +23,7 @@ from ..scan.point_policy import (
     PointPolicy,
 )
 from ..scan.request import ExecutionPolicy, ScanRequest
-from .analysis import HostScanAnalysisEngine
+from .analysis import ScanAnalysisEngine
 from .persistence import ScanSiteDatasetWriter
 
 __all__ = [
@@ -177,7 +177,7 @@ class _TransientParamBinding:
 
 
 @dataclass
-class HostScanRuntimeStats:
+class ScanRuntimeStats:
     """Lightweight runtime counters/timings for executor bring-up and profiling."""
 
     batch_count: int = 0
@@ -201,7 +201,7 @@ class ScanInspection:
     online_analysis_artifacts: dict[str, dict[str, Any]]
     annotations: list[dict[str, Any]]
     online_analysis_annotations: dict[str, list[dict[str, Any]]]
-    runtime_stats: HostScanRuntimeStats
+    runtime_stats: ScanRuntimeStats
     point_metadata: OrderedDict[str, list[Any]]
     site_prefix: str
 
@@ -225,7 +225,7 @@ class ScanInspection:
             online_analysis_artifacts={},
             annotations=list(initial_annotations),
             online_analysis_annotations={},
-            runtime_stats=HostScanRuntimeStats(),
+            runtime_stats=ScanRuntimeStats(),
             point_metadata=OrderedDict(),
             site_prefix=site_prefix,
         )
@@ -276,7 +276,7 @@ class ScanInspection:
         return ScanOutputs.from_mapping(self.analysis_results)
 
 
-class _HostPointBatchSource:
+class _PointBatchSource:
     """Host-side batch source/fallback point-feedback seam."""
 
     def __init__(self, point_policy: PointPolicy, execution_policy: ExecutionPolicy):
@@ -321,14 +321,14 @@ class _HostPointBatchSource:
         return None
 
 
-class _HostAnalysisAdapter:
+class _AnalysisAdapter:
     """Host-side analysis seam."""
 
-    def __init__(self, engine: HostScanAnalysisEngine):
+    def __init__(self, engine: ScanAnalysisEngine):
         self._engine = engine
 
     @property
-    def engine(self) -> HostScanAnalysisEngine:
+    def engine(self) -> ScanAnalysisEngine:
         return self._engine
 
     def metadata(self) -> dict[str, Any]:
@@ -354,7 +354,7 @@ class _HostAnalysisAdapter:
         return None
 
 
-class _HostObservationTransport:
+class _ObservationTransport:
     """Host-side persistence/preview seam for completed observations."""
 
     def __init__(self, site_writer: ScanSiteDatasetWriter):
@@ -459,9 +459,9 @@ def _publish_completed_batch(
     axes: Sequence[BoundScanAxis],
     parameters: Sequence[BoundScanParameter],
     channels: Sequence[BoundResultChannel],
-    point_source: _HostPointBatchSource,
-    analysis: _HostAnalysisAdapter,
-    transport: _HostObservationTransport,
+    point_source: _PointBatchSource,
+    analysis: _AnalysisAdapter,
+    transport: _ObservationTransport,
     preview,
 ) -> None:
     if not completed_batch:
@@ -494,8 +494,8 @@ def _publish_completed_batch(
     )
 
 
-class HostScanProgram:
-    """Validated, fragment-bound host scan plan."""
+class ScanProgram:
+    """Validated, fragment-bound scan submission plan."""
 
     def __init__(
         self,
@@ -506,7 +506,7 @@ class HostScanProgram:
         channels: Sequence[BoundResultChannel],
         parameter_mappings: Sequence[_BoundParameterMapping],
         site_writer: ScanSiteDatasetWriter,
-        analysis_engine: HostScanAnalysisEngine,
+        analysis_engine: ScanAnalysisEngine,
     ):
         self.fragment = fragment
         self.request = request
@@ -514,11 +514,11 @@ class HostScanProgram:
         self.parameters = tuple(parameters)
         self.channels = tuple(channels)
         self.parameter_mappings = tuple(parameter_mappings)
-        self.point_source = _HostPointBatchSource(
+        self.point_source = _PointBatchSource(
             request.point_policy, request.execution_policy
         )
-        self.analysis = _HostAnalysisAdapter(analysis_engine)
-        self.transport = _HostObservationTransport(site_writer)
+        self.analysis = _AnalysisAdapter(analysis_engine)
+        self.transport = _ObservationTransport(site_writer)
 
     def metadata(self) -> dict[str, Any]:
         metadata = {
@@ -637,7 +637,7 @@ def _build_bound_axes(
             if source._store is None:
                 raise ValueError(
                     f"Parameter handle '{source.name}' is not bound to a store yet; "
-                    "initialise fragment parameters before building a host scan"
+                    "initialise fragment parameters before building a scan submission"
                 )
             bound_axes.append(
                 BoundScanAxis(

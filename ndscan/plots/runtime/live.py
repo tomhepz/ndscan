@@ -9,9 +9,9 @@ from typing import Any
 import numpy as np
 
 from ...results.scan_site_reader import (
-    HostRuntimeSegmentAnalysis,
-    HostRuntimeSite,
-    HostRuntimeSnapshot,
+    ScanSiteSegmentAnalysis,
+    ScanSiteData,
+    ScanSiteSnapshot,
 )
 
 _STRUCTURED_KEYS = {
@@ -195,14 +195,14 @@ def _online_annotations_for_prefix(
 
 def _segment_analyses_for_prefix(
     dataset_values: dict[str, Any], prefix: str
-) -> list[HostRuntimeSegmentAnalysis]:
+) -> list[ScanSiteSegmentAnalysis]:
     raw_feedback = dataset_values.get(prefix + "segments.analysis.final_feedback", [])
-    return [HostRuntimeSegmentAnalysis.from_dict(item) for item in raw_feedback]
+    return [ScanSiteSegmentAnalysis.from_dict(item) for item in raw_feedback]
 
 
 def snapshot_from_live_values(
     prefix: str, values: dict[str, Any]
-) -> HostRuntimeSnapshot:
+) -> ScanSiteSnapshot:
     """Reconstruct a runtime site-tree snapshot from a live applet dataset view.
 
     The applet receives a flat dataset mapping keyed by full dataset name. This function
@@ -219,7 +219,7 @@ def snapshot_from_live_values(
     for site_prefix in _find_site_prefixes(datasets):
         path_value = tuple(datasets[site_prefix + "site.path"])
         parent_path = datasets.get(site_prefix + "site.parent_path")
-        sites[path_value] = HostRuntimeSite(
+        sites[path_value] = ScanSiteData(
             prefix=prefix + site_prefix,
             path=path_value,
             parent_path=None if parent_path is None else tuple(parent_path),
@@ -260,7 +260,7 @@ def snapshot_from_live_values(
             },
         )
 
-    return HostRuntimeSnapshot(
+    return ScanSiteSnapshot(
         path=Path("<live>"),
         top_level_metadata={},
         sites=sites,

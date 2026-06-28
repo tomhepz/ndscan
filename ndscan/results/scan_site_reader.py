@@ -1,6 +1,6 @@
-"""Read host-runtime scan-site HDF5 snapshots without ARTIQ.
+"""Read prepared-runtime scan-site HDF5 snapshots without ARTIQ.
 
-This module is intentionally small. It understands the current host-runtime scan-site
+This module is intentionally small. It understands the current prepared-runtime scan-site
 schema and returns plain Python dataclasses so offline tools can inspect preview or
 final HDF5 snapshots without importing the experiment runtime itself.
 """
@@ -17,14 +17,14 @@ import h5py
 import numpy as np
 
 __all__ = [
-    "HostRuntimeSnapshot",
-    "HostRuntimeSiteSegment",
-    "HostRuntimeSegmentAnalysis",
+    "ScanSiteSnapshot",
+    "ScanSiteSegment",
+    "ScanSiteSegmentAnalysis",
     "SeriesDescription",
     "PlotAxisChoices",
     "PlotChoices",
-    "HostRuntimeSite",
-    "read_host_runtime_snapshot",
+    "ScanSiteData",
+    "read_scan_site_snapshot",
 ]
 
 
@@ -286,13 +286,13 @@ def _online_annotations_for_prefix(
 
 def _segment_analyses_for_prefix(
     dataset_values: dict[str, Any], prefix: str
-) -> list["HostRuntimeSegmentAnalysis"]:
+) -> list["ScanSiteSegmentAnalysis"]:
     raw_feedback = dataset_values.get(prefix + "segments.analysis.final_feedback", [])
-    return [HostRuntimeSegmentAnalysis.from_dict(item) for item in raw_feedback]
+    return [ScanSiteSegmentAnalysis.from_dict(item) for item in raw_feedback]
 
 
 @dataclass(frozen=True)
-class HostRuntimeSiteSegment:
+class ScanSiteSegment:
     """One logical segment within a segmented scan site."""
 
     index: int
@@ -307,7 +307,7 @@ class HostRuntimeSiteSegment:
 
 
 @dataclass(frozen=True)
-class HostRuntimeSegmentAnalysis:
+class ScanSiteSegmentAnalysis:
     """Analysis payload attached to one finished site segment."""
 
     outputs: dict[str, Any]
@@ -315,7 +315,7 @@ class HostRuntimeSegmentAnalysis:
     annotations: list[dict[str, Any]]
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any] | str | bytes) -> "HostRuntimeSegmentAnalysis":
+    def from_dict(cls, raw: dict[str, Any] | str | bytes) -> "ScanSiteSegmentAnalysis":
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8")
         if isinstance(raw, str):
@@ -364,8 +364,8 @@ class PlotChoices:
 
 
 @dataclass(frozen=True)
-class HostRuntimeSite:
-    """Offline view of one host-runtime scan site."""
+class ScanSiteData:
+    """Offline view of one prepared-runtime scan site."""
 
     prefix: str
     path: tuple[str, ...]
@@ -385,7 +385,7 @@ class HostRuntimeSite:
     online_analysis_artifacts: dict[str, Any]
     online_analysis_annotations: dict[str, list[dict[str, Any]]]
     annotations: list[dict[str, Any]]
-    segment_analyses: list[HostRuntimeSegmentAnalysis]
+    segment_analyses: list[ScanSiteSegmentAnalysis]
     segmented: bool
     metadata: dict[str, Any]
 
@@ -1016,7 +1016,7 @@ class HostRuntimeSite:
 
         return None, None
 
-    def segments(self) -> list[HostRuntimeSiteSegment]:
+    def segments(self) -> list[ScanSiteSegment]:
         """Return the site's logical segments in flat point-index space."""
 
         if not self.segmented:
@@ -1042,7 +1042,7 @@ class HostRuntimeSite:
                 else None
             )
             result.append(
-                HostRuntimeSiteSegment(
+                ScanSiteSegment(
                     index=index,
                     start_index=int(start_index),
                     stop_index=int(stop_index),
@@ -1054,7 +1054,7 @@ class HostRuntimeSite:
 
     def segments_for_parent_point(
         self, parent_point_index: int
-    ) -> list[HostRuntimeSiteSegment]:
+    ) -> list[ScanSiteSegment]:
         """Return all child segments launched from one parent point index."""
 
         return [
@@ -1065,7 +1065,7 @@ class HostRuntimeSite:
 
     def analysis_for_segment(
         self, segment_index: int
-    ) -> HostRuntimeSegmentAnalysis | None:
+    ) -> ScanSiteSegmentAnalysis | None:
         """Return the persisted analysis payload for one segment, if present."""
 
         if 0 <= segment_index < len(self.segment_analyses):
@@ -1088,17 +1088,17 @@ class HostRuntimeSite:
 
 
 @dataclass(frozen=True)
-class HostRuntimeSnapshot:
-    """Offline view of one host-runtime HDF5 snapshot file."""
+class ScanSiteSnapshot:
+    """Offline view of one prepared-runtime HDF5 snapshot file."""
 
     path: Path
     top_level_metadata: dict[str, Any]
-    sites: dict[tuple[str, ...], HostRuntimeSite]
+    sites: dict[tuple[str, ...], ScanSiteData]
 
-    def get_site(self, path: tuple[str, ...] = ()) -> HostRuntimeSite:
+    def get_site(self, path: tuple[str, ...] = ()) -> ScanSiteData:
         return self.sites[path]
 
-    def child_sites(self, parent_path: tuple[str, ...] = ()) -> list[HostRuntimeSite]:
+    def child_sites(self, parent_path: tuple[str, ...] = ()) -> list[ScanSiteData]:
         """Return the immediate child sites of the given parent site path."""
 
         return sorted(
@@ -1111,8 +1111,8 @@ class HostRuntimeSnapshot:
         )
 
 
-def read_host_runtime_snapshot(path: str | Path) -> HostRuntimeSnapshot:
-    """Read a host-runtime preview or final HDF5 snapshot."""
+def read_scan_site_snapshot(path: str | Path) -> ScanSiteSnapshot:
+    """Read a prepared-runtime preview or final HDF5 snapshot."""
 
     file_path = Path(path)
     with h5py.File(file_path, "r") as h5_file:
@@ -1127,7 +1127,7 @@ def read_host_runtime_snapshot(path: str | Path) -> HostRuntimeSnapshot:
     for prefix in _find_site_prefixes(datasets):
         path_value = tuple(datasets[prefix + "site.path"])
         parent_path = datasets.get(prefix + "site.parent_path")
-        sites[path_value] = HostRuntimeSite(
+        sites[path_value] = ScanSiteData(
             prefix=prefix,
             path=path_value,
             parent_path=None if parent_path is None else tuple(parent_path),
@@ -1162,7 +1162,7 @@ def read_host_runtime_snapshot(path: str | Path) -> HostRuntimeSnapshot:
             },
         )
 
-    return HostRuntimeSnapshot(
+    return ScanSiteSnapshot(
         path=file_path,
         top_level_metadata=top_level_metadata,
         sites=sites,

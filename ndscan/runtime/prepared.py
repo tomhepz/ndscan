@@ -28,7 +28,7 @@ from .context import (
     make_child_scan_site,
 )
 from .executors import (
-    HostScanProgramBuilder,
+    ScanProgramBuilder,
     KernelStreamingExecutor,
     _execute_scan_request_inspection,
     _PointResultCollector,
@@ -433,7 +433,7 @@ class _PreparedChildKernelAcquireSession:
     ):
         self._owner = owner
         self._fragment = fragment
-        self._program = HostScanProgramBuilder(owner).build(fragment, request)
+        self._program = ScanProgramBuilder(owner).build(fragment, request)
         self._run_context = current_run_context()
         if self._run_context is None:
             raise RuntimeError(

@@ -35,7 +35,7 @@ The important shift is this:
 
 That is a better long-term story than:
 
-- "host scans" as one kind of runtime
+- "scan submissions" as one kind of runtime
 - "kernel scans" as another kind of runtime
 - "subscans" as a third special thing
 
@@ -289,7 +289,7 @@ That means:
 So the dashboard path is conceptually:
 
 - UI payload
-- `compile_host_scan_schema(...)`
+- `compile_scan_submission_schema(...)`
 - `ScanRequest`
 - `PreparedScan`
 - executor selection
@@ -298,7 +298,7 @@ not:
 
 - UI scan system
 - separate dashboard runtime
-- special "host scan" execution species
+- special "scan submission" execution species
 
 This is a very good kind of separation:
 
@@ -414,7 +414,7 @@ This model still has a few rough edges.
 
 ### The transport naming is not fully cleaned up
 
-The dashboard submission path still contains names like `host_scan` in some places.
+The dashboard submission path still contains names like `scan_submission` in some places.
 That is more historical naming than conceptual truth.
 
 ### Convenience layers can still hide the core model

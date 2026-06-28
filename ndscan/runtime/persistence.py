@@ -5,7 +5,7 @@ owns only the runtime-side writer implementation.
 
 The writer is deliberately plain Python. It sits at the edge of the ARTIQ world by
 accepting a ``HasEnvironment`` owner, but the policy for *when* points are written is
-kept in the host runtime.
+kept in the prepared runtime.
 """
 
 from __future__ import annotations

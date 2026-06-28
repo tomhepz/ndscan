@@ -1,4 +1,4 @@
-"""Reusable Bernoulli/binomial repeat helpers for host-runtime examples.
+"""Reusable Bernoulli/binomial repeat helpers for prepared-runtime examples.
 
 These helpers are intentionally example-scoped rather than ndscan core API. They are
 small enough to keep the examples readable, but common enough that repeating the same

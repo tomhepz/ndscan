@@ -635,7 +635,7 @@ class Fragment(HasEnvironment):
         """Convenience wrapper registering a single-target parameter mapping.
 
         ``rebind_param()`` is the wrapper-fragment counterpart to the ad hoc
-        host-runtime ``ParameterMapping`` path. It keeps the fragment-side code small
+        prepared-runtime ``ParameterMapping`` path. It keeps the fragment-side code small
         while still feeding the same runtime execution machinery:
 
         - the wrapper fragment exposes its own logical parameters,

@@ -1,7 +1,7 @@
 # Scan-Site Schema v4
 
 This document describes the current implemented scan-site schema written by the new
-host runtime.
+prepared runtime.
 
 It supersedes the earlier v3 proposal. The most important changes are:
 
@@ -12,7 +12,7 @@ It supersedes the earlier v3 proposal. The most important changes are:
 
 ## Scope
 
-This schema applies only to the new host runtime.
+This schema applies only to the new prepared runtime.
 
 It does not describe:
 
@@ -61,7 +61,7 @@ ndscan.rid_<rid>.site.root.<child_name>.<grandchild_name>.
 
 ## Preview Snapshot Files
 
-When enabled, the host runtime writes preview snapshots to a separate HDF5 file.
+When enabled, the prepared runtime writes preview snapshots to a separate HDF5 file.
 
 Default filename shape:
 
@@ -181,7 +181,7 @@ Example:
 Logical runtime-only symbols that stayed constant for the entire run.
 
 This is the schema counterpart to text-expression constants supplied through the
-host-scan submission layer. Unlike `scan.pseudoparams`, these values do not produce
+scan-submission layer. Unlike `scan.pseudoparams`, these values do not produce
 `points.pseudoparam_*` arrays because they never vary point-by-point.
 
 Entries are keyed by the symbolic name visible to rebind expressions.
@@ -251,7 +251,7 @@ Example:
 
 Real fragment parameters in the target fragment tree that stayed fixed for this scan.
 
-This is the host-runtime replacement for relying on ARTIQ submission-time `expid`
+This is the prepared-runtime replacement for relying on ARTIQ submission-time `expid`
 state to reconstruct non-scanned parameter values later. Each entry includes:
 
 - `path`

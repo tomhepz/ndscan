@@ -16,17 +16,17 @@ import numpy as np
 from artiq.language import kernel, portable, rpc
 from emulator_environment import KernelEmulatorCase
 from fixtures import TrivialKernelFragment
-from examples.host_runtime_prepared_kernel_nested import (
+from examples.prepared_scan_kernel_nested import (
     PreparedKernelNestedVariationFragment,
 )
-from examples.host_runtime_prepared_kernel_nested_ttl import (
+from examples.prepared_scan_kernel_nested_ttl import (
     PreparedKernelNestedTtlFragment,
 )
-from examples.host_runtime_prepared_kernel_online_fit import (
+from examples.prepared_scan_kernel_online_fit import (
     PreparedKernelOnlineFitFragment,
 )
 try:
-    from examples.host_runtime_kernel_bayesian_optimisation import (
+    from examples.prepared_scan_kernel_bayesian_optimisation import (
         KernelBayesianOptimisationFragment,
         make_request as make_kernel_bo_request,
     )
@@ -291,8 +291,8 @@ class KernelPreparedMappedChildParent(ExpFragment):
         self.result.push(self.outer.get() + 1.0)
 
 
-class KernelStreamingHostRuntimeCase(KernelEmulatorCase):
-    def test_kernel_streaming_host_runtime_reuses_one_kernel_entry(self):
+class KernelStreamingPreparedScanCase(KernelEmulatorCase):
+    def test_kernel_streaming_prepared_scan_reuses_one_kernel_entry(self):
         fragment = self.create(KernelStreamingLeafFragment, [])
         request = ScanRequest.linear(
             fragment.x,
@@ -314,7 +314,7 @@ class KernelStreamingHostRuntimeCase(KernelEmulatorCase):
         self.assertAlmostEqual(values[50], 1.0)
         self.assertAlmostEqual(values[-1], 11.0)
 
-    def test_kernel_streaming_host_runtime_supports_pseudoparam_mappings(self):
+    def test_kernel_streaming_prepared_scan_supports_pseudoparam_mappings(self):
         fragment = self.create(KernelMappedDriveFragment, [])
         logical_drive = ScanVariable(
             "logical_drive",
@@ -348,7 +348,7 @@ class KernelStreamingHostRuntimeCase(KernelEmulatorCase):
         self.assertEqual(fragment.get_dataset(prefix + "points.param_0"), [0.5, 1.5, 2.5])
         self.assertEqual(fragment.get_dataset(prefix + "points.channel_0"), [1.0, 3.0, 5.0])
 
-    def test_kernel_streaming_host_runtime_supports_ad_hoc_param_to_param_mappings(
+    def test_kernel_streaming_prepared_scan_supports_ad_hoc_param_to_param_mappings(
         self,
     ):
         fragment = self.create(KernelAdHocMappedParamFragment, [])
@@ -380,7 +380,7 @@ class KernelStreamingHostRuntimeCase(KernelEmulatorCase):
         self.assertEqual(fragment.get_dataset(prefix + "points.param_1"), [0.5, 1.5, 2.5])
         self.assertEqual(fragment.get_dataset(prefix + "points.channel_0"), [1.0, 3.0, 5.0])
 
-    def test_kernel_streaming_host_runtime_supports_wrapper_rebinds(self):
+    def test_kernel_streaming_prepared_scan_supports_wrapper_rebinds(self):
         fragment = self.create(KernelRebindDriveWrapperFragment, [])
         request = ScanRequest.cartesian(
             [(fragment.logical_drive, [0.0, 1.0, 2.0])],

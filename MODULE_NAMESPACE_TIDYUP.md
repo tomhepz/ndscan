@@ -165,7 +165,7 @@ ndscan/
         param_tree_dialog.py
         override_entry.py
         scan_options.py
-        host_scan_options.py
+        scan_submission_options.py
         submission/
             __init__.py
             common.py
@@ -244,7 +244,7 @@ It should contain:
 - expression compilation for text mappings
 - compilation into `ScanRequest` plus overrides
 
-This is where the current [`host_scan_schema.py`](/home/lab/artiq-files/install/ndscan/ndscan/experiment/host_scan_schema.py)
+This is where the current [`scan_submission_schema.py`](/home/lab/artiq-files/install/ndscan/ndscan/experiment/scan_submission_schema.py)
 really belongs conceptually.
 
 The important rule is:
@@ -452,7 +452,7 @@ That lets most modules depend on interfaces rather than on one giant file.
 ## Proposed Runtime Split
 
 The biggest immediate simplification is to split the current
-[`host_runtime.py`](/home/lab/artiq-files/install/ndscan/ndscan/experiment/host_runtime.py)
+[the old runtime monolith](/home/lab/artiq-files/install/ndscan/ndscan/runtime/)
 by responsibility.
 
 A good split would be:
@@ -500,8 +500,8 @@ Binding scan semantics to a concrete fragment:
 
 - bound axis/parameter/result-channel dataclasses
 - resolved execution-point lowering
-- `HostScanProgram`
-- `HostScanProgramBuilder`
+- `ScanProgram`
+- `ScanProgramBuilder`
 
 This is where `ScanRequest` becomes runnable program state.
 
@@ -509,7 +509,7 @@ This is where `ScanRequest` becomes runnable program state.
 
 Runtime orchestration:
 
-- `HostScanProgramRunner`
+- `ScanProgramRunner`
 - batch publication flow
 - pause/restart/completion control
 
@@ -610,7 +610,7 @@ feature.
 
 ## Proposed `submission/` Split
 
-The current `host_scan_schema.py` is doing more than one job.
+The current `scan_submission_schema.py` is doing more than one job.
 
 A cleaner split would be:
 
@@ -736,7 +736,7 @@ Current -> proposed home:
 
 ### Scan semantics
 
-- pieces of `experiment/host_runtime.py`:
+- pieces of `runtime/`:
   - `ScanRequest`
   - `ExecutionPolicy`
   - `PreviewPolicy`
@@ -749,13 +749,13 @@ Current -> proposed home:
 
 ### Submission / compilation
 
-- `experiment/host_scan_schema.py` -> `submission/scan_spec.py` + `submission/compile.py` + `submission/transport.py`
+- `experiment/scan_submission_schema.py` -> `submission/scan_spec.py` + `submission/compile.py` + `submission/transport.py`
 - `experiment/expression.py` -> `submission/expression.py`
-- override helpers from `host_runtime.py` -> `submission/overrides.py`
+- override helpers from the old runtime monolith -> `submission/overrides.py`
 
 ### Prepared runtime
 
-- `experiment/host_runtime.py` -> split across `runtime/*`
+- `runtime/` -> split across `runtime/*`
 - `experiment/_host_analysis.py` -> `runtime/analysis.py`
 
 ### Persisted schema
@@ -773,7 +773,7 @@ Current -> proposed home:
 
 ### Dashboard
 
-- `dashboard/submission/host.py` -> `dashboard/submission/prepared.py`
+- `dashboard/submission/scan.py` -> `dashboard/submission/scan.py`
 - `dashboard/submission/legacy.py` stays `dashboard/submission/legacy.py`
 
 
@@ -823,7 +823,7 @@ then it should live in that package, not in a general catch-all.
 
 This is the order I would use.
 
-### 1. Split `host_runtime.py` into `runtime/` modules
+### 1. Split the old runtime monolith into `runtime/` modules
 
 Do this first while keeping `ndscan.experiment` re-exports stable.
 
@@ -840,7 +840,7 @@ Move:
 - `ParameterMapping`
 - point policies
 
-out of `host_runtime.py`.
+out of the old runtime monolith.
 
 ### 3. Split `scan_site.py`
 
@@ -851,7 +851,7 @@ Move:
 
 This is the clearest way to separate runtime writing from persisted contract.
 
-### 4. Split `host_scan_schema.py`
+### 4. Split `scan_submission_schema.py`
 
 Turn it into:
 
@@ -866,7 +866,7 @@ rather than one mixed module.
 
 This makes the codebase easier to navigate immediately.
 
-### 6. Rename dashboard host submission to dashboard prepared submission
+### 6. Rename dashboard scan-submission to dashboard scan submission
 
 This finishes removing old conceptual naming from the new path where practical.
 

@@ -1,4 +1,4 @@
-"""Tests for optional host-runtime optimiser backends."""
+"""Tests for optional prepared-runtime optimiser backends."""
 
 import unittest
 from unittest.mock import patch
@@ -25,7 +25,7 @@ try:
         OptimiserObservation,
     )
     from ndscan.scan.request import ExecutionPolicy, ScanRequest
-    from ndscan.submission.host_scan_schema import compile_host_scan_schema
+    from ndscan.submission.scan_submission_schema import compile_scan_submission_schema
 
     _OPTIMISATION_DEPS_AVAILABLE = True
 except ModuleNotFoundError:
@@ -243,7 +243,7 @@ if _OPTIMISATION_DEPS_AVAILABLE:
         "Optional Bayesian optimisation dependencies are not installed",
     )
     class BayesianOptimisationRuntimeTest(HasEnvironmentCase):
-        def test_host_runtime_runs_nubo_bayesian_optimisation_batches(self):
+        def test_prepared_scan_runs_nubo_bayesian_optimisation_batches(self):
             fragment = self.create(OneDimQuadraticFragment, [])
             backend = NuboBatchBayesianOptimisationBackend(
                 bounds=[[-1.0], [1.0]],
@@ -273,9 +273,9 @@ if _OPTIMISATION_DEPS_AVAILABLE:
             self.assertEqual(len(self.dataset_db.get(prefix + "points.channel_0")), 4)
             self.assertEqual(backend.describe()["kind"], "nubo_bayesian_optimisation")
 
-        def test_compile_host_scan_schema_builds_gpo_request(self):
+        def test_compile_scan_submission_schema_builds_gpo_request(self):
             fragment = self.create(OneDimQuadraticFragment, [])
-            request, overrides = compile_host_scan_schema(
+            request, overrides = compile_scan_submission_schema(
                 fragment,
                 {
                     "version": 1,

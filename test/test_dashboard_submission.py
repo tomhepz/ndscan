@@ -1,7 +1,7 @@
 import unittest
 
 from ndscan.dashboard.submission import (
-    HostSubmissionBackend,
+    ScanSubmissionBackend,
     LegacyScanOptionsState,
     LegacySubmissionBackend,
     select_submission_backend,
@@ -14,10 +14,10 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
         self.assertIsInstance(backend, LegacySubmissionBackend)
         self.assertTrue(backend.supports_editing)
 
-    def test_select_submission_backend_detects_host_scan_payload(self):
+    def test_select_submission_backend_detects_scan_submission_payload(self):
         backend = select_submission_backend(
             {
-                "host_scan": {
+                "scan_submission": {
                     "version": 1,
                     "mode": {"type": "grid"},
                     "entries": [],
@@ -26,13 +26,13 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
                 }
             }
         )
-        self.assertIsInstance(backend, HostSubmissionBackend)
+        self.assertIsInstance(backend, ScanSubmissionBackend)
         self.assertTrue(backend.supports_editing)
 
-    def test_host_backend_rejects_unsupported_host_scan_payload(self):
+    def test_scan_submission_backend_rejects_unsupported_scan_submission_payload(self):
         backend = select_submission_backend(
             {
-                "host_scan": {
+                "scan_submission": {
                     "version": 1,
                     "mode": {"type": "grid"},
                     "entries": [
@@ -54,12 +54,12 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
                 }
             }
         )
-        self.assertIsInstance(backend, HostSubmissionBackend)
+        self.assertIsInstance(backend, ScanSubmissionBackend)
         self.assertFalse(backend.supports_editing)
 
-    def test_host_backend_falls_back_for_malformed_cached_host_scan_payload(self):
-        backend = select_submission_backend({"host_scan": {"version": "old"}})
-        self.assertIsInstance(backend, HostSubmissionBackend)
+    def test_scan_submission_backend_falls_back_for_malformed_cached_scan_submission_payload(self):
+        backend = select_submission_backend({"scan_submission": {"version": "old"}})
+        self.assertIsInstance(backend, ScanSubmissionBackend)
         self.assertTrue(backend.supports_editing)
 
     def test_legacy_backend_iterates_axes_then_overrides(self):
@@ -141,15 +141,15 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
         backend.apply_submission_state(params, backend.new_submission_state())
         self.assertNotIn("scan", params)
 
-    def test_host_backend_serialises_fixed_and_scanned_entries(self):
-        backend = HostSubmissionBackend(
+    def test_scan_submission_backend_serialises_fixed_and_scanned_entries(self):
+        backend = ScanSubmissionBackend(
             {
-                "host_scan": {
+                "scan_submission": {
                     "version": 1,
                     "mode": {"type": "grid"},
                     "entries": [],
                     "execution": {"max_points_per_batch": 8},
-                    "metadata": {"demo_name": "host_dashboard"},
+                    "metadata": {"demo_name": "scan_submission_dashboard"},
                 },
                 "overrides": {},
             }
@@ -163,22 +163,22 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
             axis_range={"start": 0.0, "stop": 1.0, "num_points": 11},
         )
 
-        params = {"host_scan": {"old": True}, "overrides": {"old": []}}
+        params = {"scan_submission": {"old": True}, "overrides": {"old": []}}
         backend.apply_submission_state(params, state)
 
         self.assertEqual(params["overrides"], {})
-        self.assertEqual(params["host_scan"]["mode"], {"type": "grid"})
+        self.assertEqual(params["scan_submission"]["mode"], {"type": "grid"})
         self.assertEqual(
-            params["host_scan"]["execution"],
+            params["scan_submission"]["execution"],
             {"max_points_per_batch": 8},
         )
         self.assertEqual(
-            params["host_scan"]["metadata"],
-            {"demo_name": "host_dashboard"},
+            params["scan_submission"]["metadata"],
+            {"demo_name": "scan_submission_dashboard"},
         )
-        self.assertEqual(len(params["host_scan"]["entries"]), 2)
+        self.assertEqual(len(params["scan_submission"]["entries"]), 2)
         by_fqn = {
-            entry["target"]["fqn"]: entry for entry in params["host_scan"]["entries"]
+            entry["target"]["fqn"]: entry for entry in params["scan_submission"]["entries"]
         }
         self.assertEqual(by_fqn["frag.y"]["mode"], {"type": "fixed", "value": 3.0})
         self.assertEqual(
@@ -192,10 +192,10 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
             },
         )
 
-    def test_host_backend_accepts_root_parameter_path(self):
-        backend = HostSubmissionBackend(
+    def test_scan_submission_backend_accepts_root_parameter_path(self):
+        backend = ScanSubmissionBackend(
             {
-                "host_scan": {
+                "scan_submission": {
                     "version": 1,
                     "mode": {"type": "grid"},
                     "entries": [
@@ -213,10 +213,10 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
         )
         self.assertTrue(backend.supports_editing)
 
-    def test_host_backend_accepts_grouped_scan_entries(self):
-        backend = HostSubmissionBackend(
+    def test_scan_submission_backend_accepts_grouped_scan_entries(self):
+        backend = ScanSubmissionBackend(
             {
-                "host_scan": {
+                "scan_submission": {
                     "version": 1,
                     "mode": {"type": "grid"},
                     "entries": [
@@ -241,10 +241,10 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
         )
         self.assertTrue(backend.supports_editing)
 
-    def test_host_backend_accepts_rebind_entries(self):
-        backend = HostSubmissionBackend(
+    def test_scan_submission_backend_accepts_rebind_entries(self):
+        backend = ScanSubmissionBackend(
             {
-                "host_scan": {
+                "scan_submission": {
                     "version": 1,
                     "mode": {"type": "grid"},
                     "entries": [
@@ -262,10 +262,10 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
         )
         self.assertTrue(backend.supports_editing)
 
-    def test_host_backend_accepts_pseudoparam_entries(self):
-        backend = HostSubmissionBackend(
+    def test_scan_submission_backend_accepts_pseudoparam_entries(self):
+        backend = ScanSubmissionBackend(
             {
-                "host_scan": {
+                "scan_submission": {
                     "version": 1,
                     "mode": {"type": "grid"},
                     "entries": [
@@ -288,10 +288,10 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
         )
         self.assertTrue(backend.supports_editing)
 
-    def test_host_backend_accepts_simple_gpo_entries(self):
-        backend = HostSubmissionBackend(
+    def test_scan_submission_backend_accepts_simple_gpo_entries(self):
+        backend = ScanSubmissionBackend(
             {
-                "host_scan": {
+                "scan_submission": {
                     "version": 1,
                     "mode": {
                         "type": "gpo",
@@ -345,10 +345,10 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
             ),
         )
 
-    def test_host_backend_iterates_existing_param_entries(self):
-        backend = HostSubmissionBackend(
+    def test_scan_submission_backend_iterates_existing_param_entries(self):
+        backend = ScanSubmissionBackend(
             {
-                "host_scan": {
+                "scan_submission": {
                     "version": 1,
                     "mode": {"type": "grid"},
                     "entries": [
@@ -374,7 +374,7 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
         entries = list(
             backend.iter_configured_entries(
                 {
-                    "host_scan": {
+                    "scan_submission": {
                         "version": 1,
                         "mode": {"type": "grid"},
                         "entries": [
@@ -400,10 +400,10 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
         )
         self.assertEqual(entries, [("frag.x", "*"), ("frag.y", "*")])
 
-    def test_host_backend_iterates_existing_pseudoparam_entries(self):
-        backend = HostSubmissionBackend(
+    def test_scan_submission_backend_iterates_existing_pseudoparam_entries(self):
+        backend = ScanSubmissionBackend(
             {
-                "host_scan": {
+                "scan_submission": {
                     "version": 1,
                     "mode": {"type": "grid"},
                     "entries": [
@@ -427,7 +427,7 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
         entries = tuple(
             backend.iter_configured_pseudoparams(
                 {
-                    "host_scan": {
+                    "scan_submission": {
                         "version": 1,
                         "mode": {"type": "grid"},
                         "entries": [
@@ -452,10 +452,10 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0].id, "logical_drive")
 
-    def test_host_backend_serialises_scan_group(self):
-        backend = HostSubmissionBackend(
+    def test_scan_submission_backend_serialises_scan_group(self):
+        backend = ScanSubmissionBackend(
             {
-                "host_scan": {
+                "scan_submission": {
                     "version": 1,
                     "mode": {"type": "grid"},
                     "entries": [],
@@ -480,19 +480,19 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
             scan_group="pair",
         )
 
-        params = {"host_scan": {"old": True}, "overrides": {}}
+        params = {"scan_submission": {"old": True}, "overrides": {}}
         backend.apply_submission_state(params, state)
 
         groups = [
             entry["mode"].get("group", None)
-            for entry in params["host_scan"]["entries"]
+            for entry in params["scan_submission"]["entries"]
         ]
         self.assertEqual(groups, ["pair", "pair"])
 
-    def test_host_backend_serialises_rebind_entry(self):
-        backend = HostSubmissionBackend(
+    def test_scan_submission_backend_serialises_rebind_entry(self):
+        backend = ScanSubmissionBackend(
             {
-                "host_scan": {
+                "scan_submission": {
                     "version": 1,
                     "mode": {"type": "grid"},
                     "entries": [],
@@ -514,21 +514,21 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
             expression="x + 0.5",
         )
 
-        params = {"host_scan": {"old": True}, "overrides": {}}
+        params = {"scan_submission": {"old": True}, "overrides": {}}
         backend.apply_submission_state(params, state)
 
         by_fqn = {
-            entry["target"]["fqn"]: entry for entry in params["host_scan"]["entries"]
+            entry["target"]["fqn"]: entry for entry in params["scan_submission"]["entries"]
         }
         self.assertEqual(
             by_fqn["frag.y"]["mode"],
             {"type": "rebind", "expr": "x + 0.5"},
         )
 
-    def test_host_backend_serialises_pseudoparam_entries(self):
-        backend = HostSubmissionBackend(
+    def test_scan_submission_backend_serialises_pseudoparam_entries(self):
+        backend = ScanSubmissionBackend(
             {
-                "host_scan": {
+                "scan_submission": {
                     "version": 1,
                     "mode": {"type": "grid"},
                     "entries": [],
@@ -546,10 +546,10 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
             scan_group="pair",
         )
 
-        params = {"host_scan": {"old": True}, "overrides": {}}
+        params = {"scan_submission": {"old": True}, "overrides": {}}
         backend.apply_submission_state(params, state)
 
-        by_id = {entry["id"]: entry for entry in params["host_scan"]["entries"]}
+        by_id = {entry["id"]: entry for entry in params["scan_submission"]["entries"]}
         self.assertEqual(by_id["offset"]["kind"], "pseudoparam")
         self.assertEqual(by_id["offset"]["mode"], {"type": "fixed", "value": 0.5})
         self.assertEqual(
@@ -564,10 +564,10 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
             },
         )
 
-    def test_host_backend_preserves_existing_param_entry_id(self):
-        backend = HostSubmissionBackend(
+    def test_scan_submission_backend_preserves_existing_param_entry_id(self):
+        backend = ScanSubmissionBackend(
             {
-                "host_scan": {
+                "scan_submission": {
                     "version": 1,
                     "mode": {"type": "grid"},
                     "entries": [
@@ -588,10 +588,10 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
             "detuning_symbol",
         )
 
-    def test_host_backend_derives_unique_default_param_entry_ids(self):
-        backend = HostSubmissionBackend(
+    def test_scan_submission_backend_derives_unique_default_param_entry_ids(self):
+        backend = ScanSubmissionBackend(
             {
-                "host_scan": {
+                "scan_submission": {
                     "version": 1,
                     "mode": {"type": "grid"},
                     "entries": [],
@@ -614,10 +614,10 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
         self.assertEqual(child_id, "child_detuning")
         self.assertNotEqual(root_id, child_id)
 
-    def test_host_backend_prefers_short_name_for_unambiguous_parameter(self):
-        backend = HostSubmissionBackend(
+    def test_scan_submission_backend_prefers_short_name_for_unambiguous_parameter(self):
+        backend = ScanSubmissionBackend(
             {
-                "host_scan": {
+                "scan_submission": {
                     "version": 1,
                     "mode": {"type": "grid"},
                     "entries": [],
@@ -640,15 +640,15 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
             "logical_drive",
         )
 
-    def test_host_backend_serialises_gpo_mode_and_dimensions(self):
-        backend = HostSubmissionBackend(
+    def test_scan_submission_backend_serialises_gpo_mode_and_dimensions(self):
+        backend = ScanSubmissionBackend(
             {
-                "host_scan": {
+                "scan_submission": {
                     "version": 1,
                     "mode": {"type": "grid"},
                     "entries": [],
                     "execution": {"max_points_per_batch": 8},
-                    "metadata": {"demo_name": "host_dashboard"},
+                    "metadata": {"demo_name": "scan_submission_dashboard"},
                 }
             }
         )
@@ -678,12 +678,12 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
             upper=2.0,
         )
 
-        params = {"host_scan": {"old": True}, "overrides": {"old": []}}
+        params = {"scan_submission": {"old": True}, "overrides": {"old": []}}
         backend.apply_submission_state(params, state)
 
         self.assertEqual(params["overrides"], {})
         self.assertEqual(
-            params["host_scan"]["mode"],
+            params["scan_submission"]["mode"],
             {
                 "type": "gpo",
                 "objective": {
@@ -702,7 +702,7 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
         )
         by_target = {
             entry.get("target", {}).get("fqn", entry["id"]): entry
-            for entry in params["host_scan"]["entries"]
+            for entry in params["scan_submission"]["entries"]
         }
         self.assertEqual(
             by_target["frag.detuning"]["mode"],

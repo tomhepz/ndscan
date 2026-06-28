@@ -24,9 +24,9 @@ from typing import Any
 import numpy as np
 
 from ndscan.results.scan_site_reader import (
-    HostRuntimeSite,
-    HostRuntimeSnapshot,
-    read_host_runtime_snapshot,
+    ScanSiteData,
+    ScanSiteSnapshot,
+    read_scan_site_snapshot,
 )
 from ndscan.results.series import series_slices_along_axis
 
@@ -40,11 +40,11 @@ __all__ = [
 class LabNdscanRun:
     """Small lab-facing wrapper around one prepared-runtime snapshot."""
 
-    snapshot: HostRuntimeSnapshot
+    snapshot: ScanSiteSnapshot
 
     @classmethod
     def open(cls, path: str | Path) -> "LabNdscanRun":
-        return cls(read_host_runtime_snapshot(path))
+        return cls(read_scan_site_snapshot(path))
 
     def site(self, path: tuple[str, ...] = ()) -> "LabNdscanSite":
         return LabNdscanSite(self.snapshot.get_site(path))
@@ -60,7 +60,7 @@ class LabNdscanRun:
 class LabNdscanSite:
     """Small lab-facing wrapper around one offline site."""
 
-    site: HostRuntimeSite
+    site: ScanSiteData
 
     @property
     def path(self) -> tuple[str, ...]:

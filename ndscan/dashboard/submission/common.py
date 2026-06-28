@@ -4,7 +4,7 @@ The dashboard should not know runtime semantics directly.  It should edit a
 submission-shaped model and let a backend module serialize that model into the transport
 dict carried through ARTIQ submission arguments.
 
-The legacy ndscan scan schema and the new host-runtime schema are intentionally treated
+The legacy ndscan scan schema and the new prepared-runtime schema are intentionally treated
 as separate backends.  That keeps the old path contained here, so removing it later is
 mostly a matter of deleting this package and its editor wiring rather than untangling
 legacy conditionals from the runtime.

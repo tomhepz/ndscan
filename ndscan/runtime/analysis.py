@@ -1,7 +1,7 @@
-"""Internal analysis helpers for the host runtime.
+"""Internal analysis helpers for the prepared runtime.
 
-The new host runtime already had a clean execution loop, but the analysis-related
-logic had grown into a sizeable cluster inside ``host_runtime.py``:
+The new prepared runtime already had a clean execution loop, but the analysis-related
+logic had grown into a sizeable cluster inside `the old runtime monolith`:
 
 - selecting the applicable default analyses,
 - building metadata for online/final analysis outputs,
@@ -38,7 +38,7 @@ class _TemporaryAnalysisResultSinks:
     Default analyses are declared in terms of ordinary ``ResultChannel`` instances.
     Running them through temporary ``LastValueSink`` objects keeps analysis execution
     separate from dataset publication: analyses push to channels exactly as they would
-    in the legacy runtime, while the host runtime decides afterwards which values
+    in the legacy runtime, while the prepared runtime decides afterwards which values
     become final results or online feedback.
     """
 
@@ -62,8 +62,8 @@ class _TemporaryAnalysisResultSinks:
         self._temporary_sinks.clear()
 
 
-class HostScanAnalysisEngine:
-    """Selected default analyses for one concrete host-runtime scan program.
+class ScanAnalysisEngine:
+    """Selected default analyses for one concrete prepared-runtime scan program.
 
     The fragment-side analysis API naturally splits into two phases:
 
@@ -73,7 +73,7 @@ class HostScanAnalysisEngine:
       (online) or after the final point (final analysis).
 
     This helper keeps those phases together without mixing them into the main point
-    execution loop in ``host_runtime.py``.
+    execution loop in `the old runtime monolith`.
     """
 
     def __init__(
@@ -96,10 +96,10 @@ class HostScanAnalysisEngine:
         fragment: ExpFragment,
         axes: Sequence[Any],
         channels: Sequence[Any],
-    ) -> "HostScanAnalysisEngine":
+    ) -> "ScanAnalysisEngine":
         """Build an analysis engine for one concrete fragment/request pair.
 
-        ``axes`` and ``channels`` are the host-runtime bound axis/channel objects. This
+        ``axes`` and ``channels`` are the prepared-runtime bound axis/channel objects. This
         module keeps the dependency surface narrow by only relying on the attributes it
         needs rather than importing those runtime-only dataclasses directly.
         """

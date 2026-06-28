@@ -6,7 +6,7 @@ from collections.abc import Iterable, Mapping
 
 import numpy as np
 
-from .scan_site_reader import HostRuntimeSite
+from .scan_site_reader import ScanSiteData
 
 __all__ = [
     "series_slices_along_axis",
@@ -14,7 +14,7 @@ __all__ = [
 
 
 def series_slices_along_axis(
-    site: HostRuntimeSite,
+    site: ScanSiteData,
     path: str,
     *,
     axis: int = 0,

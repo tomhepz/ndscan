@@ -11,21 +11,21 @@ from artiq.language import units
 from mock_environment import ExpFragmentCase
 
 import examples._roi_condition_stats as roi_condition_stats
-import examples.host_runtime_results_api_demo as results_api_demo
-import examples.host_runtime_three_image_rearrangement as three_image_rearrangement
+import examples.prepared_scan_results_api_demo as results_api_demo
+import examples.prepared_scan_three_image_rearrangement as three_image_rearrangement
 import examples.lab_offline_results_helpers as lab_results_helpers
 import examples.plot_three_image_rearrangement_quick_analysis as three_image_quick
 import examples.plot_three_image_rearrangement_snapshot as three_image_plot
 from ndscan.define.fragment import ExpFragment
 from ndscan.define.parameters import FloatParam
 from ndscan.define.result_channels import FloatChannel
-from ndscan.results.scan_site_reader import read_host_runtime_snapshot
+from ndscan.results.scan_site_reader import read_scan_site_snapshot
 from ndscan.results.series import series_slices_along_axis
 from ndscan.runtime.api import PreparedScan, prepare_child_scan
 from ndscan.scan.mapping import ParameterMapping, ScanVariable
 from ndscan.scan.point_policy import BasePoint, ExplicitPointPolicy
 from ndscan.scan.request import ScanRequest
-from ndscan.submission.host_scan_schema import compile_host_scan_schema
+from ndscan.submission.scan_submission_schema import compile_scan_submission_schema
 
 
 def _execute_and_inspect(scan):
@@ -144,9 +144,9 @@ class DeepNestedParent(ExpFragment):
         self.root_total.push(sum(child_result.values[self.child.child_total]))
 
 
-def _load_plot_host_runtime_snapshot_helpers():
-    module_path = Path(__file__).resolve().parents[1] / "examples" / "plot_host_runtime_snapshot.py"
-    spec = importlib.util.spec_from_file_location("_plot_host_runtime_snapshot", module_path)
+def _load_plot_prepared_scan_snapshot_helpers():
+    module_path = Path(__file__).resolve().parents[1] / "examples" / "plot_prepared_scan_snapshot.py"
+    spec = importlib.util.spec_from_file_location("_plot_prepared_scan_snapshot", module_path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -172,7 +172,7 @@ class ScanSiteReaderCase(ExpFragmentCase):
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self._write_snapshot(fragment, tmp.name, preview_complete=False)
-            snapshot = read_host_runtime_snapshot(tmp.name)
+            snapshot = read_scan_site_snapshot(tmp.name)
             lab_run = lab_results_helpers.LabNdscanRun.open(tmp.name)
 
         site = snapshot.get_site(())
@@ -245,7 +245,7 @@ class ScanSiteReaderCase(ExpFragmentCase):
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self._write_snapshot(fragment, tmp.name)
-            snapshot = read_host_runtime_snapshot(tmp.name)
+            snapshot = read_scan_site_snapshot(tmp.name)
 
         site = snapshot.get_site(())
         with self.assertRaises(KeyError) as ctx:
@@ -270,7 +270,7 @@ class ScanSiteReaderCase(ExpFragmentCase):
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self._write_snapshot(fragment, tmp.name)
-            snapshot = read_host_runtime_snapshot(tmp.name)
+            snapshot = read_scan_site_snapshot(tmp.name)
 
         site = snapshot.get_site(())
         self.assertEqual(list(site.raw_points["pseudoparam_0"]), [0.0, 1.0, 2.0])
@@ -279,7 +279,7 @@ class ScanSiteReaderCase(ExpFragmentCase):
 
     def test_reads_fixed_pseudoparams_from_schema_compiled_scan(self):
         fragment = self.create(PhysicalDriveFragment)
-        request, overrides = compile_host_scan_schema(
+        request, overrides = compile_scan_submission_schema(
             fragment,
             {
                 "version": 1,
@@ -324,7 +324,7 @@ class ScanSiteReaderCase(ExpFragmentCase):
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self._write_snapshot(fragment, tmp.name)
-            snapshot = read_host_runtime_snapshot(tmp.name)
+            snapshot = read_scan_site_snapshot(tmp.name)
 
         site = snapshot.get_site(())
         self.assertEqual(
@@ -353,7 +353,7 @@ class ScanSiteReaderCase(ExpFragmentCase):
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self._write_snapshot(parent, tmp.name)
-            snapshot = read_host_runtime_snapshot(tmp.name)
+            snapshot = read_scan_site_snapshot(tmp.name)
 
         self.assertIn((), snapshot.sites)
         self.assertIn(("child_scan",), snapshot.sites)
@@ -375,7 +375,7 @@ class ScanSiteReaderCase(ExpFragmentCase):
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self._write_snapshot(fragment, tmp.name)
-            snapshot = read_host_runtime_snapshot(tmp.name)
+            snapshot = read_scan_site_snapshot(tmp.name)
 
         site = snapshot.get_site(())
         self.assertEqual(
@@ -394,7 +394,7 @@ class ScanSiteReaderCase(ExpFragmentCase):
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self._write_snapshot(parent, tmp.name)
-            snapshot = read_host_runtime_snapshot(tmp.name)
+            snapshot = read_scan_site_snapshot(tmp.name)
 
         self.assertEqual([site.path for site in snapshot.child_sites(())], [("child_scan",)])
 
@@ -421,9 +421,9 @@ class ScanSiteReaderCase(ExpFragmentCase):
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self._write_snapshot(root, tmp.name)
-            snapshot = read_host_runtime_snapshot(tmp.name)
+            snapshot = read_scan_site_snapshot(tmp.name)
 
-        plot_helpers = _load_plot_host_runtime_snapshot_helpers()
+        plot_helpers = _load_plot_prepared_scan_snapshot_helpers()
         selection_chain = [((), 0)]
         child_panels = plot_helpers._build_visible_site_panels(snapshot, selection_chain)
         self.assertEqual([panel.site.path for panel in child_panels], [("child_scan",)])
@@ -464,7 +464,7 @@ class ScanSiteReaderCase(ExpFragmentCase):
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self._write_snapshot(fragment, tmp.name)
-            snapshot = read_host_runtime_snapshot(tmp.name)
+            snapshot = read_scan_site_snapshot(tmp.name)
 
         site = snapshot.get_site(("repeat_scan",))
         blob = site.require_metadata_blob(three_image_rearrangement.IMAGING_READOUT_BLOB_NAME)
@@ -522,7 +522,7 @@ class ScanSiteReaderCase(ExpFragmentCase):
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self._write_snapshot(fragment, tmp.name)
-            snapshot = read_host_runtime_snapshot(tmp.name)
+            snapshot = read_scan_site_snapshot(tmp.name)
 
         site = snapshot.get_site(("repeat_scan",))
         readout = three_image_plot.ThreeImageReadout.from_site(
@@ -564,7 +564,7 @@ class ScanSiteReaderCase(ExpFragmentCase):
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self._write_snapshot(fragment, tmp.name)
-            snapshot = read_host_runtime_snapshot(tmp.name)
+            snapshot = read_scan_site_snapshot(tmp.name)
 
         site = snapshot.get_site(())
         descriptions = {
@@ -615,7 +615,7 @@ class ScanSiteReaderCase(ExpFragmentCase):
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self._write_snapshot(fragment, tmp.name)
-            snapshot = read_host_runtime_snapshot(tmp.name)
+            snapshot = read_scan_site_snapshot(tmp.name)
 
         site = snapshot.get_site(())
         descriptions = {
@@ -687,7 +687,7 @@ class ScanSiteReaderCase(ExpFragmentCase):
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self._write_snapshot(fragment, tmp.name)
-            snapshot = read_host_runtime_snapshot(tmp.name)
+            snapshot = read_scan_site_snapshot(tmp.name)
 
         root_site = snapshot.get_site(())
         repeat_site = snapshot.get_site(("repeat_scan",))
@@ -779,7 +779,7 @@ class ScanSiteReaderCase(ExpFragmentCase):
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self._write_snapshot(fragment, tmp.name)
-            snapshot = read_host_runtime_snapshot(tmp.name)
+            snapshot = read_scan_site_snapshot(tmp.name)
 
         root_site = snapshot.get_site(())
         repeat_site = snapshot.get_site(("repeat_scan",))
@@ -877,7 +877,7 @@ class ScanSiteReaderCase(ExpFragmentCase):
 
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self._write_snapshot(fragment, tmp.name)
-            snapshot = read_host_runtime_snapshot(tmp.name)
+            snapshot = read_scan_site_snapshot(tmp.name)
 
         root_site = snapshot.get_site(())
         repeat_site = snapshot.get_site(("repeat_scan",))

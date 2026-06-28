@@ -55,9 +55,9 @@ from ..scan.mapping import *
 from ..scan.point_policy import *
 from ..scan.request import *
 from ..submission import expression as submission_expression
-from ..submission import host_scan_schema as submission_host_scan_schema
+from ..submission import scan_submission_schema as scan_submission_schema_module
 from ..submission.expression import *
-from ..submission.host_scan_schema import *
+from ..submission.scan_submission_schema import *
 from .default_analysis import *
 from .entry_point import *
 from .fragment import *
@@ -80,7 +80,7 @@ __all__.extend(scan_request.__all__)
 __all__.extend(define_result_channels.__all__)
 __all__.extend(scan_mapping.__all__)
 __all__.extend(submission_expression.__all__)
-__all__.extend(submission_host_scan_schema.__all__)
+__all__.extend(scan_submission_schema_module.__all__)
 __all__.extend(legacy_scan_generator.__all__)
 __all__.extend(legacy_scan_runner.__all__)
 __all__.extend(legacy_subscan.__all__)

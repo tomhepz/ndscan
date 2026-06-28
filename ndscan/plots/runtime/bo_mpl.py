@@ -10,7 +10,7 @@ root-level dashboard showing:
 - and the current surrogate optimum.
 
 This module keeps that BO-specific rendering separate from the generic plot widgets.
-It intentionally works from persisted host-runtime site data rather than from live GP
+It intentionally works from persisted prepared-runtime site data rather than from live GP
 objects, so the viewer only needs the normal runtime snapshot shape.
 """
 
@@ -24,7 +24,7 @@ import numpy as np
 import torch
 
 from ..._qt import QtWidgets
-from ...results.scan_site_reader import HostRuntimeSite
+from ...results.scan_site_reader import ScanSiteData
 
 try:
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -43,7 +43,7 @@ SOURCE_COLORS = {
 }
 
 
-def site_supports_bo_corner_plot(site: HostRuntimeSite) -> bool:
+def site_supports_bo_corner_plot(site: ScanSiteData) -> bool:
     """Return whether a site looks like a root-level NUBO BO site."""
 
     point_policy = site.metadata.get("scan.point_policy")
@@ -67,18 +67,18 @@ def _sorted_keys(keys: Sequence[str]) -> list[str]:
     return sorted(keys, key=key_index)
 
 
-def _pseudoparam_label(site: HostRuntimeSite, key: str) -> str:
+def _pseudoparam_label(site: ScanSiteData, key: str) -> str:
     schema = site.pseudoparams[key]["variable"]
     return schema.get("description") or schema.get("name") or key
 
 
-def _parameter_label(site: HostRuntimeSite, key: str) -> str:
+def _parameter_label(site: ScanSiteData, key: str) -> str:
     schema = site.parameters[key]["param"]
     return schema.get("description") or schema["fqn"].split(".")[-1]
 
 
 def _choose_bo_input_keys(
-    site: HostRuntimeSite,
+    site: ScanSiteData,
     dims: int,
 ) -> tuple[str, list[str], list[str]]:
     pseudoparam_keys = _sorted_keys(site.pseudoparams.keys())
@@ -116,7 +116,7 @@ def _choose_bo_input_keys(
     )
 
 
-def decode_bo_site(site: HostRuntimeSite) -> dict[str, object]:
+def decode_bo_site(site: ScanSiteData) -> dict[str, object]:
     """Decode the persisted point streams and metadata needed for BO plotting."""
 
     point_policy = site.metadata.get("scan.point_policy")
@@ -274,7 +274,7 @@ def _draw_message_figure(
 
 def render_bo_site_to_figure(
     figure: Figure | None,
-    site: HostRuntimeSite,
+    site: ScanSiteData,
     *,
     grid_points: int = 60,
     fit_steps: int | None = None,
@@ -350,7 +350,7 @@ def render_bo_site_to_figure(
 def _plot_gp_corner(
     *,
     figure: Figure | None,
-    site: HostRuntimeSite,
+    site: ScanSiteData,
     gp,
     bounds: torch.Tensor,
     x_obs: np.ndarray,
@@ -552,7 +552,7 @@ class BoCornerPlotWidget(QtWidgets.QWidget):
             self._message.setText("matplotlib is not installed")
             self._message.show()
 
-    def render_site(self, site: HostRuntimeSite) -> str:
+    def render_site(self, site: ScanSiteData) -> str:
         """Redraw the BO dashboard for one runtime site."""
 
         if self._figure is None or self._canvas is None:

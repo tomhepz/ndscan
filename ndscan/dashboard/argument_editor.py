@@ -15,12 +15,12 @@ from ..utils import (
     NoAxesMode,
     shorten_to_unambiguous_suffixes,
 )
-from .host_scan_options import HostSubmissionModeSettings
-from .override_entry import HostOverrideEntry, HostPseudoparamEntry, OverrideEntry
+from .scan_submission_options import ScanSubmissionModeSettings
+from .override_entry import ScanOverrideEntry, ScanPseudoparamEntry, OverrideEntry
 from .param_tree_dialog import OverrideProvider, OverrideStatus, ParamTreeDialog
 from .scan_options import list_scan_option_types
 from .submission import (
-    HostSubmissionBackend,
+    ScanSubmissionBackend,
     LegacyScanOptionsState,
     select_submission_backend,
 )
@@ -277,8 +277,8 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
         self._override_items = dict()
         self._pseudoparam_items = dict()
         self._next_pseudoparam_serial = 1
-        self._host_submission_settings = None
-        self._host_submission_settings_item = None
+        self._scan_submission_settings = None
+        self._scan_submission_settings_item = None
 
         self._add_override_icon = load_icon_cached("list-add-32.png")
         self._open_param_tree_icon = load_icon_cached("view-list-tree-32.png")
@@ -327,13 +327,13 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
                     )
                 )
             else:
-                if isinstance(self._submission_backend, HostSubmissionBackend):
-                    self._append_host_submission_settings()
-                    self._append_host_pseudoparam_section()
+                if isinstance(self._submission_backend, ScanSubmissionBackend):
+                    self._append_scan_submission_settings()
+                    self._append_scan_pseudoparam_section()
                     for entry in self._submission_backend.iter_configured_pseudoparams(
                         ndscan_params
                     ):
-                        self._append_host_pseudoparam_item(entry=entry)
+                        self._append_scan_pseudoparam_item(entry=entry)
 
                 for fqn, path in ndscan_params["always_shown"]:
                     self._append_param_items(fqn, path, True)
@@ -492,7 +492,7 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
         label.setFont(font)
         label_container.addWidget(label, 0, 0)
 
-        if isinstance(self._submission_backend, HostSubmissionBackend):
+        if isinstance(self._submission_backend, ScanSubmissionBackend):
             symbol_label = QtWidgets.QLabel(
                 f"id: {self._submission_backend.symbol_name_for_target(fqn=fqn, path=path)}"
             )
@@ -503,7 +503,7 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
             symbol_color = self.palette().mid().color().darker(175)
             symbol_label.setStyleSheet(f"color: {symbol_color.name()};")
             symbol_label.setToolTip(
-                "Stable symbol id used by host-runtime rebind expressions."
+                "Stable symbol id used by prepared-runtime rebind expressions."
             )
             label_container.addWidget(symbol_label, 1, 0)
 
@@ -517,7 +517,7 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
         # extra horizontal margin was just determined visually and might be brittle
         # across platforms/…; a proper fix would be desirable.
         min_width = label.sizeHint().width()
-        if isinstance(self._submission_backend, HostSubmissionBackend):
+        if isinstance(self._submission_backend, ScanSubmissionBackend):
             min_width = max(min_width, symbol_label.sizeHint().width())
         label_container.setMinimumSize(QtCore.QSize(min_width + 28, 0))
 
@@ -560,38 +560,38 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
 
         return id_item, main_item
 
-    def _append_host_pseudoparam_section(self):
-        if hasattr(self, "_host_pseudoparam_group"):
+    def _append_scan_pseudoparam_section(self):
+        if hasattr(self, "_scan_pseudoparam_group"):
             return
 
         group = self._make_group_header_item("Pseudoparameters")
         self.addTopLevelItem(group)
         group.setExpanded(True)
         self._groups["Pseudoparameters"] = group
-        self._host_pseudoparam_group = group
+        self._scan_pseudoparam_group = group
 
         prompt_item = QtWidgets.QTreeWidgetItem()
         group.addChild(prompt_item)
-        self._host_pseudoparam_prompt_item = prompt_item
+        self._scan_pseudoparam_prompt_item = prompt_item
 
         prompt = LayoutWidget()
         prompt.layout.setContentsMargins(3, 3, 3, 3)
         add_button = QtWidgets.QPushButton("Add pseudoparam")
         add_button.setIcon(self._add_override_icon)
-        add_button.clicked.connect(lambda *_: self._append_host_pseudoparam_item())
+        add_button.clicked.connect(lambda *_: self._append_scan_pseudoparam_item())
         prompt.addWidget(add_button)
         prompt.layout.setColumnStretch(1, 1)
         self.setItemWidget(prompt_item, 1, prompt)
 
-    def _append_host_pseudoparam_item(self, entry=None):
+    def _append_scan_pseudoparam_item(self, entry=None):
         serial = self._next_pseudoparam_serial
         self._next_pseudoparam_serial += 1
 
         widget_item = QtWidgets.QTreeWidgetItem()
-        insert_at = self._host_pseudoparam_group.indexOfChild(
-            self._host_pseudoparam_prompt_item
+        insert_at = self._scan_pseudoparam_group.indexOfChild(
+            self._scan_pseudoparam_prompt_item
         )
-        self._host_pseudoparam_group.insertChild(insert_at, widget_item)
+        self._scan_pseudoparam_group.insertChild(insert_at, widget_item)
 
         label_container = LayoutWidget()
         label_container.layout.setContentsMargins(3, 1, 6, 6)
@@ -602,12 +602,12 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
         label_container.addWidget(label)
         self.setItemWidget(widget_item, 0, label_container)
 
-        entry_widget = HostPseudoparamEntry(
-            entry.id if entry is not None else self._default_host_pseudoparam_id()
+        entry_widget = ScanPseudoparamEntry(
+            entry.id if entry is not None else self._default_scan_pseudoparam_id()
         )
-        if self._host_submission_settings is not None:
+        if self._scan_submission_settings is not None:
             entry_widget.set_submission_mode(
-                self._host_submission_settings.submission_mode()
+                self._scan_submission_settings.submission_mode()
             )
         if entry is not None:
             entry_widget.read_from_entry(entry)
@@ -621,7 +621,7 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
         remove = QtWidgets.QToolButton()
         remove.setIcon(self._remove_override_icon)
         remove.setToolTip("Remove this pseudoparameter")
-        remove.clicked.connect(partial(self._remove_host_pseudoparam, serial))
+        remove.clicked.connect(partial(self._remove_scan_pseudoparam, serial))
         buttons.addWidget(remove, col=0)
         self.setItemWidget(widget_item, 2, buttons)
         self._pseudoparam_items[serial] = widget_item
@@ -629,7 +629,7 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
         if entry is None:
             self._set_save_timer()
 
-    def _default_host_pseudoparam_id(self) -> str:
+    def _default_scan_pseudoparam_id(self) -> str:
         existing = {entry.identifier() for entry in self._pseudoparam_entries.values()}
         index = 1
         while True:
@@ -638,10 +638,10 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
                 return candidate
             index += 1
 
-    def _remove_host_pseudoparam(self, serial: int):
+    def _remove_scan_pseudoparam(self, serial: int):
         item = self._pseudoparam_items.pop(serial)
-        idx = self._host_pseudoparam_group.indexOfChild(item)
-        self._host_pseudoparam_group.takeChild(idx)
+        idx = self._scan_pseudoparam_group.indexOfChild(item)
+        self._scan_pseudoparam_group.takeChild(idx)
         del self._pseudoparam_entries[serial]
         self._set_save_timer()
 
@@ -825,50 +825,50 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
         self._groups[name] = group
         return group
 
-    def _append_host_submission_settings(self):
-        if self._host_submission_settings is not None:
+    def _append_scan_submission_settings(self):
+        if self._scan_submission_settings is not None:
             return
 
-        group = self._make_group_header_item("Host scan settings")
+        group = self._make_group_header_item("Scan submission settings")
         self.addTopLevelItem(group)
         group.setExpanded(True)
-        self._groups["Host scan settings"] = group
+        self._groups["Scan submission settings"] = group
 
         item = QtWidgets.QTreeWidgetItem()
         group.addChild(item)
 
-        settings = HostSubmissionModeSettings(
+        settings = ScanSubmissionModeSettings(
             initial_state=self._submission_backend.initial_mode_state(),
             channels=self._submission_backend.available_result_channels(),
         )
         settings.value_changed.connect(self._set_save_timer)
-        settings.mode_changed.connect(self._host_submission_mode_changed)
-        self._host_submission_settings = settings
-        self._host_submission_settings_item = item
+        settings.mode_changed.connect(self._scan_submission_mode_changed)
+        self._scan_submission_settings = settings
+        self._scan_submission_settings_item = item
         self.setItemWidget(item, 1, settings)
-        self._refresh_host_submission_settings_geometry()
+        self._refresh_scan_submission_settings_geometry()
 
-    def _host_submission_mode_changed(self, mode: str) -> None:
+    def _scan_submission_mode_changed(self, mode: str) -> None:
         for entry in self._param_entries.values():
             if hasattr(entry, "set_submission_mode"):
                 entry.set_submission_mode(mode)
         for entry in self._pseudoparam_entries.values():
             entry.set_submission_mode(mode)
-        self._refresh_host_submission_settings_geometry()
-        QtCore.QTimer.singleShot(0, self._refresh_host_submission_settings_geometry)
+        self._refresh_scan_submission_settings_geometry()
+        QtCore.QTimer.singleShot(0, self._refresh_scan_submission_settings_geometry)
 
-    def _refresh_host_submission_settings_geometry(self):
+    def _refresh_scan_submission_settings_geometry(self):
         if (
-            self._host_submission_settings is None
-            or self._host_submission_settings_item is None
+            self._scan_submission_settings is None
+            or self._scan_submission_settings_item is None
         ):
             return
-        layout = self._host_submission_settings.layout()
+        layout = self._scan_submission_settings.layout()
         if layout is not None:
             layout.activate()
-        self._host_submission_settings.adjustSize()
-        self._host_submission_settings_item.setSizeHint(
-            1, self._host_submission_settings.sizeHint()
+        self._scan_submission_settings.adjustSize()
+        self._scan_submission_settings_item.setSizeHint(
+            1, self._scan_submission_settings.sizeHint()
         )
         self.scheduleDelayedItemsLayout()
         self.updateGeometries()
@@ -970,8 +970,8 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
             return
 
         submission_state = self._submission_backend.new_submission_state()
-        if self._host_submission_settings is not None:
-            self._host_submission_settings.write_to_submission(submission_state)
+        if self._scan_submission_settings is not None:
+            self._scan_submission_settings.write_to_submission(submission_state)
         for item in self._pseudoparam_entries.values():
             item.write_to_submission(submission_state)
         for item in self._param_entries.values():
@@ -989,15 +989,15 @@ class ArgumentEditor(QtWidgets.QTreeWidget, OverrideProvider):
         is_scannable = self._allow_row_scans and schema.get("spec", {}).get(
             "is_scannable", True
         )
-        if isinstance(self._submission_backend, HostSubmissionBackend):
-            return HostOverrideEntry(
+        if isinstance(self._submission_backend, ScanSubmissionBackend):
+            return ScanOverrideEntry(
                 schema,
                 path,
                 is_scannable=is_scannable,
                 backend=self._submission_backend,
                 submission_mode=(
-                    self._host_submission_settings.submission_mode()
-                    if self._host_submission_settings is not None
+                    self._scan_submission_settings.submission_mode()
+                    if self._scan_submission_settings is not None
                     else self._submission_backend.initial_mode_state()["mode_type"]
                 ),
             )

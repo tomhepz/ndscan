@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .common import DashboardSubmissionBackend, SubmittedOverride, SubmittedScanAxis
-from .host import HostSubmissionBackend
+from .scan import ScanSubmissionBackend
 from .legacy import (
     LegacyScanOptionsState,
     LegacySubmissionBackend,
@@ -20,7 +20,7 @@ __all__ = [
     "LegacyScanOptionsState",
     "LegacySubmissionState",
     "LegacySubmissionBackend",
-    "HostSubmissionBackend",
+    "ScanSubmissionBackend",
     "select_submission_backend",
 ]
 
@@ -28,6 +28,6 @@ __all__ = [
 def select_submission_backend(params: Mapping[str, Any]) -> DashboardSubmissionBackend:
     """Select the dashboard submission backend from the stored transport payload."""
 
-    if "host_scan" in params:
-        return HostSubmissionBackend(params)
+    if "scan_submission" in params:
+        return ScanSubmissionBackend(params)
     return LegacySubmissionBackend()

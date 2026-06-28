@@ -24,7 +24,7 @@ from ..define.fragment import ExpFragment, RestartKernelTransitoryError, Transit
 from ..define.result_channels import ResultChannel, SingleUseSink
 from ..define.utils import is_kernel
 from ..scan.request import ScanRequest
-from .analysis import HostScanAnalysisEngine
+from .analysis import ScanAnalysisEngine
 from .context import (
     ActiveScanContext,
     PreviewCoordinator,
@@ -41,7 +41,7 @@ from .program import (
     BoundResultChannel,
     BoundScanAxis,
     BoundScanParameter,
-    HostScanProgram,
+    ScanProgram,
     PointObservation,
     ScanInspection,
     _BoundParameterMapping,
@@ -75,9 +75,9 @@ def _execute_scan_request_inspection(
         fragment.init_params(overrides={} if overrides is None else overrides)
     varying_param_bindings = _install_varying_parameter_stores(fragment, request)
     try:
-        builder = HostScanProgramBuilder(owner)
+        builder = ScanProgramBuilder(owner)
         program = builder.build(fragment, request)
-        runner = HostScanProgramRunner(
+        runner = ScanProgramRunner(
             owner,
             program,
             run_context=run_context,
@@ -221,7 +221,7 @@ class _BatchExecutionResult:
 
 
 class HostExecutor:
-    """Execute already-resolved points against a fragment from the host runtime."""
+    """Execute already-resolved points against a fragment from the prepared runtime."""
 
     def __init__(
         self,
@@ -663,13 +663,13 @@ class _PointInvocationRunner(HasEnvironment):
             self.fragment.device_cleanup()
 
 
-class HostScanProgramBuilder:
+class ScanProgramBuilder:
     """Bind a code-first ``ScanRequest`` to a concrete fragment instance."""
 
     def __init__(self, owner: HasEnvironment):
         self._owner = owner
 
-    def build(self, fragment: ExpFragment, request: ScanRequest) -> HostScanProgram:
+    def build(self, fragment: ExpFragment, request: ScanRequest) -> ScanProgram:
         if request.point_policy.axis_count != len(request.axes):
             raise ValueError(
                 "Point policy dimensionality does not match the number of requested axes"
@@ -713,8 +713,8 @@ class HostScanProgramBuilder:
                 "with no mapped parameter targets are not yet supported"
             )
         site_writer = ScanSiteDatasetWriter(self._owner, request.site)
-        analysis_engine = HostScanAnalysisEngine.build(fragment, axes, channels)
-        return HostScanProgram(
+        analysis_engine = ScanAnalysisEngine.build(fragment, axes, channels)
+        return ScanProgram(
             fragment,
             request,
             axes,
@@ -726,13 +726,13 @@ class HostScanProgramBuilder:
         )
 
 
-class HostScanProgramRunner:
-    """Own the host-only scan loop."""
+class ScanProgramRunner:
+    """Own the prepared scan loop."""
 
     def __init__(
         self,
         owner: HasEnvironment,
-        program: HostScanProgram,
+        program: ScanProgram,
         *,
         run_context: RunContext | None,
         max_rtio_underflow_retries: int,

@@ -317,7 +317,7 @@ class OptimizerBackend(Protocol):
 ```
 
 **5) Runner Changes**
-Do not break current runner immediately. Add a new host runner first:
+Do not break current runner immediately. Add a new prepared runner first:
 
 - New `ProgramScanRunner` host-only.
 - Keep existing `ScanRunner` + `KernelScanRunner` unchanged for legacy grid path.

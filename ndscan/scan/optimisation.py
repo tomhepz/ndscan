@@ -1,6 +1,6 @@
-"""Optional optimiser backends for host-runtime ask/tell point policies.
+"""Optional optimiser backends for prepared-runtime ask/tell point policies.
 
-The new host runtime already has the right control flow for model-based optimisation:
+The new prepared runtime already has the right control flow for model-based optimisation:
 
 - a point policy asks for the next batch of points,
 - the runtime executes and persists that batch,
@@ -807,7 +807,7 @@ class NuboBatchBayesianOptimisationBackend:
     """Ask/tell Bayesian optimisation backend using NUBO + GPyTorch.
 
     The backend is deliberately batch-oriented. One call to ``suggest(...)`` returns
-    one logical optimisation batch. The host runtime can then execute that batch,
+    one logical optimisation batch. The prepared runtime can then execute that batch,
     publish it, run online analysis, and finally feed the completed observations back
     through ``observe(...)``.
 

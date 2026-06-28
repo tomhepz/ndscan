@@ -37,9 +37,9 @@ These todo items are effectively done:
 
 What exists now:
 
-- `ndscan.results.read_host_runtime_snapshot(...)`
-- `HostRuntimeSnapshot`
-- `HostRuntimeSite`
+- `ndscan.results.read_scan_site_snapshot(...)`
+- `ScanSiteSnapshot`
+- `ScanSiteData`
 - `site.available_series_paths()`
 - `site.describe_series()`
 - `site.describe_plot_choices()`

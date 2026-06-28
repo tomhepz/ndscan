@@ -3,7 +3,7 @@
 This file intentionally exposes the same fragment tree through both dashboard paths:
 
 - ``LegacyAmbiguousParameterNames`` uses the legacy ndscan submission/runtime path.
-- ``HostAmbiguousParameterNamesDashboard`` uses the host dashboard submission path.
+- ``PreparedAmbiguousParameterNamesDashboard`` uses the scan-submission dashboard submission path.
 
 The fragment tree contains:
 
@@ -84,6 +84,6 @@ LegacyAmbiguousParameterNames = make_fragment_scan_exp(
     AmbiguousParameterNamesFragment
 )
 
-HostAmbiguousParameterNamesDashboard = make_fragment_prepared_dashboard_scan_exp(
+PreparedAmbiguousParameterNamesDashboard = make_fragment_prepared_dashboard_scan_exp(
     AmbiguousParameterNamesFragment
 )

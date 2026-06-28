@@ -12,7 +12,7 @@ import pprint
 import matplotlib.pyplot as plt
 import numpy as np
 
-from ndscan.results import read_host_runtime_snapshot
+from ndscan.results import read_scan_site_snapshot
 
 # %%
 
@@ -33,7 +33,7 @@ SUBSCAN_SERIES = "shot/counts_image2"
 SUBSCAN_GROUP_INDEX = 0
 SUBSCAN_ROI_INDEX = 1
 
-snapshot = read_host_runtime_snapshot(SNAPSHOT_PATH)
+snapshot = read_scan_site_snapshot(SNAPSHOT_PATH)
 
 # %% Show available series on the image site
 site = snapshot.get_site(IMAGE_SITE_PATH)

@@ -29,7 +29,7 @@ from examples._roi_condition_stats import (
     parse_condition_syntax,
 )
 from examples.lab_offline_results_helpers import LabNdscanRun
-from ndscan.results.scan_site_reader import HostRuntimeSite
+from ndscan.results.scan_site_reader import ScanSiteData
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -97,14 +97,14 @@ def _sorted_image_entries(
 class ThreeImageReadout:
     """Script-local interpretation of the example's ``lab.imaging_readout`` blob."""
 
-    site: HostRuntimeSite
+    site: ScanSiteData
     blob_name: str
     blob: Mapping[str, object]
 
     @classmethod
     def from_site(
         cls,
-        site: HostRuntimeSite,
+        site: ScanSiteData,
         *,
         blob_name: str,
     ) -> "ThreeImageReadout":
@@ -214,7 +214,7 @@ class ThreeImageReadout:
 
 
 def build_saved_vs_recomputed_probability_payload(
-    parent_site: HostRuntimeSite,
+    parent_site: ScanSiteData,
     readout: ThreeImageReadout,
     *,
     x: str | None,
@@ -325,7 +325,7 @@ def plot_average_images_with_rois(
 
 
 def plot_saved_vs_recomputed_probability(
-    parent_site: HostRuntimeSite,
+    parent_site: ScanSiteData,
     readout: ThreeImageReadout,
     *,
     x: str | None,

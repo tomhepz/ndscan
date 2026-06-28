@@ -12,16 +12,16 @@ import logging
 from artiq.gui.tools import LayoutWidget
 
 from .._qt import QtCore, QtGui, QtWidgets
-from .host_scan_options import (
+from .scan_submission_options import (
     GpoBoundsScanOption,
-    get_host_fixed_option_type,
-    list_host_scan_generator_option_types,
+    get_scan_submission_fixed_option_type,
+    list_scan_submission_generator_option_types,
 )
 from .utils import eval_default_using_local_datasets, format_override_identity
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["OverrideEntry", "HostOverrideEntry", "HostPseudoparamEntry"]
+__all__ = ["OverrideEntry", "ScanOverrideEntry", "ScanPseudoparamEntry"]
 
 
 class _BaseOverrideEntry(LayoutWidget):
@@ -120,10 +120,10 @@ class OverrideEntry(_BaseOverrideEntry):
         self.current_option_idx = new_idx
 
 
-class HostOverrideEntry(_BaseOverrideEntry):
-    """Host-runtime row editor for the current dashboard subset.
+class ScanOverrideEntry(_BaseOverrideEntry):
+    """Prepared-runtime row editor for the current dashboard subset.
 
-    Host rows intentionally expose a smaller set of top-level modes than the legacy
+    Scan-submission rows intentionally expose a smaller set of top-level modes than the legacy
     path.  The primary choice is "Fixed" vs "Scan"; once "Scan" is selected, a nested
     generator selector chooses between min/max, centered, expanding, and list.
     """
@@ -139,7 +139,7 @@ class HostOverrideEntry(_BaseOverrideEntry):
         **kwargs,
     ):
         super().__init__(schema, path, **kwargs)
-        self._host_backend = backend
+        self._scan_submission_backend = backend
         self._supports_rebind = schema["type"] not in {"string", "bool", "enum"}
         self._supports_gpo_scan = schema["type"] not in {"string", "bool", "enum"} and is_scannable
         self._symbol_name = backend.symbol_name_for_target(
@@ -147,10 +147,10 @@ class HostOverrideEntry(_BaseOverrideEntry):
             path=path,
         )
         self._submission_mode = submission_mode
-        self._fixed_option = self._build_option(get_host_fixed_option_type(schema["type"]))
+        self._fixed_option = self._build_option(get_scan_submission_fixed_option_type(schema["type"]))
         self._scan_option_names = []
         self._scan_options = []
-        for name, option_cls in list_host_scan_generator_option_types(
+        for name, option_cls in list_scan_submission_generator_option_types(
             schema["type"],
             is_scannable,
         ).items():
@@ -187,7 +187,7 @@ class HostOverrideEntry(_BaseOverrideEntry):
         self._mode_stack.addWidget(self._scan_container)
         if self._gpo_option is not None:
             self._mode_stack.addWidget(self._gpo_option.container)
-        self._rebind_editor = _HostRebindEditor(symbol_name=self._symbol_name)
+        self._rebind_editor = _ScanRebindEditor(symbol_name=self._symbol_name)
         self._rebind_editor.box.textChanged.connect(lambda *_: self.value_changed.emit())
         self._mode_stack.addWidget(self._rebind_editor.container)
         self.addWidget(self._mode_stack, col=1)
@@ -214,7 +214,7 @@ class HostOverrideEntry(_BaseOverrideEntry):
 
     def read_from_params(self, params: dict, manager_datasets) -> None:
         id_for_log = format_override_identity(self.schema["fqn"], self.path)
-        entry = self._host_backend.find_entry(
+        entry = self._scan_submission_backend.find_entry(
             params,
             fqn=self.schema["fqn"],
             path=self.path,
@@ -237,7 +237,7 @@ class HostOverrideEntry(_BaseOverrideEntry):
                         self._scan_kind_box.setCurrentIndex(idx)
                         self._mode_box.setCurrentText("Scan")
                         return
-                logger.warning("Failed to read host scan params for %s", id_for_log)
+                logger.warning("Failed to read scan submission params for %s", id_for_log)
 
             if entry.mode.type == "rebind":
                 self._group_box.setText("")
@@ -267,7 +267,7 @@ class HostOverrideEntry(_BaseOverrideEntry):
 
     def write_to_submission(self, submission_state) -> None:
         mode = self._mode_box.currentText()
-        proxy = _HostParamSubmissionProxy(
+        proxy = _ScanParamSubmissionProxy(
             submission_state,
             entry_id=self._symbol_name,
             scan_group=self._normalised_scan_group(),
@@ -289,7 +289,7 @@ class HostOverrideEntry(_BaseOverrideEntry):
                 entry_id=self._symbol_name,
             )
             return
-        raise RuntimeError(f"Unsupported host row mode: {mode!r}")
+        raise RuntimeError(f"Unsupported scan-submission row mode: {mode!r}")
 
     def _normalised_scan_group(self) -> str | None:
         text = self._group_box.text().strip()
@@ -321,7 +321,7 @@ class HostOverrideEntry(_BaseOverrideEntry):
         layout.setContentsMargins(0, 0, 0, 0)
         option.build_ui(layout)
         container.setLayout(layout)
-        return _HostOptionWidget(option=option, container=container)
+        return _RowOptionWidget(option=option, container=container)
 
     def _active_option(self):
         if self._current_mode == "Scan" and self._scan_options:
@@ -390,8 +390,8 @@ class HostOverrideEntry(_BaseOverrideEntry):
         self._mode_changed(0)
 
 
-class HostPseudoparamEntry(LayoutWidget):
-    """Host-runtime pseudoparameter row editor.
+class ScanPseudoparamEntry(LayoutWidget):
+    """Prepared-runtime pseudoparameter row editor.
 
     Pseudoparams are purely logical symbols, so this widget focuses on three pieces of
     state only:
@@ -415,10 +415,10 @@ class HostPseudoparamEntry(LayoutWidget):
             "default": "0.0",
             "spec": {},
         }
-        self._fixed_option = self._build_option(get_host_fixed_option_type("float"))
+        self._fixed_option = self._build_option(get_scan_submission_fixed_option_type("float"))
         self._scan_option_names = []
         self._scan_options = []
-        for name, option_cls in list_host_scan_generator_option_types("float", True).items():
+        for name, option_cls in list_scan_submission_generator_option_types("float", True).items():
             self._scan_option_names.append(name)
             self._scan_options.append(self._build_option(option_cls))
         self._gpo_option = self._build_option(GpoBoundsScanOption)
@@ -507,7 +507,7 @@ class HostPseudoparamEntry(LayoutWidget):
                     self._scan_kind_box.setCurrentIndex(idx)
                     self._mode_box.setCurrentText("Scan")
                     return
-            logger.warning("Failed to read host pseudoparam scan params for %s", entry.id)
+            logger.warning("Failed to read scan-submission pseudoparam scan params for %s", entry.id)
             return
 
         if entry.mode.type == "gpo_scan":
@@ -518,7 +518,7 @@ class HostPseudoparamEntry(LayoutWidget):
                 return
 
     def write_to_submission(self, submission_state) -> None:
-        proxy = _HostPseudoparamSubmissionProxy(
+        proxy = _ScanPseudoparamSubmissionProxy(
             submission_state,
             entry_id=self.identifier(),
             scan_group=self._normalised_scan_group(),
@@ -533,7 +533,7 @@ class HostPseudoparamEntry(LayoutWidget):
         if mode == "GPO scan":
             self._gpo_option.write_to_submission(proxy)
             return
-        raise RuntimeError(f"Unsupported host pseudoparam mode: {mode!r}")
+        raise RuntimeError(f"Unsupported scan-submission pseudoparam mode: {mode!r}")
 
     def disable_scan(self) -> None:
         self._mode_box.setCurrentText("Fixed")
@@ -573,7 +573,7 @@ class HostPseudoparamEntry(LayoutWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         option.build_ui(layout)
         container.setLayout(layout)
-        return _HostOptionWidget(option=option, container=container)
+        return _RowOptionWidget(option=option, container=container)
 
     def _mode_changed(self, new_idx) -> None:
         del new_idx
@@ -639,7 +639,7 @@ class HostPseudoparamEntry(LayoutWidget):
         return text or None
 
 
-class _HostOptionWidget:
+class _RowOptionWidget:
     """Small wrapper so row code can treat fixed and scan widgets uniformly."""
 
     def __init__(self, *, option, container):
@@ -650,8 +650,8 @@ class _HostOptionWidget:
         return getattr(self.option, name)
 
 
-class _HostRebindEditor:
-    """Simple line-edit based host rebind editor.
+class _ScanRebindEditor:
+    """Simple line-edit based scan-submission rebind editor.
 
     The actual expression parsing/semantic validation lives in the worker-side
     expression compiler. The dashboard keeps the widget intentionally lightweight and
@@ -688,8 +688,8 @@ class _HostRebindEditor:
         del sync_values
 
 
-class _HostParamSubmissionProxy:
-    """Inject host-only metadata into existing row-widget serialisation calls."""
+class _ScanParamSubmissionProxy:
+    """Inject scan-submission row metadata into existing row-widget serialisation calls."""
 
     def __init__(self, submission_state, *, entry_id: str, scan_group: str | None):
         self._submission_state = submission_state
@@ -731,7 +731,7 @@ class _HostParamSubmissionProxy:
         )
 
 
-class _HostPseudoparamSubmissionProxy:
+class _ScanPseudoparamSubmissionProxy:
     """Route existing scan-option serialisation calls into pseudoparam state."""
 
     def __init__(self, submission_state, *, entry_id: str, scan_group: str | None):

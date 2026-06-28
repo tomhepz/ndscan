@@ -6,11 +6,11 @@ import sys
 
 from ..scan.mapping import ParameterMapping, ScanVariable
 from ..scan.request import ExecutionPolicy, PreviewPolicy, ScanRequest
-from ..submission.host_scan_schema import (
-    HostScanSchemaError,
-    HostScanSpec,
-    compile_host_scan_schema,
-    compile_host_scan_spec,
+from ..submission.scan_submission_schema import (
+    ScanSubmissionSchemaError,
+    ScanSubmissionSpec,
+    compile_scan_submission_schema,
+    compile_scan_submission_spec,
 )
 from .adapters import *
 from .context import *
@@ -24,10 +24,10 @@ from . import program as _program
 __all__ = [
     "ExecutionPolicy",
     "PreviewPolicy",
-    "HostScanSchemaError",
-    "HostScanSpec",
-    "compile_host_scan_spec",
-    "compile_host_scan_schema",
+    "ScanSubmissionSchemaError",
+    "ScanSubmissionSpec",
+    "compile_scan_submission_spec",
+    "compile_scan_submission_schema",
     "ScanVariable",
     "ParameterMapping",
     "ScanRequest",

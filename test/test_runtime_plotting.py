@@ -6,7 +6,7 @@ from unittest.mock import patch
 import numpy as np
 from mock_environment import HasEnvironmentCase
 
-from examples.host_runtime_live_viewer_demo import HostRuntimeLiveViewerDemo
+from examples.prepared_scan_live_viewer_demo import PreparedScanLiveViewerDemo
 from ndscan._qt import QtGui, QtWidgets
 from ndscan.define.fragment import ExpFragment
 from ndscan.define.result_channels import FloatChannel
@@ -2604,9 +2604,9 @@ class RuntimeAppletLaunchTest(HasEnvironmentCase):
         self.assertIn("--prefix=ndscan.rid_0.site.root.", args[2])
         self.assertEqual(kwargs["group"], "ndscan")
 
-    @patch("examples.host_runtime_live_viewer_demo.time.sleep", return_value=None)
+    @patch("examples.prepared_scan_live_viewer_demo.time.sleep", return_value=None)
     def test_live_viewer_demo_example_runs(self, _sleep):
-        exp = self.create(HostRuntimeLiveViewerDemo)
+        exp = self.create(PreparedScanLiveViewerDemo)
         exp.prepare()
         exp.run()
 

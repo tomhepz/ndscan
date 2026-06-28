@@ -1,12 +1,12 @@
-"""Point selection primitives for the host runtime.
+"""Point selection primitives for the prepared runtime.
 
-The host runtime deliberately separates three concerns:
+The prepared runtime deliberately separates three concerns:
 
 - point policies choose *what* points should run next,
 - the runtime decides *how* to execute them,
 - the scan-site writer decides *how* to persist completed observations.
 
-The first version of the host runtime only needed static point lists, so a simple
+The first version of the prepared runtime only needed static point lists, so a simple
 iterator-style interface was enough. Recursive refinement, early-exit wrappers, and
 future optimiser backends need a slightly richer contract:
 
@@ -136,7 +136,7 @@ class OptimiserSuggestion:
 
 
 class PointPolicy:
-    """Base class for host-runtime point policies.
+    """Base class for prepared-runtime point policies.
 
     The interface is intentionally small:
 
@@ -145,7 +145,7 @@ class PointPolicy:
     - ``is_finished()`` reports whether any more points can be produced.
 
     ``__iter__`` remains as a convenience bridge for tests and for any code that still
-    wants a simple point-by-point view, but the host runtime now consumes point
+    wants a simple point-by-point view, but the prepared runtime now consumes point
     policies through ``next_batch()`` directly.
     """
 
@@ -225,7 +225,7 @@ class PointPolicy:
 
 
 class AskTellOptimiserPointPolicy(PointPolicy):
-    """Wrap an ask/tell optimiser backend as a host-runtime point policy.
+    """Wrap an ask/tell optimiser backend as a prepared-runtime point policy.
 
     The point policy itself stays thin:
 
@@ -378,7 +378,7 @@ class _FinitePointPolicy(PointPolicy):
 class SinglePointPolicy(_FinitePointPolicy):
     """Point policy for a single empty point.
 
-    This is the host runtime's equivalent of "run once with no scanned axes". Keeping
+    This is the prepared runtime's equivalent of "run once with no scanned axes". Keeping
     the no-axes case as a point policy keeps the runtime model uniform.
     """
 

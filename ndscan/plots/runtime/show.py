@@ -11,7 +11,7 @@ from oitg import results
 from qasync import QEventLoop
 
 from ..._qt import QtWidgets
-from ...results import HostRuntimeSnapshot, read_host_runtime_snapshot
+from ...results import ScanSiteSnapshot, read_scan_site_snapshot
 from .viewer import RuntimePlotViewer
 
 
@@ -50,11 +50,11 @@ def resolve_snapshot_path(path_or_magic: str) -> Path:
     return Path(next(iter(paths.values())).path)
 
 
-def load_runtime_snapshot(path_or_magic: str) -> HostRuntimeSnapshot:
+def load_runtime_snapshot(path_or_magic: str) -> ScanSiteSnapshot:
     """Load and validate a prepared-runtime HDF5 snapshot for display."""
 
     path = resolve_snapshot_path(path_or_magic)
-    snapshot = read_host_runtime_snapshot(path)
+    snapshot = read_scan_site_snapshot(path)
     if not snapshot.sites:
         raise RuntimeError(
             f"No prepared-runtime scan sites found in {path}. If this is a legacy "

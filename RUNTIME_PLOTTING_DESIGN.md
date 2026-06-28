@@ -87,7 +87,7 @@ The new plotter should plug in at the same writer/schema boundary:
 flowchart LR
     Writer["ScanSiteDatasetWriter"]
     Live["Live site snapshot store"]
-    Offline["HostRuntimeSnapshot"]
+    Offline["ScanSiteSnapshot"]
     Model["Runtime site models"]
     View["PyQtGraph views"]
 
@@ -121,11 +121,11 @@ Suggested responsibilities:
 
 - `runtime.snapshot`
   - mutable in-memory site tree for live plotting
-  - runtime equivalent of `HostRuntimeSnapshot`
+  - runtime equivalent of `ScanSiteSnapshot`
 - `runtime.live`
   - dataset subscriber that updates the mutable snapshot
 - `runtime.offline`
-  - adapter from `HostRuntimeSnapshot` to the same model interfaces
+  - adapter from `ScanSiteSnapshot` to the same model interfaces
 - `runtime.models`
   - `SiteRoot`, `SiteScanModel`, `SegmentSliceModel`, selection helpers
 - `runtime.columns`
@@ -155,7 +155,7 @@ The runtime plotter should be built around these schema facts:
 - run completion is `state.completed`
 
 This is already exposed to offline tooling by
-[HostRuntimeSite](/home/lab/artiq-files/install/ndscan/ndscan/results/scan_site_reader.py#L147).
+[ScanSiteData](/home/lab/artiq-files/install/ndscan/ndscan/results/scan_site_reader.py#L147).
 
 The live in-memory model should look very similar:
 
@@ -238,7 +238,7 @@ MVP policy:
 - default `y`: first result channel
 
 This matches the current offline helper logic in
-[HostRuntimeSite.choose_default_x_key()](/home/lab/artiq-files/install/ndscan/ndscan/results/scan_site_reader.py#L174),
+[ScanSiteData.choose_default_x_key()](/home/lab/artiq-files/install/ndscan/ndscan/results/scan_site_reader.py#L174),
 just extended to explicit dropdowns.
 
 ## Child-Site Slicing
@@ -428,13 +428,13 @@ If you want to build this, read the code in this order:
 ## Suggested Implementation Order
 
 1. Create `ndscan.plots.runtime.snapshot`
-   - live mutable equivalent of `HostRuntimeSnapshot`
+   - live mutable equivalent of `ScanSiteSnapshot`
 2. Create `ndscan.plots.runtime.models`
    - `SiteRoot`
    - `SiteScanModel`
    - `SegmentSliceModel`
 3. Build an offline demo first
-   - feed it from `read_host_runtime_snapshot(...)`
+   - feed it from `read_scan_site_snapshot(...)`
 4. Add a live dataset subscriber
    - feed the same runtime models
 5. Add the recursive right-column UI

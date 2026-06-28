@@ -1,4 +1,4 @@
-"""Small safe expression compiler used by host-scan text rebinds.
+"""Small safe expression compiler used by scan-submission text rebinds.
 
 This module is intentionally independent from the rest of ndscan:
 

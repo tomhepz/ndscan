@@ -1,6 +1,6 @@
 """Logical scan axes and parameter-mapping declarations.
 
-The host runtime distinguishes between two concepts:
+The prepared runtime distinguishes between two concepts:
 
 - a scan axis says which *logical coordinate* varies from point to point,
 - a parameter mapping says how that logical coordinate translates into concrete

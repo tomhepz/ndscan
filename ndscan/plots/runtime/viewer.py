@@ -30,9 +30,9 @@ pg.setConfigOption('foreground', 'k')
 from ..._qt import QtCore, QtGui, QtWidgets
 from ...fits.sensible import artifact_summary, curve_points_for_artifact
 from ...results.scan_site_reader import (
-    HostRuntimeSite,
-    HostRuntimeSiteSegment,
-    HostRuntimeSnapshot,
+    ScanSiteData,
+    ScanSiteSegment,
+    ScanSiteSnapshot,
 )
 from ...utils import FIT_OBJECTS
 from .. import colormaps
@@ -91,8 +91,8 @@ class _ResampledImage:
 class _ColumnSpec:
     """State needed to keep one viewer column in sync with the current site tree."""
 
-    site: HostRuntimeSite
-    child_site_options: list[HostRuntimeSite]
+    site: ScanSiteData
+    child_site_options: list[ScanSiteData]
     selected_child_path: tuple[str, ...] | None
     parent_point_index: int | None
 
@@ -254,7 +254,7 @@ def _clear_error_bar_item(item: pg.ErrorBarItem) -> None:
 
 
 def _annotation_artifact_map_for_display(
-    site: HostRuntimeSite, parent_point_index: int | None
+    site: ScanSiteData, parent_point_index: int | None
 ) -> tuple[str | None, dict[str, Any]]:
     """Return the artifacts most relevant to the currently displayed site slice."""
 
@@ -477,7 +477,7 @@ def _format_array_index_suffix(
 def _axis_label_with_indices(
     label: str,
     *,
-    site: HostRuntimeSite,
+    site: ScanSiteData,
     key: str,
     index_tokens: tuple[str, ...] | None,
 ) -> str:
@@ -690,7 +690,7 @@ def _is_numeric_channel_schema(schema: dict[str, Any]) -> bool:
     return schema.get("type") in {"float", "int"} or _is_numeric_array_channel_schema(schema)
 
 
-def _x_axis_choices(site: HostRuntimeSite) -> list[tuple[str, str]]:
+def _x_axis_choices(site: ScanSiteData) -> list[tuple[str, str]]:
     """Return all numeric point streams that make sense as plot axes.
 
     The ordering is intentional:
@@ -758,23 +758,23 @@ def _x_axis_choices(site: HostRuntimeSite) -> list[tuple[str, str]]:
     return _unique_choice_labels(choices)
 
 
-def _default_x_choices(site: HostRuntimeSite) -> list[tuple[str, str]]:
+def _default_x_choices(site: ScanSiteData) -> list[tuple[str, str]]:
     """Return the default x-axis choices for a site column."""
     return _x_axis_choices(site)
 
 
-def _default_y_choices(site: HostRuntimeSite) -> list[tuple[str, str]]:
+def _default_y_choices(site: ScanSiteData) -> list[tuple[str, str]]:
     """Return the default y-axis choices for a site column."""
     return _x_axis_choices(site)
 
 
-def _default_z_choices(site: HostRuntimeSite) -> list[tuple[str, str]]:
+def _default_z_choices(site: ScanSiteData) -> list[tuple[str, str]]:
     """Return the default z-axis choices for a site column."""
     return _x_axis_choices(site)
 
 
 def _group_by_choices(
-    site: HostRuntimeSite, selected_x_key: str | None
+    site: ScanSiteData, selected_x_key: str | None
 ) -> list[tuple[str, str]]:
     """Return available 1D grouping axes.
 
@@ -825,7 +825,7 @@ def _repeat_combine_choices() -> list[tuple[str, str]]:
     return list(_REPEAT_COMBINE_CHOICES)
 
 
-def _plot_mode_choices(site: HostRuntimeSite) -> list[tuple[str, str]]:
+def _plot_mode_choices(site: ScanSiteData) -> list[tuple[str, str]]:
     """Return the plot modes available for one site."""
 
     choices = list(_PLOT_MODE_CHOICES)
@@ -843,7 +843,7 @@ def _choice_keys(choices: list[tuple[str, str]]) -> list[str]:
 
 
 def _default_x_preferred_keys(
-    site: HostRuntimeSite, choices: list[tuple[str, str]]
+    site: ScanSiteData, choices: list[tuple[str, str]]
 ) -> list[str]:
     """Return x-axis preference order, favouring streams that actually vary.
 
@@ -917,7 +917,7 @@ def _select_default_choice(
     return choice_keys[0]
 
 
-def _channel_choice_keys(site: HostRuntimeSite) -> list[str]:
+def _channel_choice_keys(site: ScanSiteData) -> list[str]:
     return [
         key
         for key in site.channels.keys()
@@ -929,7 +929,7 @@ def _channel_choice_keys(site: HostRuntimeSite) -> list[str]:
     ]
 
 
-def _error_bar_channel_key(site: HostRuntimeSite, value_key: str | None) -> str | None:
+def _error_bar_channel_key(site: ScanSiteData, value_key: str | None) -> str | None:
     """Return the error-bar channel paired with one plotted y-channel, if any."""
 
     if value_key is None:
@@ -1165,8 +1165,8 @@ def _nearest_resampled_image(
 
 
 def _current_or_latest_segment(
-    site: HostRuntimeSite,
-) -> HostRuntimeSiteSegment | None:
+    site: ScanSiteData,
+) -> ScanSiteSegment | None:
     """Return the currently active child segment, or the last finished one."""
     segments = site.segments()
     if not segments:
@@ -1178,7 +1178,7 @@ def _current_or_latest_segment(
 
 
 def _annotation_value_from_spec(
-    site: HostRuntimeSite,
+    site: ScanSiteData,
     render_spec: _AnnotationRenderSpec,
     spec: dict[str, Any] | None,
 ) -> Any | None:
@@ -1260,7 +1260,7 @@ def _annotation_pen(source_kind: str, *, width: float = 2.0) -> QtGui.QPen:
 
 
 def _annotation_specs_for_display(
-    site: HostRuntimeSite, parent_point_index: int | None
+    site: ScanSiteData, parent_point_index: int | None
 ) -> list[_AnnotationRenderSpec]:
     """Choose which persisted annotations are meaningful for the visible site slice.
 
@@ -1359,7 +1359,7 @@ def _annotation_specs_for_display(
 
 
 def _concat_slices(
-    site: HostRuntimeSite, segments: list[HostRuntimeSiteSegment], mode_label: str
+    site: ScanSiteData, segments: list[ScanSiteSegment], mode_label: str
 ) -> _SitePlotData:
     """Merge one or more segment slices into the raw points for a displayed column."""
     source_indices = []
@@ -1373,7 +1373,7 @@ def _concat_slices(
 
 
 def _site_plot_data(
-    site: HostRuntimeSite, parent_point_index: int | None
+    site: ScanSiteData, parent_point_index: int | None
 ) -> _SitePlotData:
     """Select the site data relevant for the current column state.
 
@@ -1417,7 +1417,7 @@ def _descends_from(path: tuple[str, ...], parent: tuple[str, ...]) -> bool:
     return path[: len(parent)] == parent
 
 
-def _run_id_text_for_site(site: HostRuntimeSite) -> str | None:
+def _run_id_text_for_site(site: ScanSiteData) -> str | None:
     """Return a short run identifier for one site, if available."""
 
     source_id = site.metadata.get("site.source_id")
@@ -1594,7 +1594,7 @@ class _SeriesControlRow(QtWidgets.QWidget):
     def set_state(
         self,
         *,
-        site: HostRuntimeSite,
+        site: ScanSiteData,
         x_key: str | None,
         state: _SeriesUiState,
         can_remove: bool,
@@ -1693,7 +1693,7 @@ class _SeriesControlRow(QtWidgets.QWidget):
     @staticmethod
     def _current_array_group_choice(
         *,
-        site: HostRuntimeSite,
+        site: ScanSiteData,
         y_key: str | None,
         y_index_tokens: tuple[str, ...] | None,
     ) -> tuple[str, str] | None:
@@ -1894,8 +1894,8 @@ class _SiteColumnWidget(QtWidgets.QWidget):
     def __init__(
         self,
         *,
-        site: HostRuntimeSite,
-        child_site_options: list[HostRuntimeSite],
+        site: ScanSiteData,
+        child_site_options: list[ScanSiteData],
         selected_child_path: tuple[str, ...] | None,
         parent_point_index: int | None,
         selected_point_index: int | None,
@@ -2294,8 +2294,8 @@ class _SiteColumnWidget(QtWidgets.QWidget):
     def update_state(
         self,
         *,
-        site: HostRuntimeSite,
-        child_site_options: list[HostRuntimeSite],
+        site: ScanSiteData,
+        child_site_options: list[ScanSiteData],
         selected_child_path: tuple[str, ...] | None,
         parent_point_index: int | None,
         selected_point_index: int | None,
@@ -4828,7 +4828,7 @@ class RuntimePlotViewer(QtWidgets.QWidget):
     """Prepared-runtime plot viewer for live dataset updates or loaded snapshots.
 
     The viewer deliberately keeps very little model logic of its own. It consumes the
-    common :class:`HostRuntimeSnapshot` site tree, chooses which sites should appear as
+    common :class:`ScanSiteSnapshot` site tree, chooses which sites should appear as
     a recursive set of columns, and lets each column widget render itself from that
     site plus a small amount of UI selection state. Live applets feed it through
     :meth:`data_changed`; offline HDF5 tools feed it through :meth:`set_snapshot`.
@@ -4901,14 +4901,14 @@ class RuntimePlotViewer(QtWidgets.QWidget):
 
     def set_snapshot(
         self,
-        snapshot: HostRuntimeSnapshot,
+        snapshot: ScanSiteSnapshot,
         *,
         status_text: str | None = None,
     ) -> None:
         """Render one already-loaded prepared-runtime snapshot.
 
         This is the offline counterpart to :meth:`data_changed`: callers such as an
-        HDF5 viewer can read a results file into a :class:`HostRuntimeSnapshot` and use
+        HDF5 viewer can read a results file into a :class:`ScanSiteSnapshot` and use
         the normal runtime viewer UI without going through the live dataset adapter.
         """
 
@@ -4982,8 +4982,8 @@ class RuntimePlotViewer(QtWidgets.QWidget):
                 state.selected_child_path = None
 
     def _choose_child_site(
-        self, parent_path: tuple[str, ...], child_sites: list[HostRuntimeSite]
-    ) -> HostRuntimeSite:
+        self, parent_path: tuple[str, ...], child_sites: list[ScanSiteData]
+    ) -> ScanSiteData:
         """Return the chosen child site for one parent path, defaulting to the first."""
         state = self._ui_state_for(parent_path)
         selected_path = state.selected_child_path

@@ -15,17 +15,17 @@ from ..define.parameters import ParamStore
 from ..define.result_channels import ResultChannel
 from ..scan.request import ScanRequest
 from ..schema.scan_site import make_scan_site_prefix
-from ..submission.host_scan_schema import (
-    HostScanGridModeSpec,
-    HostScanSchemaError,
-    HostScanSpec,
-    compile_host_scan_schema,
-    compile_host_scan_spec,
+from ..submission.scan_submission_schema import (
+    ScanSubmissionGridModeSpec,
+    ScanSubmissionSchemaError,
+    ScanSubmissionSpec,
+    compile_scan_submission_schema,
+    compile_scan_submission_spec,
 )
 from ..utils import PARAMS_ARG_KEY
 
 __all__ = [
-    "HostArgumentInterface",
+    "ScanArgumentInterface",
     "PreparedScanExperiment",
     "PreparedDashboardScanExperiment",
     "make_fragment_prepared_scan_exp",
@@ -33,13 +33,13 @@ __all__ = [
 ]
 
 
-class HostArgumentInterface(HasEnvironment):
+class ScanArgumentInterface(HasEnvironment):
     """Expose prepared-runtime submissions through the existing ndscan dashboard channel."""
 
     def build(
         self,
         fragment: ExpFragment,
-        default_request_spec: HostScanSpec | Mapping[str, Any] | None = None,
+        default_request_spec: ScanSubmissionSpec | Mapping[str, Any] | None = None,
     ) -> None:
         instances = dict[str, list[str]]()
         self._schemata = dict[str, dict]()
@@ -68,9 +68,9 @@ class HostArgumentInterface(HasEnvironment):
             },
             "overrides": {},
         }
-        default_transport = _host_request_transport_dict(default_request_spec)
+        default_transport = _scan_submission_transport_dict(default_request_spec)
         if default_transport is not None:
-            desc["host_scan"] = default_transport
+            desc["scan_submission"] = default_transport
 
         self._params = self.get_argument(PARAMS_ARG_KEY, PYONValue(default=desc))
 
@@ -99,15 +99,15 @@ class HostArgumentInterface(HasEnvironment):
     def resolve_request(
         self,
         fragment: ExpFragment,
-        default_request_spec: HostScanSpec | Mapping[str, Any] | None,
+        default_request_spec: ScanSubmissionSpec | Mapping[str, Any] | None,
     ) -> tuple[ScanRequest, dict[str, list[tuple[str, ParamStore]]]]:
-        if "host_scan" in self._params:
-            request, compiled_overrides = compile_host_scan_schema(
-                fragment, self._params["host_scan"]
+        if "scan_submission" in self._params:
+            request, compiled_overrides = compile_scan_submission_schema(
+                fragment, self._params["scan_submission"]
             )
         elif default_request_spec is None:
             raise ValueError(
-                "No host_scan submission was provided for this dashboard-driven "
+                "No scan_submission submission was provided for this dashboard-driven "
                 "prepared dashboard scan experiment"
             )
         else:
@@ -172,20 +172,20 @@ class PreparedDashboardScanExperiment(EnvExperiment):
         self,
         fragment_init,
         *,
-        default_request_spec: HostScanSpec | Mapping[str, Any] | None = None,
+        default_request_spec: ScanSubmissionSpec | Mapping[str, Any] | None = None,
         max_rtio_underflow_retries: int = 3,
         max_transitory_error_retries: int = 10,
     ) -> None:
         self.setattr_device("ccb")
         self.fragment = fragment_init()
         if default_request_spec is None:
-            default_request_spec = HostScanSpec(mode=HostScanGridModeSpec())
+            default_request_spec = ScanSubmissionSpec(mode=ScanSubmissionGridModeSpec())
         self._default_request_spec = default_request_spec
         self._max_rtio_underflow_retries = max_rtio_underflow_retries
         self._max_transitory_error_retries = max_transitory_error_retries
         self._session = None
         self._plot_prefix = None
-        self.args = HostArgumentInterface(self, self.fragment, self._default_request_spec)
+        self.args = ScanArgumentInterface(self, self.fragment, self._default_request_spec)
 
     def prepare(self) -> None:
         request, overrides = self.args.resolve_request(
@@ -239,7 +239,7 @@ def make_fragment_prepared_scan_exp(
 
 def make_fragment_prepared_dashboard_scan_exp(
     fragment_class: type[ExpFragment],
-    default_request_spec: HostScanSpec | Mapping[str, Any] | None = None,
+    default_request_spec: ScanSubmissionSpec | Mapping[str, Any] | None = None,
     *args,
     max_rtio_underflow_retries: int = 3,
     max_transitory_error_retries: int = 10,
@@ -284,19 +284,19 @@ def _resolve_code_request_spec(
 
 def _resolve_dashboard_request_spec(
     fragment: ExpFragment,
-    request_spec: HostScanSpec | Mapping[str, Any],
+    request_spec: ScanSubmissionSpec | Mapping[str, Any],
 ) -> tuple[ScanRequest, dict[str, list[tuple[str, ParamStore]]]]:
-    if isinstance(request_spec, HostScanSpec):
-        return compile_host_scan_spec(fragment, request_spec)
+    if isinstance(request_spec, ScanSubmissionSpec):
+        return compile_scan_submission_spec(fragment, request_spec)
     if isinstance(request_spec, Mapping):
-        return compile_host_scan_schema(fragment, request_spec)
-    raise TypeError("Dashboard prepared scans require a HostScanSpec or dict schema")
+        return compile_scan_submission_schema(fragment, request_spec)
+    raise TypeError("Dashboard prepared scans require a ScanSubmissionSpec or dict schema")
 
 
-def _host_request_transport_dict(
-    request_spec: HostScanSpec | Mapping[str, Any] | None,
+def _scan_submission_transport_dict(
+    request_spec: ScanSubmissionSpec | Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
-    if isinstance(request_spec, HostScanSpec):
+    if isinstance(request_spec, ScanSubmissionSpec):
         return request_spec.to_dict()
     if isinstance(request_spec, Mapping):
         return dict(request_spec)

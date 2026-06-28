@@ -51,13 +51,13 @@ Offline HDF5 reading reconstructs a site tree in:
 
 The main public objects are:
 
-- `HostRuntimeSnapshot`
-- `HostRuntimeSite`
-- `HostRuntimeSiteSegment`
-- `HostRuntimeSegmentAnalysis`
+- `ScanSiteSnapshot`
+- `ScanSiteData`
+- `ScanSiteSegment`
+- `ScanSiteSegmentAnalysis`
 
 The live viewer also converts live flat dataset mappings into the same
-`HostRuntimeSnapshot`/`HostRuntimeSite` structure via:
+`ScanSiteSnapshot`/`ScanSiteData` structure via:
 
 - [ndscan/plots/runtime/live.py](/home/lab/artiq-files/install/ndscan/ndscan/plots/runtime/live.py)
 
@@ -75,9 +75,9 @@ The intended public API surface is exported from:
 The core entry point is:
 
 ```python
-from ndscan.results import read_host_runtime_snapshot
+from ndscan.results import read_scan_site_snapshot
 
-snapshot = read_host_runtime_snapshot("result.h5")
+snapshot = read_scan_site_snapshot("result.h5")
 ```
 
 The core object model is:
@@ -88,7 +88,7 @@ child_site = snapshot.get_site(("repeat_scan",))
 children = snapshot.child_sites(())
 ```
 
-The main user-facing `HostRuntimeSite` methods for analysis scripts are:
+The main user-facing `ScanSiteData` methods for analysis scripts are:
 
 ```python
 site.available_series_paths()
@@ -217,7 +217,7 @@ debugging, but not as the source of truth for reproducible offline analysis.
 Offline code can list, retrieve, and inspect blobs generically:
 
 ```python
-snapshot = read_host_runtime_snapshot(path)
+snapshot = read_scan_site_snapshot(path)
 site = snapshot.get_site(("repeat_scan",))
 
 print(site.available_metadata_blob_names())
@@ -301,9 +301,9 @@ matplotlib. For example:
 import matplotlib.pyplot as plt
 import numpy as np
 
-from ndscan.results import read_host_runtime_snapshot
+from ndscan.results import read_scan_site_snapshot
 
-snapshot = read_host_runtime_snapshot("result.h5")
+snapshot = read_scan_site_snapshot("result.h5")
 
 image_site = snapshot.get_site(("repeat_scan",))
 root_site = snapshot.get_site(())
@@ -367,14 +367,14 @@ modelled as different child scan sites rather than extra segments on one site.
 A concrete example of this style is:
 
 - [examples/plot_three_image_rearrangement_first_images.py](/home/lab/artiq-files/install/ndscan/examples/plot_three_image_rearrangement_first_images.py)
-- [examples/plot_host_runtime_reused_child_segments.py](/home/lab/artiq-files/install/ndscan/examples/plot_host_runtime_reused_child_segments.py)
+- [examples/plot_prepared_scan_reused_child_segments.py](/home/lab/artiq-files/install/ndscan/examples/plot_prepared_scan_reused_child_segments.py)
 
 ## Lab-Helper Responsibilities
 
 The lab helper repository should own:
 
 - parsing and validating lab-specific blobs such as `"lab.imaging_readout"`
-- typed wrappers over `HostRuntimeSite`
+- typed wrappers over `ScanSiteData`
 - thresholding and ROI re-summing logic
 - conditional binomial statistics
 - domain-specific figure construction
@@ -399,7 +399,7 @@ The live plotter already follows the right overall pattern:
 1. transport-specific input:
    - live flat dataset mapping
 2. common result object model:
-   - `HostRuntimeSnapshot`-shaped site tree via
+   - `ScanSiteSnapshot`-shaped site tree via
      [ndscan/plots/runtime/live.py](/home/lab/artiq-files/install/ndscan/ndscan/plots/runtime/live.py)
 3. plot-specific projection:
    - viewer logic in
@@ -410,7 +410,7 @@ The offline path mirrors that:
 1. transport-specific input:
    - HDF5 file
 2. common result object model:
-   - `HostRuntimeSnapshot` via
+   - `ScanSiteSnapshot` via
      [ndscan/results/scan_site_reader.py](/home/lab/artiq-files/install/ndscan/ndscan/results/scan_site_reader.py)
 3. plot-specific projection:
    - either generic `ndscan.results.series` helpers, or lab/helper plotting code built
@@ -422,8 +422,8 @@ Prepared-runtime HDF5 files can also be opened directly in the runtime viewer:
 ndscan_runtime_show result.h5
 ```
 
-This uses `read_host_runtime_snapshot(...)` and then feeds the resulting
-`HostRuntimeSnapshot` into the same `RuntimePlotViewer` widget used for live data. The
+This uses `read_scan_site_snapshot(...)` and then feeds the resulting
+`ScanSiteSnapshot` into the same `RuntimePlotViewer` widget used for live data. The
 legacy `ndscan_show` command remains the right tool for pre-prepared-runtime files that
 use the older `axes` / `channels` / `points.channel_*` schema.
 
@@ -439,16 +439,16 @@ Status: done for the three-image example.
 - Structured `extra.*` metadata is persisted.
 - `site.require_metadata_blob(...)`, `site.available_metadata_blob_names()`, and
   `site.metadata_blobs()` recover it offline.
-- `examples/host_runtime_three_image_rearrangement.py` persists a versioned
+- `examples/prepared_scan_three_image_rearrangement.py` persists a versioned
   `lab.imaging_readout` blob alongside raw image/count channels.
-- Tests prove the blob survives round-trip into `HostRuntimeSite`.
+- Tests prove the blob survives round-trip into `ScanSiteData`.
 
 ### Phase 2: Prove offline reproducibility
 
 Status: proven in examples/tests, with lab-specific code still intentionally outside
 `ndscan` core.
 
-- HDF5 snapshots can be reopened via `read_host_runtime_snapshot(...)`.
+- HDF5 snapshots can be reopened via `read_scan_site_snapshot(...)`.
 - Saved live analysis outputs can be plotted directly.
 - Raw counts plus metadata can be used to recompute saved statistics in tests.
 - Lab-specific image/blob/statistics logic remains in examples for now and should move

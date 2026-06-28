@@ -58,7 +58,7 @@ AxisIdentity = tuple[str, str]
 class AnalysisFeedback:
     """Latest outputs, artifacts, and annotations for one analysis execution mode.
 
-    The host runtime uses the same shape for online feedback that point policies see
+    The prepared runtime uses the same shape for online feedback that point policies see
     and for the online datasets that are published at each completed batch boundary.
     Keeping the payload structured here avoids a second round of ad-hoc dict wrapping
     in the runtime, and gives runtime analyses and viewer-side ad hoc analyses one
@@ -125,7 +125,7 @@ class DefaultAnalysis:
 
         The default implementation reports no executable online analysis. Analyses that
         already describe online metadata, such as ``OnlineFit``, can override this to
-        produce concrete batch-level results in the host runtime.
+        produce concrete batch-level results in the prepared runtime.
         """
         return {}
 
@@ -189,7 +189,7 @@ class CustomAnalysis(DefaultAnalysis):
         batch on all accumulated data so far. It follows the same calling convention as
         ``analyze_fn`` and can reuse the same result channels.
     :param online_analysis_identifier: Optional stable name for the online-analysis
-        snapshot published by the host runtime. When omitted, a name is derived from
+        snapshot published by the prepared runtime. When omitted, a name is derived from
         the declared analysis result channels.
     """
 

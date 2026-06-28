@@ -1,6 +1,6 @@
 # Scan-Site Schema v3 Proposal
 
-This document proposes a cleaned-up scan-site schema for the new host runtime.
+This document proposes a cleaned-up scan-site schema for the new prepared runtime.
 
 It is a design note, not an implemented change.
 
@@ -14,7 +14,7 @@ The goals are:
 
 ## Scope
 
-This proposal only covers the new scan-site layout written by the host runtime.
+This proposal only covers the new scan-site layout written by the prepared runtime.
 
 It does not try to redesign:
 
@@ -193,7 +193,7 @@ Example:
 ```json
 site.path = ["scan_p", "scan_x"]
 site.parent_path = ["scan_p"]
-site.fragment_fqn = "host_runtime_nested_p_variation.LineFragment"
+site.fragment_fqn = "prepared_scan_nested_p_variation.LineFragment"
 site.source_id = "rid_2460"
 ```
 
@@ -213,7 +213,7 @@ scan.axes = {
   "axis_0": {
     "path": "scan_x/line",
     "param": {
-      "fqn": "host_runtime_nested_p_variation.LineFragment.x",
+      "fqn": "prepared_scan_nested_p_variation.LineFragment.x",
       "description": "x",
       "type": "float",
       "default": "0.0"
@@ -541,7 +541,7 @@ parent site.
 If schema v3 is adopted, the write-side changes should stay mostly local to:
 
 - `ndscan/experiment/scan_site.py` for key names and grouping,
-- `ndscan/experiment/host_runtime.py` for metadata content shape.
+- `ndscan/runtime/` for metadata content shape.
 
 The schema should not require any parent site to know its children ahead of time.
 

@@ -12,7 +12,7 @@ It is written for the code as it exists now, after the split into:
 - `ndscan/legacy`
 
 It replaces the older mental model where the implementation lived mostly in one
-large `host_runtime.py` or one large `runtime/api.py`.
+large the old runtime monolith or one large `runtime/api.py`.
 
 
 ## Short Thesis
@@ -51,7 +51,7 @@ Read these later:
 - [`ndscan/runtime/context.py`](ndscan/runtime/context.py)
 - [`ndscan/runtime/analysis.py`](ndscan/runtime/analysis.py)
 - [`ndscan/runtime/persistence.py`](ndscan/runtime/persistence.py)
-- [`ndscan/submission/host_scan_schema.py`](ndscan/submission/host_scan_schema.py)
+- [`ndscan/submission/scan_submission_schema.py`](ndscan/submission/scan_submission_schema.py)
 - [`ndscan/runtime/api.py`](ndscan/runtime/api.py)
 
 Do not start with [`ndscan/runtime/api.py`](ndscan/runtime/api.py). It is now
@@ -83,7 +83,7 @@ flowchart LR
     end
 
     subgraph SUBMIT[ndscan.submission]
-        SCHEMA[host_scan_schema.py]
+        SCHEMA[scan_submission_schema.py]
         EXPR[expression.py]
     end
 
@@ -139,15 +139,15 @@ flowchart LR
 flowchart TD
     REQ[ScanRequest]
     PREP[PreparedScan or PreparedChildScan]
-    BUILD[HostScanProgramBuilder]
-    PROG[HostScanProgram]
-    RUN[HostScanProgramRunner]
+    BUILD[ScanProgramBuilder]
+    PROG[ScanProgram]
+    RUN[ScanProgramRunner]
     EXEC{Executor choice}
     HOST[HostExecutor]
     KERN[KernelStreamingExecutor]
     OBS[PointObservation batch]
     WRITE[ScanSiteDatasetWriter]
-    ANALYSIS[HostScanAnalysisEngine]
+    ANALYSIS[ScanAnalysisEngine]
     FEEDBACK[BatchFeedback]
     POLICY[PointPolicy]
     OUT[ScanOutputs / ScanInspection]
@@ -257,7 +257,7 @@ Read it in this order:
 1. `ScanOutputs`
 2. `PointObservation`
 3. `ScanInspection`
-4. `HostScanProgram`
+4. `ScanProgram`
 5. `_collect_parameter_mappings()`
 6. `_resolve_execution_point()`
 
@@ -273,7 +273,7 @@ Important types:
   - stable named output ABI
 - `ScanInspection`
   - host-only rich inspection artifact
-- `HostScanProgram`
+- `ScanProgram`
   - validated, bound execution plan
 
 Important design decision:
@@ -324,7 +324,7 @@ These are sidecars, not the control loop itself.
 
 `analysis.py` owns:
 
-- `HostScanAnalysisEngine`
+- `ScanAnalysisEngine`
 
 The point of the split is:
 
@@ -370,23 +370,23 @@ Read:
 Read it in this order:
 
 1. `_execute_scan_request_inspection()`
-2. `HostScanProgramBuilder`
-3. `HostScanProgramRunner`
+2. `ScanProgramBuilder`
+3. `ScanProgramRunner`
 4. `HostExecutor`
 5. `KernelStreamingExecutor`
 6. `_ResidentKernelPointRunner`
 
 This is the core runtime loop.
 
-`HostScanProgramBuilder` does validation and binding:
+`ScanProgramBuilder` does validation and binding:
 
 - bind axes
 - collect saved result channels
 - validate mappings
 - decide whether kernel streaming is even eligible
-- create the `HostScanProgram`
+- create the `ScanProgram`
 
-`HostScanProgramRunner` owns the run:
+`ScanProgramRunner` owns the run:
 
 - root preview / run context
 - metadata publication
@@ -397,7 +397,7 @@ This is the core runtime loop.
 
 `HostExecutor` and `KernelStreamingExecutor` are peers. That is the key model:
 
-- same `HostScanProgram`
+- same `ScanProgram`
 - same `ScanRequest`
 - same batch-finalisation contract
 - different point-body execution backend
@@ -407,8 +407,8 @@ This is the core runtime loop.
 
 ```mermaid
 flowchart TD
-    PROG[HostScanProgram]
-    RUN[HostScanProgramRunner]
+    PROG[ScanProgram]
+    RUN[ScanProgramRunner]
     ELIGIBLE{_can_use_kernel_streaming_executor?}
     HOST[HostExecutor]
     KERN[KernelStreamingExecutor]
@@ -437,7 +437,7 @@ Why this design:
 - kernel execution gets the high-performance path when eligible
 - there is still one runtime concept
 
-This is better than a host runtime and a kernel runtime diverging semantically.
+This is better than a prepared runtime and a kernel runtime diverging semantically.
 
 
 ### 8. Prepared Handles
@@ -486,7 +486,7 @@ flowchart TD
     EXEC[execute() or acquire()]
     PREQ[_prepare_child_scan_request]
     SESSION[_PreparedChildKernelAcquireSession]
-    BUILD[HostScanProgramBuilder]
+    BUILD[ScanProgramBuilder]
     RUNNER[_ResidentKernelPointRunner]
     PUB[_publish_completed_batch]
     OUT[get_outputs / outputs / inspect]
@@ -520,7 +520,7 @@ Focus on:
 
 - `PreparedScanExperiment`
 - `PreparedDashboardScanExperiment`
-- `HostArgumentInterface`
+- `ScanArgumentInterface`
 - `_resolve_code_request_spec()`
 - `_resolve_dashboard_request_spec()`
 
@@ -532,7 +532,7 @@ The code path is now intentionally narrower:
   - `ScanRequest`
   - `(ScanRequest, overrides)`
 - dashboard-defined prepared scans accept:
-  - `HostScanSpec`
+  - `ScanSubmissionSpec`
   - dashboard transport dict schema
 
 The dashboard path compiles into a `ScanRequest` before it enters the prepared
@@ -549,15 +549,15 @@ flowchart LR
     end
 
     subgraph DASH[Dashboard-defined]
-        D1[UI payload / HostScanSpec]
-        D2[compile_host_scan_schema/spec]
+        D1[UI payload / ScanSubmissionSpec]
+        D2[compile_scan_submission_schema/spec]
         D3[PreparedDashboardScanExperiment]
     end
 
     subgraph CORE[Common prepared runtime]
         P[PreparedScan]
-        B[HostScanProgramBuilder]
-        R[HostScanProgramRunner]
+        B[ScanProgramBuilder]
+        R[ScanProgramRunner]
     end
 
     C1 --> C2 --> P
@@ -588,17 +588,17 @@ That is intentional.
 
 Use these after reading the modules:
 
-- [`examples/host_runtime_prepared_root_linear_scan.py`](examples/host_runtime_prepared_root_linear_scan.py)
+- [`examples/prepared_scan_root_linear_scan.py`](examples/prepared_scan_root_linear_scan.py)
   - clearest explicit root `PreparedScan`
-- [`examples/host_runtime_prepared_kernel_nested.py`](examples/host_runtime_prepared_kernel_nested.py)
+- [`examples/prepared_scan_kernel_nested.py`](examples/prepared_scan_kernel_nested.py)
   - nested prepared kernel path
-- [`examples/host_runtime_prepared_kernel_nested_ttl.py`](examples/host_runtime_prepared_kernel_nested_ttl.py)
+- [`examples/prepared_scan_kernel_nested_ttl.py`](examples/prepared_scan_kernel_nested_ttl.py)
   - real device leaf with host-chosen points and one resident kernel region
-- [`examples/host_runtime_prepared_kernel_online_fit.py`](examples/host_runtime_prepared_kernel_online_fit.py)
+- [`examples/prepared_scan_kernel_online_fit.py`](examples/prepared_scan_kernel_online_fit.py)
   - prepared child fixed outputs
-- [`examples/host_runtime_kernel_bayesian_optimisation.py`](examples/host_runtime_kernel_bayesian_optimisation.py)
+- [`examples/prepared_scan_kernel_bayesian_optimisation.py`](examples/prepared_scan_kernel_bayesian_optimisation.py)
   - host-driven BO with kernel-backed objective evaluation
-- [`examples/host_runtime_parameter_mapping_schema.py`](examples/host_runtime_parameter_mapping_schema.py)
+- [`examples/prepared_scan_parameter_mapping_schema.py`](examples/prepared_scan_parameter_mapping_schema.py)
   - schema compilation into the same runtime
 
 
@@ -674,7 +674,7 @@ If you want to answer:
 
 - “How is a point policy asked for work?”
   - [`ndscan/runtime/program.py`](ndscan/runtime/program.py)
-  - `_HostPointBatchSource`
+  - `_PointBatchSource`
 
 - “How does a logical point become concrete parameter values?”
   - [`ndscan/runtime/program.py`](ndscan/runtime/program.py)
@@ -684,7 +684,7 @@ If you want to answer:
   - [`ndscan/runtime/program.py`](ndscan/runtime/program.py)
   - `_can_use_kernel_streaming_executor()`
   - [`ndscan/runtime/executors.py`](ndscan/runtime/executors.py)
-  - `HostScanProgramBuilder`
+  - `ScanProgramBuilder`
 
 - “Where is the one-resident-kernel loop?”
   - [`ndscan/runtime/executors.py`](ndscan/runtime/executors.py)
@@ -705,10 +705,10 @@ If you want to answer:
 
 - “Where does the dashboard path become a `ScanRequest`?”
   - [`ndscan/runtime/adapters.py`](ndscan/runtime/adapters.py)
-  - `HostArgumentInterface.resolve_request()`
-  - [`ndscan/submission/host_scan_schema.py`](ndscan/submission/host_scan_schema.py)
-  - `compile_host_scan_schema()`
-  - `compile_host_scan_spec()`
+  - `ScanArgumentInterface.resolve_request()`
+  - [`ndscan/submission/scan_submission_schema.py`](ndscan/submission/scan_submission_schema.py)
+  - `compile_scan_submission_schema()`
+  - `compile_scan_submission_spec()`
 
 - “Where are scan-site datasets written?”
   - [`ndscan/runtime/persistence.py`](ndscan/runtime/persistence.py)
