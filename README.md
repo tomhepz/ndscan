@@ -11,6 +11,20 @@ to acquire data by iterating over (“scanning”) any number of them at a time.
 See the [documentation](https://oxfordiontrapgroup.github.io/ndscan) for more
 information.
 
+Current prepared-runtime design notes live in [`docs/`](docs/):
+
+- [Concepts](docs/concepts.md)
+- [Module map](docs/module-map.md)
+- [Prepared runtime](docs/prepared-runtime.md)
+- [Scan submission schema](docs/scan-submission-schema.md)
+- [Scan-site schema](docs/scan-site-schema.md)
+- [Results and plotting](docs/results-and-plotting.md)
+- [Child scans and kernels](docs/child-scans-and-kernels.md)
+- [Roadmap](docs/roadmap.md)
+
+Older design sketches and rewrite notes are archived under
+[`docs/archive/`](docs/archive/).
+
 **`ndscan` is beta-grade software. While the system has been carefully
 architected and the library is in active use within the
 [Ion Trap Quantum Computing Group](https://www.physics.ox.ac.uk/research/ion-trap-quantum-computing-group),
