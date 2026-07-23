@@ -132,11 +132,11 @@ class _ResidentKernelBatchState:
         self._current_next_point_index = 0
 
     @host_only
-    def get_param_values_chunk(self, *, next_batch, next_point_index):
+    def _ensure_current_chunk(self, *, next_batch, next_point_index) -> None:
         if not self._current_chunk:
             batch = next_batch()
             if not batch:
-                return tuple([] for _ in self._parameters)
+                return
             self._current_chunk = _resolve_execution_batch(
                 batch,
                 self._axes,
@@ -146,6 +146,15 @@ class _ResidentKernelBatchState:
             self._current_next_point_index = next_point_index()
             self._update_host_param_stores()
 
+    @host_only
+    def get_param_values_chunk(self, *, next_batch, next_point_index):
+        self._ensure_current_chunk(
+            next_batch=next_batch,
+            next_point_index=next_point_index,
+        )
+        if not self._current_chunk:
+            return tuple([] for _ in self._parameters)
+
         # Return one array per concrete parameter. The generated kernel loop indexes
         # these arrays in lockstep, which avoids an RPC round trip for every point.
         values = tuple([] for _ in self._parameters)
@@ -153,6 +162,14 @@ class _ResidentKernelBatchState:
             for index, value in enumerate(point.rpc_parameter_values):
                 values[index].append(value)
         return values
+
+    @host_only
+    def get_point_count_chunk(self, *, next_batch, next_point_index) -> np.int32:
+        self._ensure_current_chunk(
+            next_batch=next_batch,
+            next_point_index=next_point_index,
+        )
+        return np.int32(len(self._current_chunk))
 
     @host_only
     def _update_host_param_stores(self) -> None:
@@ -421,6 +438,13 @@ class KernelStreamingExecutor:
             next_point_index=self._next_point_index,
         )
 
+    @host_only
+    def _get_point_count_chunk(self) -> np.int32:
+        return self._batch_state.get_point_count_chunk(
+            next_batch=self._next_batch,
+            next_point_index=self._next_point_index,
+        )
+
     def _retry_point(self):
         self._batch_state.retry_point()
 
@@ -556,6 +580,18 @@ class _ResidentKernelPointRunner(HasEnvironment):
     def _build_run_chunk(self, num_parameters):
         """Generate the resident-kernel inner loop for the current parameter layout."""
 
+        if num_parameters == 0:
+            code = ""
+            code += "num_points = self._get_point_count_chunk()\n"
+            code += "if num_points <= 0:\n"
+            code += "    return self._STATUS_COMPLETE\n"
+            code += "for i in range(num_points):\n"
+            code += "    point_result = self._run_point()\n"
+            code += "    if point_result != self._STATUS_PROCEED:\n"
+            code += "        return point_result\n"
+            code += "return self._finish_chunk()"
+            return kernel_from_string(["self"], code)
+
         param_decl = " ".join(f"p{idx}," for idx in range(num_parameters))
         code = ""
         code += f"({param_decl}) = self._get_param_values_chunk()\n"
@@ -573,6 +609,10 @@ class _ResidentKernelPointRunner(HasEnvironment):
     @rpc
     def _get_param_values_chunk(self):
         return self.owner._get_param_values_chunk()
+
+    @rpc
+    def _get_point_count_chunk(self) -> np.int32:
+        return np.int32(self.owner._get_point_count_chunk())
 
     @rpc(flags={"async"})
     def _retry_point(self):

@@ -5,8 +5,8 @@ Collecting them all in a single module might or might not turn out to be a good 
 could also keep them inline with the other test_experiment_* unit test modules.
 """
 
-import math
 import json
+import math
 import unittest
 from collections import Counter
 from dataclasses import dataclass
@@ -16,6 +16,7 @@ import numpy as np
 from artiq.language import kernel, portable, rpc
 from emulator_environment import KernelEmulatorCase
 from fixtures import TrivialKernelFragment
+
 from examples.prepared_scan_kernel_nested import (
     PreparedKernelNestedVariationFragment,
 )
@@ -25,9 +26,12 @@ from examples.prepared_scan_kernel_nested_ttl import (
 from examples.prepared_scan_kernel_online_fit import (
     PreparedKernelOnlineFitFragment,
 )
+
 try:
     from examples.prepared_scan_kernel_bayesian_optimisation import (
         KernelBayesianOptimisationFragment,
+    )
+    from examples.prepared_scan_kernel_bayesian_optimisation import (
         make_request as make_kernel_bo_request,
     )
 
@@ -54,7 +58,6 @@ from ndscan.legacy.scan_generator import LinearGenerator, ListGenerator
 from ndscan.legacy.subscan import SubscanExpFragment, setattr_subscan
 from ndscan.runtime.api import (
     PreparedScan,
-    prepare_child_scan,
     setattr_prepared_child_scan,
 )
 from ndscan.scan.mapping import ParameterMapping, ScanVariable
@@ -82,6 +85,17 @@ class KernelStreamingLeafFragment(ExpFragment):
     @kernel
     def run_once(self):
         self.y.push(self.x.get() + 1.0)
+
+
+class KernelFixedPointFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_device("core")
+        self.setattr_param("offset", FloatParam, "offset", default=3.0)
+        self.setattr_result("result", FloatChannel)
+
+    @kernel
+    def run_once(self):
+        self.result.push(self.offset.get() + 1.0)
 
 
 class KernelMappedDriveFragment(ExpFragment):
@@ -292,6 +306,44 @@ class KernelPreparedMappedChildParent(ExpFragment):
 
 
 class KernelStreamingPreparedScanCase(KernelEmulatorCase):
+    def test_kernel_streaming_prepared_scan_supports_single_fixed_point(self):
+        fragment = self.create(KernelFixedPointFragment, [])
+        request = ScanRequest.single(
+            execution_policy=ExecutionPolicy(max_points_per_batch=4)
+        )
+
+        session = PreparedScan(fragment, fragment, request)
+        result = _execute_and_inspect(session)
+
+        self.assertEqual(result.runtime_stats.executor_entry_count, 1)
+        self.assertEqual(result.runtime_stats.batch_count, 1)
+        self.assertEqual(result.runtime_stats.point_count, 1)
+        self.assertEqual(result.values[fragment.result], [4.0])
+
+    def test_kernel_streaming_prepared_scan_supports_pure_pseudoparam_axis(self):
+        fragment = self.create(KernelFixedPointFragment, [])
+        logical_point = ScanVariable("logical_point")
+        request = ScanRequest.cartesian(
+            [(logical_point, [10.0, 20.0, 30.0])],
+            execution_policy=ExecutionPolicy(max_points_per_batch=2),
+        )
+
+        session = PreparedScan(fragment, fragment, request)
+        result = _execute_and_inspect(session)
+
+        self.assertEqual(result.runtime_stats.executor_entry_count, 1)
+        self.assertEqual(result.runtime_stats.batch_count, 2)
+        self.assertEqual(result.runtime_stats.point_count, 3)
+        self.assertEqual(result.values[fragment.result], [4.0, 4.0, 4.0])
+
+        scheduler = fragment.get_device("scheduler")
+        rid = getattr(scheduler, "rid", 0)
+        prefix = f"ndscan.rid_{rid}.site.root."
+        self.assertEqual(
+            fragment.get_dataset(prefix + "points.pseudoparam_0"),
+            [10.0, 20.0, 30.0],
+        )
+
     def test_kernel_streaming_prepared_scan_reuses_one_kernel_entry(self):
         fragment = self.create(KernelStreamingLeafFragment, [])
         request = ScanRequest.linear(
@@ -644,6 +696,10 @@ class KernelStreamingPreparedScanCase(KernelEmulatorCase):
         self.assertEqual(
             child_result.online_analysis_results["running_line_fit"],
             online_result,
+        )
+        self.assertEqual(
+            child_result.online_analysis_annotations["running_line_fit"],
+            online_annotations,
         )
 
     def test_prepared_kernel_nested_ttl_example_runs(self):

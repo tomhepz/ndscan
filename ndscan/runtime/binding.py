@@ -22,9 +22,9 @@ from .program import (
     BoundScanAxis,
     BoundScanParameter,
     _BoundParameterMapping,
+    _mapping_target_key,
     _ResolvedExecutionPoint,
     _TransientParamBinding,
-    _mapping_target_key,
 )
 
 
@@ -274,11 +274,8 @@ def _can_use_kernel_streaming_executor(
     axes: Sequence[BoundScanAxis],
     parameters: Sequence[BoundScanParameter],
 ) -> bool:
-    if not _fragment_uses_kernel_execution(fragment):
-        return False
-    if not axes:
-        return False
-    return bool(parameters)
+    del axes, parameters
+    return is_kernel(fragment.run_once)
 
 
 def _fragment_tree_needs_param_initialisation(fragment: ExpFragment) -> bool:
@@ -423,4 +420,3 @@ def _resolve_execution_batch(
         _resolve_execution_point(point, axes, parameters, parameter_mappings)
         for point in points
     ]
-
