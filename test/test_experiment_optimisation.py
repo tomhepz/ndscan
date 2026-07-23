@@ -293,6 +293,8 @@ if _OPTIMISATION_DEPS_AVAILABLE:
                             "acquisition": "ucb",
                             "fit_steps": 7,
                             "fit_lr": 0.04,
+                            "acquisition_num_starts": 3,
+                            "surrogate_num_starts": 4,
                         },
                     },
                     "entries": [
@@ -316,6 +318,8 @@ if _OPTIMISATION_DEPS_AVAILABLE:
             backend_description = request.point_policy.describe()["backend"]
             self.assertEqual(backend_description["fit_steps"], 7)
             self.assertEqual(backend_description["fit_lr"], 0.04)
+            self.assertEqual(backend_description["acquisition_num_starts"], 3)
+            self.assertEqual(backend_description["surrogate_num_starts"], 4)
 
             result = _execute_and_inspect(PreparedScan(fragment, fragment, request))
             prefix = result.site_prefix

@@ -1,9 +1,9 @@
 import unittest
 
 from ndscan.dashboard.submission import (
-    ScanSubmissionBackend,
     LegacyScanOptionsState,
     LegacySubmissionBackend,
+    ScanSubmissionBackend,
     select_submission_backend,
 )
 
@@ -61,6 +61,51 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
         backend = select_submission_backend({"scan_submission": {"version": "old"}})
         self.assertIsInstance(backend, ScanSubmissionBackend)
         self.assertTrue(backend.supports_editing)
+
+    def test_scan_submission_row_exposes_scan_mode_for_scannable_float_param(self):
+        try:
+            from ndscan._qt import QtWidgets
+            from ndscan.dashboard.override_entry import ScanOverrideEntry
+        except ModuleNotFoundError as exc:
+            if exc.name == "PyQt5":
+                self.skipTest("ARTIQ GUI PyQt5 dependency is not installed")
+            raise
+
+        qt_app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.addCleanup(lambda: qt_app.processEvents())
+        backend = ScanSubmissionBackend(
+            {
+                "scan_submission": {
+                    "version": 1,
+                    "mode": {"type": "grid"},
+                    "entries": [],
+                    "execution": {},
+                    "metadata": {},
+                }
+            }
+        )
+        row = ScanOverrideEntry(
+            {
+                "fqn": "frag.preload_time",
+                "type": "float",
+                "description": "preload time",
+                "default": "3.0",
+                "spec": {"is_scannable": True},
+            },
+            "*",
+            is_scannable=True,
+            backend=backend,
+            submission_mode="grid",
+        )
+
+        mode_labels = [
+            row._mode_box.itemText(index) for index in range(row._mode_box.count())
+        ]
+
+        self.assertIn("Fixed", mode_labels)
+        self.assertIn("Scan", mode_labels)
+        self.assertIn("Rebind", mode_labels)
+        row.deleteLater()
 
     def test_legacy_backend_iterates_axes_then_overrides(self):
         backend = LegacySubmissionBackend()
@@ -189,6 +234,47 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
                     "type": "linear",
                     "range": {"start": 0.0, "stop": 1.0, "num_points": 11},
                 },
+            },
+        )
+
+    def test_scan_submission_backend_serialises_grid_repeat_settings(self):
+        backend = ScanSubmissionBackend(
+            {
+                "scan_submission": {
+                    "version": 1,
+                    "mode": {"type": "grid"},
+                    "entries": [],
+                    "execution": {"max_points_per_batch": 8},
+                    "metadata": {"demo_name": "scan_submission_dashboard"},
+                }
+            }
+        )
+        state = backend.new_submission_state()
+        state.set_grid_mode(
+            randomise_order_globally=True,
+            num_repeats_per_point=None,
+            repeat_schedule="interleaved",
+        )
+
+        params = {"scan_submission": {"old": True}, "overrides": {"old": []}}
+        backend.apply_submission_state(params, state)
+
+        self.assertEqual(
+            params["scan_submission"]["mode"],
+            {
+                "type": "grid",
+                "randomise_order_globally": True,
+                "num_repeats_per_point": None,
+                "repeat_schedule": "interleaved",
+            },
+        )
+        self.assertEqual(
+            backend.initial_mode_state(),
+            {
+                "mode_type": "grid",
+                "randomise_order_globally": False,
+                "num_repeats_per_point": 1,
+                "repeat_schedule": "serial",
             },
         )
 
@@ -697,6 +783,10 @@ class DashboardSubmissionBackendTest(unittest.TestCase):
                     "max_batches": 12,
                     "acquisition": "ei",
                     "minimise": False,
+                    "fit_steps": 800,
+                    "fit_lr": 0.05,
+                    "acquisition_num_starts": 10,
+                    "surrogate_num_starts": 32,
                 },
             },
         )

@@ -25,6 +25,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ...submission.scan_submission_schema import (
+    DEFAULT_GPO_ACQUISITION_NUM_STARTS,
+    DEFAULT_GPO_FIT_LR,
+    DEFAULT_GPO_FIT_STEPS,
+    DEFAULT_GPO_INITIAL_DESIGN_SIZE,
+    DEFAULT_GPO_SURROGATE_NUM_STARTS,
     ScanSubmissionChannelObjectiveSpec,
     ScanSubmissionChannelTargetSpec,
     ScanSubmissionEntry,
@@ -54,10 +59,14 @@ class ScanSubmissionGpoSettings:
 
     objective_channel_path: str
     batch_size: int | None = None
-    initial_design_size: int = 1
+    initial_design_size: int = DEFAULT_GPO_INITIAL_DESIGN_SIZE
     max_batches: int | None = None
     acquisition: str = "ucb"
     minimise: bool = True
+    fit_steps: int | None = DEFAULT_GPO_FIT_STEPS
+    fit_lr: float | None = DEFAULT_GPO_FIT_LR
+    acquisition_num_starts: int | None = DEFAULT_GPO_ACQUISITION_NUM_STARTS
+    surrogate_num_starts: int | None = DEFAULT_GPO_SURROGATE_NUM_STARTS
 
     def to_mode_spec(self) -> ScanSubmissionGpoModeSpec:
         return ScanSubmissionGpoModeSpec(
@@ -70,6 +79,10 @@ class ScanSubmissionGpoSettings:
                 max_batches=self.max_batches,
                 acquisition=self.acquisition,
                 minimise=self.minimise,
+                fit_steps=self.fit_steps,
+                fit_lr=self.fit_lr,
+                acquisition_num_starts=self.acquisition_num_starts,
+                surrogate_num_starts=self.surrogate_num_starts,
             ),
         )
 
@@ -79,11 +92,23 @@ class ScanSubmissionState:
     """Mutable accumulation target for editable prepared-runtime dashboard rows."""
 
     mode_type: str = "grid"
+    grid_randomise_order_globally: bool = False
+    grid_num_repeats_per_point: int | None = 1
+    grid_repeat_schedule: str = "serial"
     gpo_settings: ScanSubmissionGpoSettings | None = None
     entries: list[ScanSubmissionEntry] = field(default_factory=list)
 
-    def set_grid_mode(self) -> None:
+    def set_grid_mode(
+        self,
+        *,
+        randomise_order_globally: bool = False,
+        num_repeats_per_point: int | None = 1,
+        repeat_schedule: str = "serial",
+    ) -> None:
         self.mode_type = "grid"
+        self.grid_randomise_order_globally = randomise_order_globally
+        self.grid_num_repeats_per_point = num_repeats_per_point
+        self.grid_repeat_schedule = repeat_schedule
         self.gpo_settings = None
 
     def set_gpo_mode(
@@ -91,10 +116,14 @@ class ScanSubmissionState:
         *,
         objective_channel_path: str,
         batch_size: int | None = None,
-        initial_design_size: int = 1,
+        initial_design_size: int = DEFAULT_GPO_INITIAL_DESIGN_SIZE,
         max_batches: int | None = None,
         acquisition: str = "ucb",
         minimise: bool = True,
+        fit_steps: int | None = DEFAULT_GPO_FIT_STEPS,
+        fit_lr: float | None = DEFAULT_GPO_FIT_LR,
+        acquisition_num_starts: int | None = DEFAULT_GPO_ACQUISITION_NUM_STARTS,
+        surrogate_num_starts: int | None = DEFAULT_GPO_SURROGATE_NUM_STARTS,
     ) -> None:
         self.mode_type = "gpo"
         self.gpo_settings = ScanSubmissionGpoSettings(
@@ -104,6 +133,10 @@ class ScanSubmissionState:
             max_batches=max_batches,
             acquisition=acquisition,
             minimise=minimise,
+            fit_steps=fit_steps,
+            fit_lr=fit_lr,
+            acquisition_num_starts=acquisition_num_starts,
+            surrogate_num_starts=surrogate_num_starts,
         )
 
     def add_override(
@@ -234,7 +267,11 @@ class ScanSubmissionState:
 
     def mode_spec(self) -> ScanSubmissionGridModeSpec | ScanSubmissionGpoModeSpec:
         if self.mode_type == "grid":
-            return ScanSubmissionGridModeSpec()
+            return ScanSubmissionGridModeSpec(
+                randomise_order_globally=self.grid_randomise_order_globally,
+                num_repeats_per_point=self.grid_num_repeats_per_point,
+                repeat_schedule=self.grid_repeat_schedule,
+            )
         if self.mode_type == "gpo":
             if self.gpo_settings is None:
                 raise ValueError("GPO submission state requires gpo_settings")
@@ -267,7 +304,12 @@ class ScanSubmissionBackend(DashboardSubmissionBackend):
             return {"mode_type": "grid"}
         mode = self._base_spec.mode
         if isinstance(mode, ScanSubmissionGridModeSpec):
-            return {"mode_type": "grid"}
+            return {
+                "mode_type": "grid",
+                "randomise_order_globally": mode.randomise_order_globally,
+                "num_repeats_per_point": mode.num_repeats_per_point,
+                "repeat_schedule": mode.repeat_schedule,
+            }
         assert isinstance(mode, ScanSubmissionGpoModeSpec)
         return {
             "mode_type": "gpo",
@@ -277,6 +319,10 @@ class ScanSubmissionBackend(DashboardSubmissionBackend):
             "max_batches": mode.backend.max_batches,
             "acquisition": mode.backend.acquisition,
             "minimise": mode.backend.minimise,
+            "fit_steps": mode.backend.fit_steps,
+            "fit_lr": mode.backend.fit_lr,
+            "acquisition_num_starts": mode.backend.acquisition_num_starts,
+            "surrogate_num_starts": mode.backend.surrogate_num_starts,
         }
 
     def available_result_channels(self) -> tuple[dict[str, Any], ...]:
@@ -316,7 +362,11 @@ class ScanSubmissionBackend(DashboardSubmissionBackend):
             return state
         mode = self._base_spec.mode
         if isinstance(mode, ScanSubmissionGridModeSpec):
-            state.set_grid_mode()
+            state.set_grid_mode(
+                randomise_order_globally=mode.randomise_order_globally,
+                num_repeats_per_point=mode.num_repeats_per_point,
+                repeat_schedule=mode.repeat_schedule,
+            )
             return state
         assert isinstance(mode, ScanSubmissionGpoModeSpec)
         state.set_gpo_mode(
@@ -326,6 +376,10 @@ class ScanSubmissionBackend(DashboardSubmissionBackend):
             max_batches=mode.backend.max_batches,
             acquisition=mode.backend.acquisition,
             minimise=mode.backend.minimise,
+            fit_steps=mode.backend.fit_steps,
+            fit_lr=mode.backend.fit_lr,
+            acquisition_num_starts=mode.backend.acquisition_num_starts,
+            surrogate_num_starts=mode.backend.surrogate_num_starts,
         )
         return state
 

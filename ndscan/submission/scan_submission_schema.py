@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 
-from .expression import ExpressionCompileError
 from ..define.fragment import ExpFragment
 from ..define.parameters import ParamHandle, ParamStore
 from ..define.result_channels import ResultChannel
@@ -37,6 +36,7 @@ from ..scan.point_policy import (
     SinglePointPolicy,
     ZipPointPolicy,
 )
+from .expression import ExpressionCompileError
 
 if TYPE_CHECKING:
     from ndscan.scan.request import ExecutionPolicy, ScanRequest
@@ -47,6 +47,14 @@ __all__ = [
     "compile_scan_submission_spec",
     "compile_scan_submission_schema",
 ]
+
+_GRID_UNBOUNDED_REPEAT_COUNT = 2**31 - 1
+_GRID_REPEAT_SCHEDULES = {"serial", "interleaved", "shuffled"}
+DEFAULT_GPO_INITIAL_DESIGN_SIZE = 8
+DEFAULT_GPO_FIT_STEPS = 800
+DEFAULT_GPO_FIT_LR = 0.05
+DEFAULT_GPO_ACQUISITION_NUM_STARTS = 10
+DEFAULT_GPO_SURROGATE_NUM_STARTS = 32
 
 
 class ScanSubmissionSchemaError(ValueError):
@@ -280,12 +288,14 @@ class ScanSubmissionNuboBackendSpec:
     """Declarative settings for the optional NUBO BO backend."""
 
     batch_size: int | None = None
-    initial_design_size: int = 1
+    initial_design_size: int = DEFAULT_GPO_INITIAL_DESIGN_SIZE
     max_batches: int | None = None
     acquisition: str = "ucb"
     minimise: bool = True
-    fit_steps: int | None = None
-    fit_lr: float | None = None
+    fit_steps: int | None = DEFAULT_GPO_FIT_STEPS
+    fit_lr: float | None = DEFAULT_GPO_FIT_LR
+    acquisition_num_starts: int | None = DEFAULT_GPO_ACQUISITION_NUM_STARTS
+    surrogate_num_starts: int | None = DEFAULT_GPO_SURROGATE_NUM_STARTS
     kind: ClassVar[str] = "nubo"
 
     @classmethod
@@ -302,6 +312,8 @@ class ScanSubmissionNuboBackendSpec:
                 "minimise",
                 "fit_steps",
                 "fit_lr",
+                "acquisition_num_starts",
+                "surrogate_num_starts",
             },
             name=name,
         )
@@ -321,14 +333,34 @@ class ScanSubmissionNuboBackendSpec:
         return cls(
             batch_size=_optional_positive_int(mapping.get("batch_size", None), f"{name}.batch_size"),
             initial_design_size=_positive_int(
-                mapping.get("initial_design_size", 1),
+                mapping.get("initial_design_size", DEFAULT_GPO_INITIAL_DESIGN_SIZE),
                 f"{name}.initial_design_size",
             ),
             max_batches=_optional_positive_int(mapping.get("max_batches", None), f"{name}.max_batches"),
             acquisition=acquisition,
             minimise=minimise,
-            fit_steps=_optional_positive_int(mapping.get("fit_steps", None), f"{name}.fit_steps"),
-            fit_lr=_optional_positive_float(mapping.get("fit_lr", None), f"{name}.fit_lr"),
+            fit_steps=_optional_positive_int(
+                mapping.get("fit_steps", DEFAULT_GPO_FIT_STEPS),
+                f"{name}.fit_steps",
+            ),
+            fit_lr=_optional_positive_float(
+                mapping.get("fit_lr", DEFAULT_GPO_FIT_LR),
+                f"{name}.fit_lr",
+            ),
+            acquisition_num_starts=_optional_positive_int(
+                mapping.get(
+                    "acquisition_num_starts",
+                    DEFAULT_GPO_ACQUISITION_NUM_STARTS,
+                ),
+                f"{name}.acquisition_num_starts",
+            ),
+            surrogate_num_starts=_optional_positive_int(
+                mapping.get(
+                    "surrogate_num_starts",
+                    DEFAULT_GPO_SURROGATE_NUM_STARTS,
+                ),
+                f"{name}.surrogate_num_starts",
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -346,6 +378,10 @@ class ScanSubmissionNuboBackendSpec:
             data["fit_steps"] = self.fit_steps
         if self.fit_lr is not None:
             data["fit_lr"] = self.fit_lr
+        if self.acquisition_num_starts is not None:
+            data["acquisition_num_starts"] = self.acquisition_num_starts
+        if self.surrogate_num_starts is not None:
+            data["surrogate_num_starts"] = self.surrogate_num_starts
         return data
 
     def validate(self, *, name: str) -> None:
@@ -361,6 +397,10 @@ class ScanSubmissionNuboBackendSpec:
             raise ScanSubmissionSchemaError(f"{name}.fit_steps must be positive")
         if self.fit_lr is not None and self.fit_lr <= 0.0:
             raise ScanSubmissionSchemaError(f"{name}.fit_lr must be positive")
+        if self.acquisition_num_starts is not None and self.acquisition_num_starts <= 0:
+            raise ScanSubmissionSchemaError(f"{name}.acquisition_num_starts must be positive")
+        if self.surrogate_num_starts is not None and self.surrogate_num_starts <= 0:
+            raise ScanSubmissionSchemaError(f"{name}.surrogate_num_starts must be positive")
 
 
 @dataclass(slots=True)
@@ -368,28 +408,68 @@ class ScanSubmissionGridModeSpec:
     """Cartesian/zipped grid mode."""
 
     randomise_order_globally: bool = False
+    num_repeats_per_point: int | None = 1
+    repeat_schedule: str = "serial"
     type: ClassVar[str] = "grid"
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any], *, name: str) -> "ScanSubmissionGridModeSpec":
         mapping = _schema_mapping(data, name)
-        _reject_unknown_keys(mapping, allowed={"type", "randomise_order_globally"}, name=name)
+        _reject_unknown_keys(
+            mapping,
+            allowed={
+                "type",
+                "randomise_order_globally",
+                "num_repeats_per_point",
+                "repeat_schedule",
+            },
+            name=name,
+        )
         mode_type = _schema_string(mapping, "type")
         if mode_type != cls.type:
             raise ScanSubmissionSchemaError(f"{name}.type must be {cls.type!r}, got {mode_type!r}")
         randomise_order_globally = mapping.get("randomise_order_globally", False)
         if not isinstance(randomise_order_globally, bool):
             raise ScanSubmissionSchemaError(f"{name}.randomise_order_globally must be a boolean")
-        return cls(randomise_order_globally=randomise_order_globally)
+        repeat_schedule = mapping.get("repeat_schedule", "serial")
+        if not isinstance(repeat_schedule, str):
+            raise ScanSubmissionSchemaError(f"{name}.repeat_schedule must be a string")
+        return cls(
+            randomise_order_globally=randomise_order_globally,
+            num_repeats_per_point=_optional_positive_int(
+                mapping.get("num_repeats_per_point", 1),
+                f"{name}.num_repeats_per_point",
+            ),
+            repeat_schedule=repeat_schedule,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         data = {"type": self.type}
         if self.randomise_order_globally:
             data["randomise_order_globally"] = True
+        if self.num_repeats_per_point != 1:
+            data["num_repeats_per_point"] = self.num_repeats_per_point
+        if self.repeat_schedule != "serial":
+            data["repeat_schedule"] = self.repeat_schedule
         return data
 
     def validate(self, *, name: str) -> None:
-        del name
+        if (
+            self.num_repeats_per_point is not None
+            and self.num_repeats_per_point <= 0
+        ):
+            raise ScanSubmissionSchemaError(
+                f"{name}.num_repeats_per_point must be positive or null"
+            )
+        if self.repeat_schedule not in _GRID_REPEAT_SCHEDULES:
+            raise ScanSubmissionSchemaError(
+                f"{name}.repeat_schedule must be one of "
+                f"{', '.join(sorted(_GRID_REPEAT_SCHEDULES))}"
+            )
+        if self.repeat_schedule == "shuffled" and self.num_repeats_per_point is None:
+            raise ScanSubmissionSchemaError(
+                f"{name}.num_repeats_per_point must be finite for globally shuffled repeats"
+            )
 
 
 @dataclass(slots=True)
@@ -542,8 +622,8 @@ class ScanSubmissionRebindModeSpec:
             raise ScanSubmissionSchemaError(f"{name}.expr must not be empty")
 
 
-type ScanSubmissionModeSpec = ScanSubmissionGridModeSpec | ScanSubmissionGpoModeSpec
-type ScanSubmissionEntryModeSpec = (
+ScanSubmissionModeSpec = ScanSubmissionGridModeSpec | ScanSubmissionGpoModeSpec
+ScanSubmissionEntryModeSpec = (
     ScanSubmissionFixedModeSpec
     | ScanSubmissionScanModeSpec
     | ScanSubmissionGpoScanModeSpec
@@ -1100,17 +1180,15 @@ def _compile_grid_schema_request(
         for mapping in entry.parameter_mappings
     )
     if not scanned_entries:
-        return (
-            ScanRequest(
-                axes=(),
-                point_policy=SinglePointPolicy(),
-                metadata=metadata,
-                execution_policy=execution_policy,
-                parameter_mappings=parameter_mappings,
-                fixed_pseudoparams=fixed_pseudoparams,
-            ),
-            overrides,
+        request = ScanRequest(
+            axes=(),
+            point_policy=SinglePointPolicy(),
+            metadata=metadata,
+            execution_policy=execution_policy,
+            parameter_mappings=parameter_mappings,
+            fixed_pseudoparams=fixed_pseudoparams,
         )
+        return (_apply_grid_mode_policy_modifiers(request, mode), overrides)
 
     groups: OrderedDict[str, list[_CompiledSchemaEntry]] = OrderedDict()
     for entry in scanned_entries:
@@ -1138,10 +1216,35 @@ def _compile_grid_schema_request(
         parameter_mappings=parameter_mappings,
         fixed_pseudoparams=fixed_pseudoparams,
     )
+
+    return (_apply_grid_mode_policy_modifiers(request, mode), overrides)
+
+
+def _apply_grid_mode_policy_modifiers(
+    request: "ScanRequest",
+    mode: ScanSubmissionGridModeSpec,
+) -> "ScanRequest":
+    # A globally shuffled repeat schedule deliberately applies these wrappers in the
+    # opposite order to the normal dashboard path. First make the requested number of
+    # copies of every point, then shuffle that complete, finite list of acquisitions.
+    if mode.repeat_schedule == "shuffled":
+        assert mode.num_repeats_per_point is not None
+        if mode.num_repeats_per_point != 1:
+            request = request.with_repeats(repeats=mode.num_repeats_per_point)
+        return request.with_global_randomisation(random_seed=random.getrandbits(32))
+
     if mode.randomise_order_globally:
         request = request.with_global_randomisation(random_seed=random.getrandbits(32))
 
-    return (request, overrides)
+    repeat_count = mode.num_repeats_per_point
+    if repeat_count is None:
+        repeat_count = _GRID_UNBOUNDED_REPEAT_COUNT
+    if repeat_count != 1:
+        request = request.with_repeats(
+            repeats=repeat_count,
+            schedule=mode.repeat_schedule,
+        )
+    return request
 
 
 def _compile_group_point_policy(
@@ -1213,6 +1316,16 @@ def _compile_gpo_schema_request(
         **(
             {"fit_lr": mode.backend.fit_lr}
             if mode.backend.fit_lr is not None
+            else {}
+        ),
+        **(
+            {"acquisition_num_starts": mode.backend.acquisition_num_starts}
+            if mode.backend.acquisition_num_starts is not None
+            else {}
+        ),
+        **(
+            {"surrogate_num_starts": mode.backend.surrogate_num_starts}
+            if mode.backend.surrogate_num_starts is not None
             else {}
         ),
     )
