@@ -24,10 +24,10 @@ from examples.prepared_scan_field_shift_spectroscopy import (
     PreparedScanFieldShiftSpectroscopy,
 )
 from examples.prepared_scan_grouped_line_family import PreparedScanGroupedLineFamily
+from examples.prepared_scan_rabi_flop_2d import PreparedScanRabiFlop2D
 from examples.prepared_scan_root_linear_scan import (
     PreparedScanRootLinearScan,
 )
-from examples.prepared_scan_rabi_flop_2d import PreparedScanRabiFlop2D
 from ndscan.dashboard.submission import ScanSubmissionBackend, select_submission_backend
 from ndscan.define import annotations
 from ndscan.define.default_analysis import AnalysisFeedback, CustomAnalysis, OnlineFit
@@ -68,6 +68,8 @@ from ndscan.scan.point_policy import (
 from ndscan.scan.request import ExecutionPolicy, PreviewPolicy, ScanRequest
 from ndscan.schema.scan_site import ScanSite
 from ndscan.submission.scan_submission_schema import (
+    ScanSubmissionGridModeSpec,
+    ScanSubmissionSchemaError,
     ScanSubmissionSpec,
     compile_scan_submission_schema,
     compile_scan_submission_spec,
@@ -723,6 +725,118 @@ class ScanSubmissionSchemaCompilationTest(HasEnvironmentCase):
             [point.axis_values for point in request.point_policy],
             [(1.0, 10.0), (1.0, 20.0), (0.0, 20.0), (0.0, 10.0)],
         )
+
+    def test_compile_grid_schema_can_repeat_points(self):
+        fragment = self.create(GridSchemaFragment, [])
+        request, overrides = compile_scan_submission_schema(
+            fragment,
+            {
+                "version": 1,
+                "mode": {
+                    "type": "grid",
+                    "num_repeats_per_point": 2,
+                    "repeat_schedule": "interleaved",
+                },
+                "entries": [
+                    {
+                        "id": "x",
+                        "kind": "param",
+                        "target": {"fqn": fragment.x.parameter.fqn, "path": "*"},
+                        "mode": {
+                            "type": "scan",
+                            "generator": {
+                                "type": "list",
+                                "range": {
+                                    "values": [0.0, 1.0],
+                                    "randomise_order": False,
+                                },
+                            },
+                        },
+                    }
+                ],
+                "execution": {},
+            },
+        )
+
+        self.assertEqual(overrides, {})
+        description = request.point_policy.describe()
+        self.assertEqual(description["kind"], "repeat")
+        self.assertEqual(description["max_repeats"], 2)
+        self.assertEqual(description["schedule"], "interleaved")
+        self.assertEqual(
+            request.point_policy.materialise_points(),
+            [(0.0,), (1.0,), (0.0,), (1.0,)],
+        )
+
+    @patch("ndscan.submission.scan_submission_schema.random.getrandbits", return_value=0)
+    def test_compile_grid_schema_can_globally_shuffle_repeated_points(self, _seed):
+        fragment = self.create(GridSchemaFragment, [])
+        request, overrides = compile_scan_submission_schema(
+            fragment,
+            {
+                "version": 1,
+                "mode": {
+                    "type": "grid",
+                    "num_repeats_per_point": 2,
+                    "repeat_schedule": "shuffled",
+                },
+                "entries": [
+                    {
+                        "id": "x",
+                        "kind": "param",
+                        "target": {"fqn": fragment.x.parameter.fqn, "path": "*"},
+                        "mode": {
+                            "type": "scan",
+                            "generator": {
+                                "type": "list",
+                                "range": {
+                                    "values": [0.0, 1.0],
+                                    "randomise_order": False,
+                                },
+                            },
+                        },
+                    }
+                ],
+                "execution": {},
+            },
+        )
+
+        self.assertEqual(overrides, {})
+        description = request.point_policy.describe()
+        self.assertEqual(description["kind"], "shuffled")
+        self.assertEqual(description["inner"]["kind"], "repeat")
+        self.assertEqual(
+            request.point_policy.materialise_points(),
+            [(1.0,), (0.0,), (0.0,), (1.0,)],
+        )
+
+    def test_globally_shuffled_repeats_must_be_finite(self):
+        mode = ScanSubmissionGridModeSpec(
+            num_repeats_per_point=None,
+            repeat_schedule="shuffled",
+        )
+        with self.assertRaisesRegex(ScanSubmissionSchemaError, "must be finite"):
+            mode.validate(name="mode")
+
+    def test_compile_grid_schema_maps_unbounded_repeats_to_large_fixed_count(self):
+        fragment = self.create(DictShimFragment, [])
+        request, overrides = compile_scan_submission_schema(
+            fragment,
+            {
+                "version": 1,
+                "mode": {
+                    "type": "grid",
+                    "num_repeats_per_point": None,
+                },
+                "entries": [],
+                "execution": {},
+            },
+        )
+
+        self.assertEqual(overrides, {})
+        description = request.point_policy.describe()
+        self.assertEqual(description["kind"], "repeat")
+        self.assertEqual(description["max_repeats"], 2**31 - 1)
 
     def test_make_fragment_prepared_scan_exp_accepts_compiled_schema_tuple(self):
         DictShimExperiment = make_fragment_prepared_scan_exp(
@@ -2133,7 +2247,7 @@ class PreparedScanCase(HasEnvironmentCase):
 
         with patch(
             "ndscan.runtime.executors.time.time",
-            side_effect=[999.0, 1000.0, 1001.0, 1002.0, 1003.0],
+            side_effect=[999.0, 1000.0, 1001.0, 1002.0, 1003.0, 1004.0, 1005.0, 1006.0],
         ):
             session = PreparedScan(fragment, fragment, request)
             session.execute()
@@ -2142,7 +2256,7 @@ class PreparedScanCase(HasEnvironmentCase):
         self.assertEqual(self.d(prefix, "site.start_unix_time"), 1000.0)
         self.assertEqual(
             self.d(prefix, "points.acquired_at_unix"),
-            [1001.0, 1002.0, 1003.0],
+            [1001.0, 1003.0, 1005.0],
         )
 
     def test_scan_submission_session_executes_and_observes_points_in_batches(self):
@@ -2160,7 +2274,18 @@ class PreparedScanCase(HasEnvironmentCase):
 
         with patch(
             "ndscan.runtime.persistence.time.time",
-            side_effect=[2000.0, 2001.0, 2002.0],
+            side_effect=[
+                2000.0,
+                2001.0,
+                2002.0,
+                2003.0,
+                2004.0,
+                2005.0,
+                2006.0,
+                2007.0,
+                2008.0,
+                2009.0,
+            ],
         ):
             session = PreparedScan(fragment, fragment, request)
             result = _execute_and_inspect(session)
@@ -2193,7 +2318,7 @@ class PreparedScanCase(HasEnvironmentCase):
         self.assertEqual(self.d(prefix, "batches.start_index"), [0, 2, 4])
         self.assertEqual(
             self.d(prefix, "batches.start_unix_time"),
-            [2000.0, 2001.0, 2002.0],
+            [2004.0, 2007.0, 2009.0],
         )
         self.assertEqual(self.d(prefix, "points.param_0"), [0.0, 1.0, 2.0, 3.0, 4.0])
         self.assertEqual(self.d(prefix, "points.channel_0"), [1.0, 2.0, 3.0, 4.0, 5.0])
@@ -2763,12 +2888,16 @@ class PreparedScanCase(HasEnvironmentCase):
         )
 
     def test_field_shift_spectroscopy_example_runs(self):
-        exp = self.create(PreparedScanFieldShiftSpectroscopy)
-        exp.prepare()
-        exp.run()
+        with patch(
+            "examples.prepared_scan_field_shift_spectroscopy.time.sleep",
+            return_value=None,
+        ):
+            exp = self.create(PreparedScanFieldShiftSpectroscopy)
+            exp.prepare()
+            exp.run()
 
         field_prefix = "ndscan.rid_0.site.root.subscans.scan_field."
-        freq_prefix = field_prefix + "scan_frequency."
+        freq_prefix = field_prefix + "subscans.scan_frequency."
 
         self.assertEqual(len(self.d(field_prefix, "points.param_0")), 5)
         self.assertAlmostEqual(
@@ -2805,7 +2934,7 @@ class PreparedScanCase(HasEnvironmentCase):
             exp.run()
 
         prefix = "ndscan.rid_0.site.root."
-        repeat_prefix = prefix + "repeat_scan."
+        repeat_prefix = prefix + "subscans.repeat_scan."
         self.assertEqual(len(self.d(prefix, "points.param_0")), 9)
         self.assertAlmostEqual(
             self.d(prefix, "analysis.output.fit_pi_time"),
@@ -2841,8 +2970,8 @@ class PreparedScanCase(HasEnvironmentCase):
             exp.run()
 
         prefix = "ndscan.rid_0.site.root."
-        freq_prefix = prefix + "scan_frequency."
-        repeat_prefix = freq_prefix + "repeat_scan."
+        freq_prefix = prefix + "subscans.scan_frequency."
+        repeat_prefix = freq_prefix + "subscans.repeat_scan."
 
         self.assertEqual(len(self.d(freq_prefix, "points.param_0")), 9)
         self.assertAlmostEqual(
@@ -2884,8 +3013,8 @@ class PreparedScanCase(HasEnvironmentCase):
             exp.run()
 
         field_prefix = "ndscan.rid_0.site.root.subscans.scan_field."
-        freq_prefix = field_prefix + "scan_frequency."
-        repeat_prefix = freq_prefix + "repeat_scan."
+        freq_prefix = field_prefix + "subscans.scan_frequency."
+        repeat_prefix = freq_prefix + "subscans.repeat_scan."
 
         self.assertEqual(len(self.d(field_prefix, "points.param_0")), 5)
         self.assertAlmostEqual(
@@ -2929,7 +3058,7 @@ class PreparedScanCase(HasEnvironmentCase):
             exp.run()
 
         prefix = "ndscan.rid_0.site.root."
-        repeat_prefix = prefix + "repeat_scan."
+        repeat_prefix = prefix + "subscans.repeat_scan."
 
         self.assertEqual(len(self.d(prefix, "points.channel_0")), 1)
         self.assertEqual(
@@ -3165,7 +3294,7 @@ class PreparedScanCase(HasEnvironmentCase):
             exp.run()
 
         root_prefix = "ndscan.rid_0.site.root."
-        child_prefix = root_prefix + "scan_frequency."
+        child_prefix = root_prefix + "subscans.scan_frequency."
         self.assertEqual(len(self.d(root_prefix, "points.channel_0")), 1)
         self.assertAlmostEqual(
             self.d(root_prefix, "points.channel_0")[0],
@@ -3677,6 +3806,12 @@ class PreparedScanCase(HasEnvironmentCase):
                 9.0,
                 10.0,
                 11.0,
+                12.0,
+                13.0,
+                14.0,
+                15.0,
+                16.0,
+                17.0,
             ],
         ):
             session = PreparedScan(parent, parent, request)
@@ -3685,15 +3820,15 @@ class PreparedScanCase(HasEnvironmentCase):
         root_prefix = "ndscan.rid_0.site.root."
         child_prefix = "ndscan.rid_0.site.root.subscans.child_scan."
         self.assertEqual(self.d(root_prefix, "site.start_unix_time"), 1.0)
-        self.assertEqual(self.d(root_prefix, "points.acquired_at_unix"), [6.0, 11.0])
-        self.assertEqual(self.d(child_prefix, "site.start_unix_time"), 7.0)
+        self.assertEqual(self.d(root_prefix, "points.acquired_at_unix"), [8.0, 16.0])
+        self.assertEqual(self.d(child_prefix, "site.start_unix_time"), 10.0)
         self.assertEqual(
             self.d(child_prefix, "segments.start_unix_time"),
-            [3.0, 8.0],
+            [3.0, 11.0],
         )
         self.assertEqual(
             self.d(child_prefix, "points.acquired_at_unix"),
-            [4.0, 5.0, 9.0, 10.0],
+            [4.0, 6.0, 12.0, 14.0],
         )
 
     def test_recursive_nested_scans_build_natural_site_tree(self):
