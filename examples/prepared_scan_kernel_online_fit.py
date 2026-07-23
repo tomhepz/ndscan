@@ -28,12 +28,12 @@ but the user-facing concepts should still remain:
 from __future__ import annotations
 
 import numpy as np
-
 from artiq.experiment import *
+
 from ndscan.define import *
 from ndscan.define import annotations
-from ndscan.scan import *
 from ndscan.runtime.api import *
+from ndscan.scan import *
 
 
 def fit_line(xs, ys) -> tuple[float, float]:

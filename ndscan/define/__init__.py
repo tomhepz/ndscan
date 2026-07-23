@@ -9,7 +9,14 @@ This package owns the structural experiment-building primitives:
 - small helper functions tightly coupled to those concepts.
 """
 
-from . import annotations, default_analysis, fragment, parameters, result_channels, utils
+from . import (
+    annotations,
+    default_analysis,
+    fragment,
+    parameters,
+    result_channels,
+    utils,
+)
 from .annotations import *
 from .default_analysis import *
 from .fragment import *

@@ -4,6 +4,7 @@ Tests for ndscan.experiment top-level runners.
 
 import json
 
+from artiq.experiment import *
 from fixtures import (
     AddOneAggregate,
     AddOneFragment,
@@ -18,7 +19,6 @@ from fixtures import (
 )
 from mock_environment import HasEnvironmentCase
 from sipyco import pyon
-from artiq.experiment import *
 
 from ndscan.define import *
 from ndscan.define.parameters import FloatParamStore

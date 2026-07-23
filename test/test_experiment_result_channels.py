@@ -1,7 +1,6 @@
 import unittest
 
 import numpy as np
-
 from mock_environment import HasEnvironmentCase
 
 from ndscan.define.result_channels import (

@@ -1,8 +1,9 @@
-import io
 import gzip
+import io
+from pathlib import Path
+
 import h5py
 import numpy as np
-from pathlib import Path
 
 FILE = "/home/lab/artiq-files/dnamic-lab/results/2026-04-15/12/000002761-ThreeImageRearrangementDashboardFragment.h5"
 

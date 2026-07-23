@@ -14,9 +14,9 @@ by default so the experiment opens with something immediately editable.
 
 from __future__ import annotations
 
-from ndscan.runtime.api import make_fragment_prepared_dashboard_scan_exp
-
 from prepared_scan_linear_scan import LinearResponseFragment
+
+from ndscan.runtime.api import make_fragment_prepared_dashboard_scan_exp
 
 
 class LinearResponseDashboardFragment(LinearResponseFragment):

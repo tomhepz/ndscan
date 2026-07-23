@@ -29,12 +29,11 @@ to see the ``p`` and ``x`` hierarchy in the saved data.
 from __future__ import annotations
 
 import numpy as np
-
 from artiq.experiment import *
+
 from ndscan.define import *
-from ndscan.define import annotations
-from ndscan.scan import *
 from ndscan.runtime.api import *
+from ndscan.scan import *
 
 
 class KernelLineFragment(ExpFragment):

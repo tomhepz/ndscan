@@ -45,8 +45,15 @@ import math
 import time
 
 import numpy as np
-
 from artiq.experiment import *
+
+from examples._binomial_chunk_analysis import (
+    aggregate_binomial_chunk_statistics,
+    build_binomial_chunk_analysis,
+    estimate_probability_from_counts,
+    make_binomial_chunk_stop_predicate,
+    make_binomial_repeat_stop_predicate,
+)
 from ndscan.define import *
 from ndscan.define import annotations
 from ndscan.fits import (
@@ -56,16 +63,13 @@ from ndscan.fits import (
     import_sensible_fitting,
 )
 from ndscan.runtime.api import *
-from ndscan.scan import ExplicitPointPolicy, RepeatPointPolicy, ScanRequest, SinglePointPolicy
-from ndscan.scan.request import ExecutionPolicy
-
-from examples._binomial_chunk_analysis import (
-    aggregate_binomial_chunk_statistics,
-    build_binomial_chunk_analysis,
-    estimate_probability_from_counts,
-    make_binomial_chunk_stop_predicate,
-    make_binomial_repeat_stop_predicate,
+from ndscan.scan import (
+    ExplicitPointPolicy,
+    RepeatPointPolicy,
+    ScanRequest,
+    SinglePointPolicy,
 )
+from ndscan.scan.request import ExecutionPolicy
 
 __all__ = [
     "POINT_DELAY_S",

@@ -18,11 +18,11 @@ The example is intentionally structured to be useful in the runtime viewer:
 from __future__ import annotations
 
 import math
-
-import numpy as np
 import time
 
+import numpy as np
 from artiq.experiment import *
+
 from ndscan.define import *
 from ndscan.define import annotations
 from ndscan.fits import (
@@ -33,7 +33,6 @@ from ndscan.fits import (
 )
 from ndscan.runtime.api import *
 from ndscan.scan import *
-
 
 TRUE_CENTER_AT_ZERO = 0.35
 TRUE_SHIFT_PER_FIELD = 0.28

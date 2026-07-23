@@ -5,6 +5,7 @@ Tests for subscan functionality.
 import json
 
 import numpy as np
+from artiq.experiment import *
 from fixtures import (
     AddOneCustomAnalysisFragment,
     AddOneFragment,
@@ -14,7 +15,6 @@ from fixtures import (
     TwoAnalysisFragment,
 )
 from mock_environment import ExpFragmentCase
-from artiq.experiment import *
 
 from ndscan.define import *
 from ndscan.legacy import *

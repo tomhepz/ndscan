@@ -2,13 +2,13 @@
 Tests for general fragment tree behaviour.
 """
 
+from artiq.experiment import *
 from fixtures import (
     AddOneFragment,
     MultiReboundAddOneFragment,
     ReboundReboundAddOneFragment,
 )
 from mock_environment import HasEnvironmentCase
-from artiq.experiment import *
 
 from ndscan.define import *
 from ndscan.define.parameters import IntParamStore

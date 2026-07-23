@@ -17,10 +17,10 @@ request uses ``ExecutionPolicy(max_points_per_batch=9)`` for the four-dimensiona
 from __future__ import annotations
 
 from artiq.experiment import *
+
 from ndscan.define import *
-from ndscan.define import annotations
-from ndscan.scan import *
 from ndscan.runtime.api import *
+from ndscan.scan import *
 
 
 class QuadraticLossFragment(ExpFragment):

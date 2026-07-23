@@ -21,10 +21,9 @@ from typing import Any
 from weakref import WeakSet
 
 import h5py
-from sipyco import pyon
-
 from artiq import __version__ as artiq_version
 from artiq.language import HasEnvironment
+from sipyco import pyon
 
 from ..scan.request import PreviewPolicy
 from ..schema.scan_site import ScanSite

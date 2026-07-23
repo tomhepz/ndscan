@@ -3,11 +3,10 @@ import time
 from enum import Enum, unique
 
 import numpy as np
+from artiq.experiment import *
 from oitg.errorbars import binom_onesided
 
-from artiq.experiment import *
 from ndscan.define import *
-from ndscan.define import annotations
 from ndscan.legacy import *
 
 

@@ -15,13 +15,13 @@ from ..utils import (
     NoAxesMode,
     shorten_to_unambiguous_suffixes,
 )
-from .scan_submission_options import ScanSubmissionModeSettings
-from .override_entry import ScanOverrideEntry, ScanPseudoparamEntry, OverrideEntry
+from .override_entry import OverrideEntry, ScanOverrideEntry, ScanPseudoparamEntry
 from .param_tree_dialog import OverrideProvider, OverrideStatus, ParamTreeDialog
 from .scan_options import list_scan_option_types
+from .scan_submission_options import ScanSubmissionModeSettings
 from .submission import (
-    ScanSubmissionBackend,
     LegacyScanOptionsState,
+    ScanSubmissionBackend,
     select_submission_backend,
 )
 from .utils import format_override_identity, load_icon_cached, set_column_resize_mode

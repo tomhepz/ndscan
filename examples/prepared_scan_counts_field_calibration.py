@@ -36,8 +36,8 @@ import math
 import time
 
 import numpy as np
-
 from artiq.experiment import *
+
 from ndscan.define import *
 from ndscan.define import annotations
 from ndscan.fits import (

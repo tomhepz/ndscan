@@ -20,8 +20,8 @@ from ..define.default_analysis import AnnotationContext, DefaultAnalysis
 from ..define.fragment import ExpFragment, RestartKernelTransitoryError, TransitoryError
 from ..define.parameters import ParamStore
 from ..define.result_channels import ResultChannel, ResultSink, SingleUseSink
-from .scan_generator import ScanGenerator, ScanOptions, generate_points
 from ..define.utils import is_kernel
+from .scan_generator import ScanGenerator, ScanOptions, generate_points
 
 __all__ = [
     "ScanAxis",

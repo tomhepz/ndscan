@@ -4,9 +4,9 @@ subscan from other fragments.
 """
 
 import oitg.fitting
+from artiq.experiment import *
 from rabi_flop import RabiFlopSim
 
-from artiq.experiment import *
 from ndscan.define import *
 from ndscan.define import annotations
 from ndscan.legacy import *

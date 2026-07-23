@@ -6,12 +6,12 @@ from collections.abc import Mapping
 from typing import Any
 
 from .common import DashboardSubmissionBackend, SubmittedOverride, SubmittedScanAxis
-from .scan import ScanSubmissionBackend
 from .legacy import (
     LegacyScanOptionsState,
     LegacySubmissionBackend,
     LegacySubmissionState,
 )
+from .scan import ScanSubmissionBackend
 
 __all__ = [
     "DashboardSubmissionBackend",

@@ -24,9 +24,6 @@ from typing import Any
 import numpy as np
 import pyqtgraph as pg
 
-pg.setConfigOption('background', 'w')
-pg.setConfigOption('foreground', 'k')
-
 from ..._qt import QtCore, QtGui, QtWidgets
 from ...fits.sensible import artifact_summary, curve_points_for_artifact
 from ...results.scan_site_reader import (
@@ -39,6 +36,9 @@ from .. import colormaps
 from .bo_mpl import BoCornerPlotWidget, site_supports_bo_corner_plot
 from .fitting import FitBackend, FitRequest, FitResult, default_fit_backend
 from .live import snapshot_from_live_values
+
+pg.setConfigOption("background", "w")
+pg.setConfigOption("foreground", "k")
 
 _POINT_INDEX_KEY = "__point_index__"
 _NO_GROUP_KEY = "__no_group__"

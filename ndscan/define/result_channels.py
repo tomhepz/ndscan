@@ -8,9 +8,8 @@ saved channel, then writes those values into scan-site datasets.
 
 from typing import Any
 
-import numpy as np
-
 import artiq.language.units
+import numpy as np
 from artiq.language import HasEnvironment, kernel, portable, rpc
 
 from .utils import dump_json

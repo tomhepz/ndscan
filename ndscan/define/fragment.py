@@ -15,11 +15,11 @@ from typing import Any, Callable
 
 from artiq.language import HasEnvironment, kernel, kernel_from_string, portable, rpc
 
+from ..scan.mapping import ParameterMapping
 from ..utils import strip_prefix
 from .default_analysis import DefaultAnalysis, ResultPrefixAnalysisWrapper
 from .parameters import ParamBase, ParamHandle, ParamStore
 from .result_channels import FloatChannel, ResultChannel
-from ..scan.mapping import ParameterMapping
 from .utils import is_kernel, path_matches_spec
 
 __all__ = [

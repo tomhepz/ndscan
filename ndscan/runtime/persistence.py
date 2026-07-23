@@ -17,12 +17,12 @@ from typing import TYPE_CHECKING, Any
 from artiq.language import HasEnvironment
 
 from ..define.result_channels import AppendingDatasetSink, ScalarDatasetSink
+from ..define.utils import dump_json, to_metadata_broadcast_type
 from ..schema.scan_site import (
     SCAN_SITE_SCHEMA_REVISION,
     ScanSite,
     make_scan_site_prefix,
 )
-from ..define.utils import dump_json, to_metadata_broadcast_type
 from ..utils import SCHEMA_REVISION_KEY
 
 if TYPE_CHECKING:

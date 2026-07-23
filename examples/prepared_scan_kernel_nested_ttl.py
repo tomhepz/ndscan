@@ -31,14 +31,13 @@ the device name in ``KernelTtlPulseLeafFragment.build_fragment()``.
 from __future__ import annotations
 
 import numpy as np
+from artiq.experiment import *
 from artiq.language.core import delay
 from artiq.language.units import us
 
-from artiq.experiment import *
 from ndscan.define import *
-from ndscan.define import annotations
-from ndscan.scan import *
 from ndscan.runtime.api import *
+from ndscan.scan import *
 
 
 class KernelTtlPulseLeafFragment(ExpFragment):

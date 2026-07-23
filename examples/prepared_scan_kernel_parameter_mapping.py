@@ -21,10 +21,10 @@ This file shows three closely related cases:
 from __future__ import annotations
 
 from artiq.experiment import *
+
 from ndscan.define import *
-from ndscan.define import annotations
-from ndscan.scan import *
 from ndscan.runtime.api import *
+from ndscan.scan import *
 
 
 class KernelHardwareDriveFragment(ExpFragment):

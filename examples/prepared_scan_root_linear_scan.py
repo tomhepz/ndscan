@@ -15,13 +15,13 @@ default analysis, and writes that fitted slope into the regular dataset DB under
 
 from __future__ import annotations
 
+from artiq.experiment import *
 from artiq.language import EnvExperiment
 
-from artiq.experiment import *
 from ndscan.define import *
 from ndscan.define import annotations
-from ndscan.scan import *
 from ndscan.runtime.api import *
+from ndscan.scan import *
 
 
 def _fit_line_through_origin(xs, ys) -> float:

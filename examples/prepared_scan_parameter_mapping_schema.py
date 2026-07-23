@@ -7,11 +7,10 @@ This is the schema-driven counterpart to ``prepared_scan_parameter_mapping.py``:
 - the physical ``drive`` parameter is rebound from a small text expression.
 """
 
-from ndscan.runtime.api import make_fragment_prepared_scan_exp
-from ndscan.submission.scan_submission_schema import compile_scan_submission_schema
-
 from prepared_scan_parameter_mapping import HardwareDriveFragment
 
+from ndscan.runtime.api import make_fragment_prepared_scan_exp
+from ndscan.submission.scan_submission_schema import compile_scan_submission_schema
 
 PreparedScanMappedLogicalAxisSchema = make_fragment_prepared_scan_exp(
     HardwareDriveFragment,

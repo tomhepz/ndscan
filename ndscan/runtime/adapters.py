@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from contextlib import suppress
 from collections.abc import Mapping
+from contextlib import suppress
 from typing import Any
 
-from artiq.language.core import TerminationRequested
 from artiq.language import EnvExperiment, HasEnvironment, PYONValue
+from artiq.language.core import TerminationRequested
 
-from .prepared import PreparedScan
 from ..define.fragment import ExpFragment
 from ..define.parameters import ParamStore
 from ..define.result_channels import ResultChannel
@@ -17,12 +16,12 @@ from ..scan.request import ScanRequest
 from ..schema.scan_site import make_scan_site_prefix
 from ..submission.scan_submission_schema import (
     ScanSubmissionGridModeSpec,
-    ScanSubmissionSchemaError,
     ScanSubmissionSpec,
     compile_scan_submission_schema,
     compile_scan_submission_spec,
 )
 from ..utils import PARAMS_ARG_KEY
+from .prepared import PreparedScan
 
 __all__ = [
     "ScanArgumentInterface",

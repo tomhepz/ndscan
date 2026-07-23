@@ -12,14 +12,11 @@ from ..submission.scan_submission_schema import (
     compile_scan_submission_schema,
     compile_scan_submission_spec,
 )
+from . import adapters as _adapters
 from .adapters import *
 from .context import *
 from .prepared import *
 from .program import *
-from . import adapters as _adapters
-from . import context as _context
-from . import prepared as _prepared
-from . import program as _program
 
 __all__ = [
     "ExecutionPolicy",

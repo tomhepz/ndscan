@@ -9,8 +9,8 @@ from typing import Any
 import numpy as np
 
 from ...results.scan_site_reader import (
-    ScanSiteSegmentAnalysis,
     ScanSiteData,
+    ScanSiteSegmentAnalysis,
     ScanSiteSnapshot,
 )
 

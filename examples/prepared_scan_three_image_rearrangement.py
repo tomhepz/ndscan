@@ -27,6 +27,7 @@ import math
 import time
 
 import numpy as np
+from artiq.experiment import *
 
 from examples._roi_condition_stats import (
     Occupied,
@@ -34,7 +35,6 @@ from examples._roi_condition_stats import (
     counts_to_occupancy_stack,
     parse_condition_syntax,
 )
-from artiq.experiment import *
 from ndscan.define import *
 from ndscan.runtime.api import *
 from ndscan.scan import *

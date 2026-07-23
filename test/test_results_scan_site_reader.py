@@ -11,11 +11,11 @@ from artiq.language import units
 from mock_environment import ExpFragmentCase
 
 import examples._roi_condition_stats as roi_condition_stats
-import examples.prepared_scan_results_api_demo as results_api_demo
-import examples.prepared_scan_three_image_rearrangement as three_image_rearrangement
 import examples.lab_offline_results_helpers as lab_results_helpers
 import examples.plot_three_image_rearrangement_quick_analysis as three_image_quick
 import examples.plot_three_image_rearrangement_snapshot as three_image_plot
+import examples.prepared_scan_results_api_demo as results_api_demo
+import examples.prepared_scan_three_image_rearrangement as three_image_rearrangement
 from ndscan.define.fragment import ExpFragment
 from ndscan.define.parameters import FloatParam
 from ndscan.define.result_channels import FloatChannel

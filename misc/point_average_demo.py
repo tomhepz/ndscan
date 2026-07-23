@@ -204,8 +204,8 @@ Wide band  = how different the sites are from one another.
 Those are different quantities.
 In the dephasing example, the wide band is often the more physically meaningful one.
 """
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 
 # ------------------------------------------------------------
 # Simulate Rabi oscillations at many sites

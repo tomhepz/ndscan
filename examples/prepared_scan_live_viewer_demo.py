@@ -24,8 +24,8 @@ from __future__ import annotations
 import time
 
 import numpy as np
-
 from artiq.experiment import *
+
 from ndscan.define import *
 from ndscan.define import annotations
 from ndscan.runtime.api import *

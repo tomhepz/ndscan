@@ -7,12 +7,12 @@ its result objects are structured internally.
 
 from __future__ import annotations
 
+import importlib
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-import importlib
-import sys
 
 import numpy as np
 

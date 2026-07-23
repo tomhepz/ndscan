@@ -30,15 +30,6 @@ from artiq.language import (
     rpc,
 )
 
-from ..utils import (
-    PARAMS_ARG_KEY,
-    SCHEMA_REVISION,
-    SCHEMA_REVISION_KEY,
-    NoAxesMode,
-    merge_no_duplicates,
-    shorten_to_unambiguous_suffixes,
-    strip_suffix,
-)
 from ..define.default_analysis import AnnotationContext
 from ..define.fragment import (
     ExpFragment,
@@ -53,6 +44,16 @@ from ..define.result_channels import (
     ResultChannel,
     ScalarDatasetSink,
 )
+from ..define.utils import dump_json, is_kernel, to_metadata_broadcast_type
+from ..utils import (
+    PARAMS_ARG_KEY,
+    SCHEMA_REVISION,
+    SCHEMA_REVISION_KEY,
+    NoAxesMode,
+    merge_no_duplicates,
+    shorten_to_unambiguous_suffixes,
+    strip_suffix,
+)
 from .scan_generator import GENERATORS, ScanOptions
 from .scan_runner import (
     ScanAxis,
@@ -62,7 +63,6 @@ from .scan_runner import (
     filter_default_analyses,
     select_runner_class,
 )
-from ..define.utils import dump_json, is_kernel, to_metadata_broadcast_type
 
 __all__ = [
     "ArgumentInterface",

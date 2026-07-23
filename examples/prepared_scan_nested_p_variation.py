@@ -24,12 +24,12 @@ through the new runtime while still reusing ndscan's fragment-side analysis API.
 from __future__ import annotations
 
 import numpy as np
-
 from artiq.experiment import *
+
 from ndscan.define import *
 from ndscan.define import annotations
-from ndscan.scan import *
 from ndscan.runtime.api import *
+from ndscan.scan import *
 
 
 def fit_line_through_origin(xs, ys) -> float:

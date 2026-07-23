@@ -14,10 +14,10 @@ the code-first examples.
 from __future__ import annotations
 
 from artiq.experiment import *
+
 from ndscan.define import *
-from ndscan.define import annotations
-from ndscan.scan import *
 from ndscan.runtime.api import *
+from ndscan.scan import *
 
 
 class DashboardMappedDriveFragment(ExpFragment):
