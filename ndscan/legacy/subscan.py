@@ -11,8 +11,11 @@ from functools import reduce
 
 from artiq.language import kernel, portable, rpc
 
-from ..utils import merge_no_duplicates, shorten_to_unambiguous_suffixes
-from ..define.default_analysis import AnnotationContext, DefaultAnalysis
+from ..define.default_analysis import (
+    AnalysisFeedback,
+    AnnotationContext,
+    DefaultAnalysis,
+)
 from ..define.fragment import ExpFragment, Fragment, RestartKernelTransitoryError
 from ..define.parameters import ParamHandle
 from ..define.result_channels import (
@@ -24,6 +27,8 @@ from ..define.result_channels import (
     SubscanChannel,
     TeeSink,
 )
+from ..define.utils import dump_json, is_kernel, to_metadata_broadcast_type
+from ..utils import merge_no_duplicates, shorten_to_unambiguous_suffixes
 from .scan_generator import ScanGenerator, ScanOptions, generate_points
 from .scan_runner import (
     ScanAxis,
@@ -34,7 +39,6 @@ from .scan_runner import (
     filter_default_analyses,
     select_runner_class,
 )
-from ..define.utils import dump_json, is_kernel, to_metadata_broadcast_type
 
 __all__ = ["setattr_subscan", "Subscan", "SubscanExpFragment"]
 
@@ -432,7 +436,11 @@ class Subscan:
                     analysis_sinks[name] = sink
             annotations = []
             for a in analyses:
-                annotations += a.execute(axis_data, result_data, context)
+                feedback = a.execute(axis_data, result_data, context)
+                if isinstance(feedback, AnalysisFeedback):
+                    annotations += feedback.annotations
+                else:
+                    annotations += feedback
             if annotations:
                 # Replace existing (online-fit) annotations if any analysis produced
                 # custom ones. This could be made configurable in the future.

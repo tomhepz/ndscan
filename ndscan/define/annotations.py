@@ -239,6 +239,10 @@ def curve_1d(
         parameters["x_indices"] = [int(index) for index in x_indices]
     if y_indices is not None:
         parameters["y_indices"] = [int(index) for index in y_indices]
+    if isinstance(x_values, np.ndarray):
+        x_values = x_values.tolist()
+    if isinstance(y_values, np.ndarray):
+        y_values = y_values.tolist()
     return Annotation(
         "curve",
         coordinates={x_axis: x_values, y_axis: y_values},
