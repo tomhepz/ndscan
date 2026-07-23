@@ -294,6 +294,11 @@ def _unnormalise_points(points: torch.Tensor, bounds: torch.Tensor) -> torch.Ten
     return bounds[0] + points * span
 
 
+def _normalised_bounds(bounds: torch.Tensor) -> torch.Tensor:
+    """Return dimensionless unit bounds with the same shape, dtype and device."""
+    return torch.stack((torch.zeros_like(bounds[0]), torch.ones_like(bounds[1])))
+
+
 def _find_mhcs_candidate(
     points_norm: torch.Tensor,
     *,
@@ -544,22 +549,38 @@ class LocalLengthscaleExplorationStrategy:
         state: NuboBayesianOptimisationState,
         max_points: int,
     ) -> torch.Tensor:
+        # The backend fits the GP in dimensionless coordinates. Generate the local
+        # length-scale grid in that same model space, then return ordinary physical
+        # coordinates like every other exploration strategy.
+        model_bounds = (
+            state.normalised_bounds
+            if state.normalised_bounds is not None
+            else state.bounds
+        )
+        model_observed_points = (
+            state.normalised_observed_points
+            if state.normalised_observed_points is not None
+            else state.observed_points
+        )
         center, _ = _surrogate_argmax(
             state.gp,
-            state.bounds,
+            model_bounds,
             num_starts=self.surrogate_num_starts,
         )
-        return _generate_local_exploration_points(
+        model_points = _generate_local_exploration_points(
             center,
             state.gp,
-            state.bounds,
-            state.observed_points,
+            model_bounds,
+            model_observed_points,
             num_points=min(max_points, self.num_points),
             axis_points=self.axis_points,
             pair_points=self.pair_points,
             span_in_lengthscales=self.span_in_lengthscales,
             min_normalised_distance=self.min_normalised_distance,
         )
+        if state.normalised_bounds is None:
+            return model_points
+        return _unnormalise_points(model_points, state.bounds)
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -793,7 +814,12 @@ def _propose_bo_batch(
 
 @dataclass(frozen=True)
 class NuboBayesianOptimisationState:
-    """State passed to optional exploration strategies."""
+    """State passed to optional exploration strategies.
+
+    ``observed_points`` and ``bounds`` always use the experiment's physical units.
+    The GP itself is fitted in dimensionless coordinates; strategies which inspect
+    the GP can use the optional normalised fields to work in the matching space.
+    """
 
     observed_points: torch.Tensor
     observed_objective_scores: torch.Tensor
@@ -801,6 +827,8 @@ class NuboBayesianOptimisationState:
     gp: GaussianProcess
     bounds: torch.Tensor
     batch_index: int
+    normalised_observed_points: torch.Tensor | None = None
+    normalised_bounds: torch.Tensor | None = None
 
 
 class NuboBatchBayesianOptimisationBackend:
@@ -848,8 +876,18 @@ class NuboBatchBayesianOptimisationBackend:
         | None = None,
     ):
         bounds_tensor = torch.as_tensor(bounds, dtype=dtype)
-        if bounds_tensor.shape[0] != 2:
-            raise ValueError("bounds must have shape (2, dims)")
+        if (
+            bounds_tensor.ndim != 2
+            or bounds_tensor.shape[0] != 2
+            or bounds_tensor.shape[1] == 0
+        ):
+            raise ValueError(
+                "bounds must have shape (2, dims) with at least one dimension"
+            )
+        if not torch.all(torch.isfinite(bounds_tensor)):
+            raise ValueError("bounds must be finite")
+        if torch.any(bounds_tensor[1] <= bounds_tensor[0]):
+            raise ValueError("Every upper bound must be greater than its lower bound")
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
         if max_batches is not None and max_batches < 1:
@@ -991,8 +1029,15 @@ class NuboBatchBayesianOptimisationBackend:
                 for row in self._seed_points[start:stop]
             ]
 
+        # All model fitting and acquisition optimisation happens in a unit hypercube.
+        # Keeping the optimiser's numerical coordinates dimensionless is essential:
+        # otherwise an axis expressed near 120 MHz makes order-one voltage/amplitude
+        # axes effectively invisible to the kernel, and an Adam step of 0.1 moves the
+        # frequency by only 0.1 Hz.
+        model_bounds = _normalised_bounds(self._bounds)
+        model_x_obs = _normalise_points(self._x_obs, self._bounds)
         gp, _ = _fit_exact_gp_model(
-            self._x_obs,
+            model_x_obs,
             self._y_obs_score,
             self._y_obs_err.clamp_min(self._observation_noise_floor),
             lr=self._fit_lr,
@@ -1012,6 +1057,8 @@ class NuboBatchBayesianOptimisationBackend:
                 gp=gp,
                 bounds=self._bounds,
                 batch_index=self._num_bo_batches,
+                normalised_observed_points=model_x_obs,
+                normalised_bounds=model_bounds,
             )
             explore_points = _to_point_tensor(
                 self._exploration_strategy(state, limit),
@@ -1026,13 +1073,18 @@ class NuboBatchBayesianOptimisationBackend:
                 min_normalised_distance=self._min_normalised_distance,
             )[:limit]
 
+        model_explore_points = _normalise_points(explore_points, self._bounds)
         bo_batch_size = limit - int(explore_points.shape[0])
-        bo_points = _propose_bo_batch(
+        model_bo_points = _propose_bo_batch(
             gp,
-            self._bounds,
+            model_bounds,
             batch_size=bo_batch_size,
             acquisition_name=self._acquisition_name,
-            x_pending=explore_points if explore_points.numel() > 0 else None,
+            x_pending=(
+                model_explore_points
+                if model_explore_points.numel() > 0
+                else None
+            ),
             num_starts=self._acquisition_num_starts,
             surrogate_num_starts=self._surrogate_num_starts,
             lr=self._batch_acq_lr,
@@ -1040,6 +1092,7 @@ class NuboBatchBayesianOptimisationBackend:
             samples=self._batch_mc_samples,
             beta=self._batch_ucb_beta,
         )
+        bo_points = _unnormalise_points(model_bo_points, self._bounds)
         bo_points = _filter_near_duplicates(
             bo_points,
             torch.vstack((self._x_obs, explore_points)),
@@ -1135,5 +1188,6 @@ class NuboBatchBayesianOptimisationBackend:
             "seed_points": int(self._seed_points.shape[0]),
             "min_normalised_distance": self._min_normalised_distance,
             "observation_noise_floor": self._observation_noise_floor,
+            "input_normalisation": "bounds",
             "exploration_strategy": exploration_description,
         }

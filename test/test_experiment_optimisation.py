@@ -117,6 +117,72 @@ class OptimisationStrategyTest(unittest.TestCase):
     "Optional Bayesian optimisation dependencies are not installed",
 )
 class BayesianOptimisationBackendTest(unittest.TestCase):
+    def test_backend_uses_normalised_model_coordinates_for_mixed_scale_axes(self):
+        bounds = torch.tensor(
+            [
+                [-0.3, 106_000_000.0],
+                [0.1, 122_000_000.0],
+            ],
+            dtype=torch.float64,
+        )
+        backend = NuboBatchBayesianOptimisationBackend(
+            bounds=bounds,
+            batch_size=2,
+            initial_points=[
+                [-0.3, 106_000_000.0],
+                [0.1, 122_000_000.0],
+            ],
+            fit_steps=2,
+            acquisition_num_starts=1,
+            surrogate_num_starts=1,
+            batch_mc_samples=8,
+            batch_acq_steps=2,
+            max_batches=1,
+        )
+
+        _ = backend.suggest(2)
+        backend.observe(
+            (
+                OptimiserObservation(
+                    point=(-0.3, 106_000_000.0),
+                    objective=0.2,
+                    noise_std=0.02,
+                ),
+                OptimiserObservation(
+                    point=(0.1, 122_000_000.0),
+                    objective=0.8,
+                    noise_std=0.02,
+                ),
+            )
+        )
+
+        model_candidate = torch.tensor([[0.25, 0.75]], dtype=torch.float64)
+        with (
+            patch(
+                "ndscan.scan.optimisation._fit_exact_gp_model",
+                return_value=(object(), None),
+            ) as fit_gp,
+            patch(
+                "ndscan.scan.optimisation._propose_bo_batch",
+                return_value=model_candidate,
+            ) as propose,
+        ):
+            suggestions = backend.suggest(1)
+
+        fitted_x = fit_gp.call_args.args[0]
+        torch.testing.assert_close(
+            fitted_x,
+            torch.tensor([[0.0, 0.0], [1.0, 1.0]], dtype=torch.float64),
+        )
+        torch.testing.assert_close(
+            propose.call_args.args[1],
+            torch.tensor([[0.0, 0.0], [1.0, 1.0]], dtype=torch.float64),
+        )
+        self.assertEqual(len(suggestions), 1)
+        self.assertAlmostEqual(suggestions[0].point[0], -0.2)
+        self.assertAlmostEqual(suggestions[0].point[1], 118_000_000.0)
+        self.assertEqual(backend.describe()["input_normalisation"], "bounds")
+
     def test_backend_returns_seed_points_then_bo_batch_with_exploration(self):
         backend = NuboBatchBayesianOptimisationBackend(
             bounds=[[-1.0], [1.0]],
@@ -238,6 +304,21 @@ if _OPTIMISATION_DEPS_AVAILABLE:
             self.cost.push((self.x.get() - 0.3) ** 2)
 
 
+    class OneDimQuadraticWithErrorFragment(ExpFragment):
+        def build_fragment(self):
+            self.setattr_param("x", FloatParam, "x", default=0.0)
+            self.setattr_result("cost", FloatChannel)
+            self.setattr_result(
+                "cost_error",
+                FloatChannel,
+                display_hints={"error_bar_for": self.cost.path},
+            )
+
+        def run_once(self):
+            self.cost.push((self.x.get() - 0.3) ** 2)
+            self.cost_error.push(0.05)
+
+
     @unittest.skipUnless(
         _OPTIMISATION_DEPS_AVAILABLE,
         "Optional Bayesian optimisation dependencies are not installed",
@@ -274,7 +355,7 @@ if _OPTIMISATION_DEPS_AVAILABLE:
             self.assertEqual(backend.describe()["kind"], "nubo_bayesian_optimisation")
 
         def test_compile_scan_submission_schema_builds_gpo_request(self):
-            fragment = self.create(OneDimQuadraticFragment, [])
+            fragment = self.create(OneDimQuadraticWithErrorFragment, [])
             request, overrides = compile_scan_submission_schema(
                 fragment,
                 {
@@ -314,8 +395,13 @@ if _OPTIMISATION_DEPS_AVAILABLE:
             )
 
             self.assertEqual(overrides, {})
-            self.assertEqual(request.point_policy.describe()["kind"], "ask_tell_optimiser")
-            backend_description = request.point_policy.describe()["backend"]
+            policy_description = request.point_policy.describe()
+            self.assertEqual(policy_description["kind"], "ask_tell_optimiser")
+            self.assertEqual(
+                policy_description["observation_extractor"]["noise_channel_key"],
+                "channel_1",
+            )
+            backend_description = policy_description["backend"]
             self.assertEqual(backend_description["fit_steps"], 7)
             self.assertEqual(backend_description["fit_lr"], 0.04)
             self.assertEqual(backend_description["acquisition_num_starts"], 3)
@@ -325,6 +411,7 @@ if _OPTIMISATION_DEPS_AVAILABLE:
             prefix = result.site_prefix
             self.assertEqual(self.dataset_db.get(prefix + "state.num_points"), 4)
             self.assertEqual(len(self.dataset_db.get(prefix + "points.channel_0")), 4)
+            self.assertEqual(len(self.dataset_db.get(prefix + "points.channel_1")), 4)
 
 
 if __name__ == "__main__":

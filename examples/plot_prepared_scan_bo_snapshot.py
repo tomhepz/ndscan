@@ -181,6 +181,24 @@ def _surrogate_argmax(
     return x_max.reshape(-1)
 
 
+def _normalise_points(
+    points: torch.Tensor,
+    bounds: torch.Tensor,
+) -> torch.Tensor:
+    return (points - bounds[0]) / (bounds[1] - bounds[0])
+
+
+def _unnormalise_points(
+    points: torch.Tensor,
+    bounds: torch.Tensor,
+) -> torch.Tensor:
+    return bounds[0] + points * (bounds[1] - bounds[0])
+
+
+def _normalised_bounds(bounds: torch.Tensor) -> torch.Tensor:
+    return torch.stack((torch.zeros_like(bounds[0]), torch.ones_like(bounds[1])))
+
+
 def _decode_bo_site(site: ScanSiteData) -> dict[str, object]:
     point_policy = site.metadata.get("scan.point_policy")
     if not isinstance(point_policy, dict):
@@ -237,6 +255,7 @@ def _plot_gp_corner(
     site: ScanSiteData,
     gp: GaussianProcess,
     bounds: torch.Tensor,
+    model_bounds: torch.Tensor,
     x_obs: np.ndarray,
     objective: np.ndarray,
     objective_err: np.ndarray,
@@ -248,12 +267,13 @@ def _plot_gp_corner(
     figsize: float = 3.0,
 ) -> tuple[plt.Figure, np.ndarray]:
     dim = x_obs.shape[1]
-    center_x = _surrogate_argmax(
+    center_model_x = _surrogate_argmax(
         gp,
-        bounds,
+        model_bounds,
         num_starts=argmax_num_starts,
     )
-    center_score, _ = _posterior_mean_std(gp, center_x)
+    center_x = _unnormalise_points(center_model_x, bounds)
+    center_score, _ = _posterior_mean_std(gp, center_model_x)
     center_objective = -float(center_score.item()) if minimise else float(center_score.item())
 
     mins, maxs = bounds[0].cpu().numpy(), bounds[1].cpu().numpy()
@@ -274,7 +294,10 @@ def _plot_gp_corner(
         x_flat[:, i] = Xi.ravel()
         x_flat[:, j] = Xj.ravel()
         grid = torch.as_tensor(x_flat, dtype=bounds.dtype, device=bounds.device)
-        mu_score, std = _posterior_mean_std(gp, grid)
+        mu_score, std = _posterior_mean_std(
+            gp,
+            _normalise_points(grid, bounds),
+        )
         mean_fields.append(score_to_objective(mu_score))
         std_fields.append(std.detach().cpu().numpy())
 
@@ -322,7 +345,10 @@ def _plot_gp_corner(
         x_flat[:, i] = Xi.ravel()
         x_flat[:, j] = Xj.ravel()
         grid = torch.as_tensor(x_flat, dtype=bounds.dtype, device=bounds.device)
-        mu_score, std = _posterior_mean_std(gp, grid)
+        mu_score, std = _posterior_mean_std(
+            gp,
+            _normalise_points(grid, bounds),
+        )
         mu = score_to_objective(mu_score).reshape(n_points, n_points)
         sigma = std.detach().cpu().numpy().reshape(n_points, n_points)
 
@@ -379,7 +405,10 @@ def _plot_gp_corner(
         xline = np.tile(center_x.cpu().numpy(), (n_points, 1))
         xline[:, i] = xi
         xline_tensor = torch.as_tensor(xline, dtype=bounds.dtype, device=bounds.device)
-        mu_score, std = _posterior_mean_std(gp, xline_tensor)
+        mu_score, std = _posterior_mean_std(
+            gp,
+            _normalise_points(xline_tensor, bounds),
+        )
         mu = score_to_objective(mu_score)
         sigma = std.detach().cpu().numpy()
 
@@ -470,11 +499,13 @@ def main() -> None:
     )
     bounds = torch.as_tensor(backend["bounds"], dtype=torch.float64)
     x_obs = torch.as_tensor(bo_site["x_obs"], dtype=torch.float64)
+    model_bounds = _normalised_bounds(bounds)
+    model_x_obs = _normalise_points(x_obs, bounds)
     objective_score = torch.as_tensor(bo_site["objective_score"], dtype=torch.float64)
     objective_err = torch.as_tensor(bo_site["objective_err"], dtype=torch.float64)
 
     gp, _ = _fit_exact_gp_model(
-        x_obs,
+        model_x_obs,
         objective_score,
         objective_err.clamp_min(noise_floor),
         lr=fit_lr,
@@ -485,6 +516,7 @@ def main() -> None:
         site=site,
         gp=gp,
         bounds=bounds,
+        model_bounds=model_bounds,
         x_obs=np.asarray(bo_site["x_obs"], dtype=float),
         objective=np.asarray(bo_site["objective"], dtype=float),
         objective_err=np.asarray(bo_site["objective_err"], dtype=float),

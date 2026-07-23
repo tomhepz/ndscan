@@ -10,6 +10,7 @@ from examples.prepared_scan_live_viewer_demo import PreparedScanLiveViewerDemo
 from ndscan._qt import QtGui, QtWidgets
 from ndscan.define.fragment import ExpFragment
 from ndscan.define.result_channels import FloatChannel
+from ndscan.plots.runtime.bo_mpl import decode_bo_site
 from ndscan.plots.runtime.fitting import (
     BuiltinFitBackend,
     FitRequest,
@@ -903,6 +904,12 @@ class RuntimeLiveSnapshotTest(unittest.TestCase):
                         "path": "objective",
                         "description": "Objective",
                         "type": "float",
+                    },
+                    "channel_1": {
+                        "path": "objective_error",
+                        "description": "Objective error",
+                        "type": "float",
+                        "display_hints": {"error_bar_for": "objective"},
                     }
                 }
             ),
@@ -928,6 +935,7 @@ class RuntimeLiveSnapshotTest(unittest.TestCase):
             ),
             prefix + "points.param_0": [-1.0, 0.0, 1.0],
             prefix + "points.channel_0": [1.0, 0.2, 0.8],
+            prefix + "points.channel_1": [0.1, 0.2, 0.3],
             prefix + "points.metadata.decision_source": ["seed", "bo", "explore"],
             prefix + "state.num_points": 3,
             prefix + "state.completed": False,
@@ -935,6 +943,10 @@ class RuntimeLiveSnapshotTest(unittest.TestCase):
 
         snapshot = snapshot_from_live_values(prefix, values)
         root = snapshot.get_site(())
+        np.testing.assert_allclose(
+            decode_bo_site(root)["objective_err"],
+            np.asarray([0.1, 0.2, 0.3]),
+        )
 
         widget = _SiteColumnWidget(
             site=root,

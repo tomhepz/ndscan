@@ -1282,7 +1282,9 @@ def _compile_gpo_schema_request(
     if not gpo_entries:
         raise ScanSubmissionSchemaError("GPO mode requires at least one gpo_scan entry")
 
-    objective_channel_key = _resolve_saved_channel_key(fragment, mode.objective.target.path)
+    objective_path = mode.objective.target.path
+    objective_channel_key = _resolve_saved_channel_key(fragment, objective_path)
+    noise_channel_key = _resolve_error_bar_channel_key(fragment, objective_path)
 
     bounds = [[], []]
     for entry in gpo_entries:
@@ -1331,7 +1333,10 @@ def _compile_gpo_schema_request(
     )
     point_policy = AskTellOptimiserPointPolicy(
         backend_instance,
-        extract_scalar_channel_objective(objective_channel_key),
+        extract_scalar_channel_objective(
+            objective_channel_key,
+            noise_channel_key=noise_channel_key,
+        ),
     )
     parameter_mappings = tuple(
         mapping
@@ -1386,14 +1391,50 @@ def _resolve_schema_param_handles(
     return handles
 
 
-def _resolve_saved_channel_key(fragment: ExpFragment, path: str) -> str:
+def _saved_channels_with_keys(
+    fragment: ExpFragment,
+) -> list[tuple[str, ResultChannel]]:
     channel_dict = dict[str, ResultChannel]()
     fragment._collect_result_channels(channel_dict)
-    saved_channels = [channel for channel in channel_dict.values() if channel.save_by_default]
-    for index, channel in enumerate(saved_channels):
+    saved_channels = [
+        channel for channel in channel_dict.values() if channel.save_by_default
+    ]
+    return [
+        (f"channel_{index}", channel)
+        for index, channel in enumerate(saved_channels)
+    ]
+
+
+def _resolve_saved_channel_key(fragment: ExpFragment, path: str) -> str:
+    for key, channel in _saved_channels_with_keys(fragment):
         if channel.path == path:
-            return f"channel_{index}"
+            return key
     raise ScanSubmissionSchemaError(f"No saved result channel matched path {path!r}")
+
+
+def _resolve_error_bar_channel_key(
+    fragment: ExpFragment,
+    objective_path: str,
+) -> str | None:
+    """Find the saved uncertainty channel conventionally linked to an objective.
+
+    Result channels already declare plotting relationships through
+    ``display_hints["error_bar_for"]``. Reusing that declaration means the dashboard
+    does not need a second selector which can disagree with the plotted error bars.
+    The resolved storage key is persisted explicitly in the objective extractor.
+    """
+    matches = [
+        (key, channel)
+        for key, channel in _saved_channels_with_keys(fragment)
+        if channel.display_hints.get("error_bar_for") == objective_path
+    ]
+    if len(matches) > 1:
+        paths = [channel.path for _, channel in matches]
+        raise ScanSubmissionSchemaError(
+            f"More than one saved error-bar channel refers to objective "
+            f"{objective_path!r}: {paths}"
+        )
+    return matches[0][0] if matches else None
 
 
 def _materialise_scan_mode_values(
