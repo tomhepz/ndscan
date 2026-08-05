@@ -141,6 +141,14 @@ def _pseudoparam_series_path(key: str, schema: Mapping[str, Any]) -> str:
     return base_path or key
 
 
+def _parameter_fqn(schema: Mapping[str, Any]) -> str | None:
+    param_schema = schema.get("param", {})
+    if not isinstance(param_schema, Mapping):
+        return None
+    fqn = param_schema.get("fqn")
+    return fqn if isinstance(fqn, str) and fqn else None
+
+
 def _channel_series_path(key: str, schema: Mapping[str, Any]) -> str:
     path = schema.get("path")
     return str(path) if isinstance(path, str) and path else key
@@ -454,6 +462,29 @@ class ScanSiteData:
             for key, schema in self.parameters.items()
         ]
 
+    def available_scanned_parameter_paths(self) -> list[str]:
+        """Return semantic paths for the logical scan axes on this site."""
+
+        return self.axis_paths()
+
+    def available_fixed_pseudoparam_paths(self) -> list[str]:
+        """Return semantic paths for fixed scan variables on this site."""
+
+        return [
+            _pseudoparam_series_path(key, entry)
+            for key, entry in self.fixed_pseudoparams.items()
+            if isinstance(entry, Mapping)
+        ]
+
+    def available_fixed_parameter_paths(self) -> list[str]:
+        """Return semantic paths for fixed fragment parameters on this site."""
+
+        return [
+            _parameter_series_path(key, entry)
+            for key, entry in self.fixed_parameters.items()
+            if isinstance(entry, Mapping)
+        ]
+
     def available_channel_paths(self) -> list[str]:
         """Return the semantic channel paths available on this site."""
 
@@ -667,6 +698,99 @@ class ScanSiteData:
                 f"{path!r}; available paths are {self.available_series_paths()}"
             )
         return key
+
+    def scanned_parameter_series(
+        self,
+        path: str,
+        *,
+        dtype: Any | None = None,
+    ) -> np.ndarray:
+        """Return one logical scan-axis series by semantic path."""
+
+        if path not in self.available_scanned_parameter_paths():
+            raise KeyError(
+                f"Site {'/'.join(self.path) or '<root>'} does not define scanned "
+                f"parameter path {path!r}; available paths are "
+                f"{self.available_scanned_parameter_paths()}"
+            )
+        return self.series(path, dtype=dtype)
+
+    def require_fixed_pseudoparam_value(self, path: str) -> Any:
+        """Return one fixed scan-variable value by semantic path."""
+
+        matches = [
+            entry
+            for key, entry in self.fixed_pseudoparams.items()
+            if isinstance(entry, Mapping)
+            and _pseudoparam_series_path(key, entry) == path
+        ]
+        if len(matches) != 1:
+            raise KeyError(
+                f"Could not resolve unique fixed pseudoparameter path {path!r} "
+                f"on site {'/'.join(self.path) or '<root>'}; available fixed "
+                f"pseudoparameters are {self.available_fixed_pseudoparam_paths()}"
+            )
+        return matches[0]["value"]
+
+    def _matching_fixed_parameters(
+        self,
+        *,
+        path: str | None = None,
+        fqn: str | None = None,
+    ) -> list[tuple[str, Mapping[str, Any]]]:
+        matches = []
+        for key, entry in self.fixed_parameters.items():
+            if not isinstance(entry, Mapping):
+                continue
+            if path is not None and _parameter_series_path(key, entry) != path:
+                continue
+            if fqn is not None and _parameter_fqn(entry) != fqn:
+                continue
+            matches.append((key, entry))
+        return matches
+
+    def _available_fixed_parameter_identities(self) -> list[tuple[str | None, str]]:
+        return [
+            (_parameter_fqn(entry), _parameter_series_path(key, entry))
+            for key, entry in self.fixed_parameters.items()
+            if isinstance(entry, Mapping)
+        ]
+
+    def require_fixed_parameter_value(self, path: str) -> Any:
+        """Return one fixed parameter value by semantic path.
+
+        Fixed parameters do not have per-point series; they are stored once in the
+        site metadata because their value is constant across every point in this site.
+        """
+
+        matches = self._matching_fixed_parameters(path=path)
+        if len(matches) != 1:
+            raise KeyError(
+                f"Could not resolve unique fixed parameter path {path!r} on site "
+                f"{'/'.join(self.path) or '<root>'}; available fixed parameters are "
+                f"{self._available_fixed_parameter_identities()}"
+            )
+        return matches[0][1]["value"]
+
+    def require_fixed_parameter_value_by_fqn(
+        self,
+        fqn: str,
+        *,
+        path: str | None = None,
+    ) -> Any:
+        """Return one fixed parameter value by FQN, optionally disambiguated by path."""
+
+        matches = self._matching_fixed_parameters(path=path, fqn=fqn)
+        if len(matches) != 1:
+            detail = f"fqn {fqn!r}"
+            if path is not None:
+                detail += f" and path {path!r}"
+            raise KeyError(
+                f"Could not resolve unique fixed parameter {detail} on site "
+                f"{'/'.join(self.path) or '<root>'}; available fixed parameters are "
+                f"{self._available_fixed_parameter_identities()}"
+            )
+        return matches[0][1]["value"]
 
     def _series_for_path(self, path: str) -> Any:
         """Return one saved or synthetic series by public series path."""
@@ -1188,6 +1312,28 @@ class ScanSiteSnapshot:
             ),
             key=lambda site: site.path,
         )
+
+    def format_site_tree(self, *, include_details: bool = False) -> str:
+        """Return an indented tree of scan sites in this snapshot."""
+
+        def label(site: ScanSiteData) -> str:
+            name = "<root>" if site.path == () else site.path[-1]
+            if not include_details:
+                return name
+            return f"{name} ({site.num_points} points, {site.fragment_fqn})"
+
+        lines = [label(self.get_site(()))]
+
+        def walk(parent_path: tuple[str, ...], prefix: str = "") -> None:
+            children = self.child_sites(parent_path)
+            for index, child in enumerate(children):
+                is_last = index == len(children) - 1
+                connector = "`- " if is_last else "+- "
+                lines.append(prefix + connector + label(child))
+                walk(child.path, prefix + ("   " if is_last else "|  "))
+
+        walk(())
+        return "\n".join(lines)
 
 
 def read_scan_site_snapshot(path: str | Path) -> ScanSiteSnapshot:

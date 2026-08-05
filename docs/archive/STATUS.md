@@ -48,7 +48,6 @@ What exists now:
 - `site.metadata_blobs()`
 - `site.require_metadata_blob(...)`
 - `site.segments_for_parent_point(...)`
-- one nontrivial array-splitting helper in `ndscan.results.series`
 - `ndscan_runtime_show result.h5` for prepared-runtime HDF5 snapshots
 
 There are also example scripts showing the intended offline usage pattern, including:

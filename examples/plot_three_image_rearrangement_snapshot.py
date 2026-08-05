@@ -28,8 +28,7 @@ from examples._roi_condition_stats import (
     counts_to_occupancy_stack,
     parse_condition_syntax,
 )
-from examples.lab_offline_results_helpers import LabNdscanRun
-from ndscan.results.scan_site_reader import ScanSiteData
+from ndscan.results.scan_site_reader import ScanSiteData, read_scan_site_snapshot
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -127,19 +126,18 @@ class ThreeImageReadout:
                 "Imaging blob occupancy_rule does not define 'threshold_parameter_fqn'"
             )
 
-        matches = [
-            entry["value"]
-            for entry in self.site.fixed_parameters.values()
-            if isinstance(entry, Mapping)
-            and isinstance(entry.get("param"), Mapping)
-            and entry["param"].get("fqn") == threshold_fqn
-        ]
-        if len(matches) != 1:
+        threshold_path = occupancy_rule.get("threshold_parameter_path")
+        if not isinstance(threshold_path, str):
             raise ValueError(
-                f"Could not resolve unique threshold parameter {threshold_fqn!r} on "
-                f"site {'/'.join(self.site.path) or '<root>'}"
+                "Imaging blob occupancy_rule does not define "
+                "'threshold_parameter_path'"
             )
-        return int(matches[0])
+        return int(
+            self.site.require_fixed_parameter_value_by_fqn(
+                threshold_fqn,
+                path=threshold_path,
+            )
+        )
 
     def image_channel(self, image_spec: Mapping[str, object]) -> str:
         return str(image_spec["image_channel"])
@@ -470,10 +468,10 @@ def plot_threshold_histograms(
 
 
 def main() -> None:
-    run = LabNdscanRun.open(SNAPSHOT_PATH)
+    snapshot = read_scan_site_snapshot(SNAPSHOT_PATH)
 
     image_readout = ThreeImageReadout.from_site(
-        run.site(IMAGE_SITE_PATH).site,
+        snapshot.get_site(IMAGE_SITE_PATH),
         blob_name=IMAGING_BLOB_NAME,
     )
     image_figure, _ = plot_average_images_with_rois(image_readout)
@@ -484,7 +482,7 @@ def main() -> None:
         bins=HISTOGRAM_BINS,
     )
 
-    line_plot_site = run.site(LINE_PLOT_SITE_PATH).site
+    line_plot_site = snapshot.get_site(LINE_PLOT_SITE_PATH)
     plot_saved_vs_recomputed_probability(
         line_plot_site,
         image_readout,

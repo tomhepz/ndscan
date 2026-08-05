@@ -129,23 +129,8 @@ The intended layering is:
 
 ### Series Helpers
 
-Generic pure-Python helpers live in:
-
-- [ndscan/results/series.py](/home/lab/artiq-files/install/ndscan/ndscan/results/series.py)
-
-The current intention is to keep this layer small. Offline scripts should usually use
+Keep generic pure-Python helpers small. Offline scripts should usually use
 `site.series(...)` plus normal NumPy slicing, sorting, and averaging directly.
-
-The one helper currently kept public is:
-
-```python
-from ndscan.results import series_slices_along_axis
-```
-
-This is still useful because splitting one saved `(points, ..., ...)` array-valued
-series into several traces by array axis is a small but repetitive piece of indexing
-logic. It remains domain-neutral: it knows about the `ndscan` site-tree schema, but
-not about lab-specific imaging, ROIs, thresholds, or physics.
 
 ## Repository Boundary
 
@@ -413,8 +398,8 @@ The offline path mirrors that:
    - `ScanSiteSnapshot` via
      [ndscan/results/scan_site_reader.py](/home/lab/artiq-files/install/ndscan/ndscan/results/scan_site_reader.py)
 3. plot-specific projection:
-   - either generic `ndscan.results.series` helpers, or lab/helper plotting code built
-     on the same object model
+   - normal NumPy/matplotlib code, or lab/helper plotting code built on the same
+     object model
 
 Prepared-runtime HDF5 files can also be opened directly in the runtime viewer:
 
@@ -460,7 +445,6 @@ Status: started.
 
 - `site.series(...)`
 - `site.describe_series(...)`
-- `ndscan.results.series` helpers for simple 1D payloads and array-channel slicing
 
 Only add more helpers when repeated real analysis scripts show a stable pattern.
 

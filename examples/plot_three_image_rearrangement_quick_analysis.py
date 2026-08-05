@@ -4,7 +4,7 @@ This is intentionally a normal Python script rather than a CLI. Edit the variabl
 the top, run the file, and then add whatever ad hoc fits, annotations, extra points, or
 figure styling are useful for the lab book.
 
-The script only uses the generic helpers in ``lab_offline_results_helpers.py``:
+The script only uses the generic ndscan offline reader API:
 
 - open a prepared-runtime HDF5 file,
 - pull saved series arrays by semantic path,
@@ -21,8 +21,8 @@ from examples._roi_condition_stats import (
     counts_to_occupancy_stack,
     parse_condition_syntax,
 )
-from examples.lab_offline_results_helpers import LabNdscanRun
 from examples.plot_three_image_rearrangement_snapshot import ThreeImageReadout
+from ndscan.results.scan_site_reader import ScanSiteData, read_scan_site_snapshot
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -90,7 +90,7 @@ def _apply_common_axis_markup(axis: plt.Axes, *, show_xlabel: bool = True) -> No
     axis.set_ylim(-0.05, 1.05)
 
 
-def plot_average_trace(site) -> tuple[plt.Figure, plt.Axes]:
+def plot_average_trace(site: ScanSiteData) -> tuple[plt.Figure, plt.Axes]:
     x_values = np.asarray(site.series(X_PATH), dtype=float)
     y_values = np.asarray(site.series(AVERAGE_Y_PATH), dtype=float)
     y_errors = np.asarray(site.series(AVERAGE_YERR_PATH), dtype=float)
@@ -114,28 +114,20 @@ def plot_average_trace(site) -> tuple[plt.Figure, plt.Axes]:
     return figure, axis
 
 
-def plot_group_traces(site) -> tuple[plt.Figure, plt.Axes]:
+def plot_group_traces(site: ScanSiteData) -> tuple[plt.Figure, plt.Axes]:
     x_values = np.asarray(site.series(X_PATH), dtype=float)
     order = np.argsort(x_values)
     x_plot = _plot_x(x_values[order])
 
-    group_values = site.split_array_series(
-        GROUP_Y_PATH,
-        axis=0,
-        indices=GROUP_INDICES,
-    )
-    group_errors = site.split_array_series(
-        GROUP_YERR_PATH,
-        axis=0,
-        indices=GROUP_INDICES,
-    )
+    group_values = np.asarray(site.series(GROUP_Y_PATH), dtype=float)
+    group_errors = np.asarray(site.series(GROUP_YERR_PATH), dtype=float)
 
     figure, axis = plt.subplots(figsize=(6.4, 4.2), constrained_layout=True)
     for group_index in GROUP_INDICES:
         axis.errorbar(
             x_plot,
-            np.asarray(group_values[group_index])[order],
-            yerr=np.asarray(group_errors[group_index])[order],
+            group_values[order, group_index],
+            yerr=group_errors[order, group_index],
             marker="o",
             linestyle="",
             capsize=2,
@@ -162,7 +154,7 @@ def _parse_optional_condition(condition_syntax: str | None):
 
 
 def build_adhoc_conditional_payload(
-    parent_site,
+    parent_site: ScanSiteData,
     readout: ThreeImageReadout,
     *,
     x: str,
@@ -176,14 +168,14 @@ def build_adhoc_conditional_payload(
     given_condition = _parse_optional_condition(given_syntax)
     event_condition = parse_condition_syntax(event_syntax)
 
-    pooled_probability = np.empty(parent_site.site.num_points, dtype=float)
-    pooled_error = np.empty(parent_site.site.num_points, dtype=float)
+    pooled_probability = np.empty(parent_site.num_points, dtype=float)
+    pooled_error = np.empty(parent_site.num_points, dtype=float)
     probability_by_group = []
     error_by_group = []
-    num_selected = np.empty(parent_site.site.num_points, dtype=int)
-    num_successes = np.empty(parent_site.site.num_points, dtype=int)
+    num_selected = np.empty(parent_site.num_points, dtype=int)
+    num_successes = np.empty(parent_site.num_points, dtype=int)
 
-    for point_index in range(parent_site.site.num_points):
+    for point_index in range(parent_site.num_points):
         segments = readout.site.segments_for_parent_point(point_index)
         if len(segments) != 1:
             raise ValueError(
@@ -225,7 +217,7 @@ def build_adhoc_conditional_payload(
 
 
 def plot_adhoc_condition(
-    site, readout: ThreeImageReadout
+    site: ScanSiteData, readout: ThreeImageReadout
 ) -> tuple[plt.Figure, tuple[plt.Axes, plt.Axes]]:
     payload = build_adhoc_conditional_payload(
         site,
@@ -278,10 +270,10 @@ def plot_adhoc_condition(
 
 
 def main() -> None:
-    run = LabNdscanRun.open(SNAPSHOT_PATH)
-    site = run.site(SITE_PATH)
+    snapshot = read_scan_site_snapshot(SNAPSHOT_PATH)
+    site = snapshot.get_site(SITE_PATH)
     readout = ThreeImageReadout.from_site(
-        run.site(IMAGE_SITE_PATH).site,
+        snapshot.get_site(IMAGE_SITE_PATH),
         blob_name=IMAGING_BLOB_NAME,
     )
 

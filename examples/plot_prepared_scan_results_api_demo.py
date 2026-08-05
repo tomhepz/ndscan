@@ -21,7 +21,7 @@ import pprint
 import matplotlib.pyplot as plt
 import numpy as np
 
-from ndscan.results import read_scan_site_snapshot, series_slices_along_axis
+from ndscan.results import read_scan_site_snapshot
 
 # %%
 
@@ -191,19 +191,12 @@ axis.set_ylabel(root_series["mean_trace"].label)
 axis.set_title(f"Root array channel at parent point {selected_point_index}")
 figure.tight_layout()
 
-# %% Split one array channel into several scalar traces.
-sample_value_series = series_slices_along_axis(
-    root_site,
-    "mean_trace",
-    axis=0,
-    indices=TRACE_SAMPLE_INDICES,
-)
-
+# %% Slice one array channel into several scalar traces.
 figure, axis = plt.subplots(figsize=(7, 4))
-for sample_index, series_values in sample_value_series.items():
+for sample_index in TRACE_SAMPLE_INDICES:
     axis.plot(
         x_values,
-        np.asarray(series_values, dtype=float)[order],
+        mean_trace[order, sample_index],
         marker="o",
         linestyle="",
         label=f"sample {sample_index}",

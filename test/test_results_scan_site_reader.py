@@ -11,7 +11,6 @@ from artiq.language import units
 from mock_environment import ExpFragmentCase
 
 import examples._roi_condition_stats as roi_condition_stats
-import examples.lab_offline_results_helpers as lab_results_helpers
 import examples.plot_three_image_rearrangement_quick_analysis as three_image_quick
 import examples.plot_three_image_rearrangement_snapshot as three_image_plot
 import examples.prepared_scan_results_api_demo as results_api_demo
@@ -20,7 +19,6 @@ from ndscan.define.fragment import ExpFragment
 from ndscan.define.parameters import FloatParam
 from ndscan.define.result_channels import FloatChannel
 from ndscan.results.scan_site_reader import read_scan_site_snapshot
-from ndscan.results.series import series_slices_along_axis
 from ndscan.runtime.api import PreparedScan, prepare_child_scan
 from ndscan.scan.mapping import ParameterMapping, ScanVariable
 from ndscan.scan.point_policy import BasePoint, ExplicitPointPolicy
@@ -176,10 +174,8 @@ class ScanSiteReaderCase(ExpFragmentCase):
         with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
             self._write_snapshot(fragment, tmp.name, preview_complete=False)
             snapshot = read_scan_site_snapshot(tmp.name)
-            lab_run = lab_results_helpers.LabNdscanRun.open(tmp.name)
 
         site = snapshot.get_site(())
-        lab_site = lab_run.site(())
         self.assertEqual(snapshot.top_level_metadata["preview_complete"], False)
         self.assertEqual(site.path, ())
         self.assertEqual(list(site.raw_points["param_0"]), [0.0, 1.0, 2.0])
@@ -215,6 +211,8 @@ class ScanSiteReaderCase(ExpFragmentCase):
             ],
         )
         self.assertEqual(site.available_parameter_paths(), ["value"])
+        self.assertEqual(site.available_scanned_parameter_paths(), ["value"])
+        self.assertEqual(site.available_fixed_parameter_paths(), [])
         self.assertEqual(site.available_channel_paths(), ["result"])
         self.assertEqual(
             site.available_series_paths(),
@@ -226,6 +224,10 @@ class ScanSiteReaderCase(ExpFragmentCase):
         self.assertEqual(
             site.require_series_storage_key("acquired_at_unix"),
             "acquired_at_unix",
+        )
+        self.assertEqual(
+            list(site.scanned_parameter_series("value", dtype=float)),
+            [0.0, 1.0, 2.0],
         )
         self.assertEqual(list(site.series("value")), [0.0, 1.0, 2.0])
         self.assertEqual(list(site.series("point_index")), [0, 1, 2])
@@ -254,8 +256,6 @@ class ScanSiteReaderCase(ExpFragmentCase):
         self.assertEqual(descriptions["value"].scale, 1)
         self.assertEqual(descriptions["value"].is_numeric, True)
         self.assertEqual(descriptions["result"].label, "result")
-        self.assertEqual(list(lab_site.series("value")), [0.0, 1.0, 2.0])
-        self.assertEqual(list(lab_site.series("result")), [1.0, 2.0, 3.0])
         plot_choices = site.describe_plot_choices()
         self.assertEqual(
             [item.path for item in plot_choices.x.choices],
@@ -265,6 +265,33 @@ class ScanSiteReaderCase(ExpFragmentCase):
         self.assertEqual(plot_choices.y.default_path, "result")
         self.assertEqual(plot_choices.x.default.label, "value")
         self.assertEqual(plot_choices.y.default.label, "result")
+
+    def test_reads_fixed_parameter_values_by_path_and_fqn(self):
+        fragment = self.create(PlainAddOneFragment)
+        session = PreparedScan(
+            fragment,
+            fragment,
+            ScanRequest.single(),
+        )
+        session.execute()
+
+        with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
+            self._write_snapshot(fragment, tmp.name)
+            snapshot = read_scan_site_snapshot(tmp.name)
+
+        site = snapshot.get_site(())
+        value_fqn = fragment.value.parameter.fqn
+        self.assertEqual(site.available_scanned_parameter_paths(), [])
+        self.assertEqual(site.available_fixed_parameter_paths(), ["value"])
+        self.assertEqual(site.require_fixed_parameter_value("value"), 0.0)
+        self.assertEqual(site.require_fixed_parameter_value_by_fqn(value_fqn), 0.0)
+        self.assertEqual(
+            site.require_fixed_parameter_value_by_fqn(value_fqn, path="value"),
+            0.0,
+        )
+        with self.assertRaises(KeyError) as ctx:
+            site.require_fixed_parameter_value("missing")
+        self.assertIn("available fixed parameters", str(ctx.exception))
 
     def test_raises_clear_error_for_missing_channel_path(self):
         fragment = self.create(PlainAddOneFragment)
@@ -309,6 +336,11 @@ class ScanSiteReaderCase(ExpFragmentCase):
         self.assertEqual(list(site.raw_points["param_0"]), [0.5, 1.5, 2.5])
         self.assertEqual(site.choose_default_x_path(), "laser_frequency")
         self.assertEqual(site.axis_paths(), ["laser_frequency"])
+        self.assertEqual(site.available_scanned_parameter_paths(), ["laser_frequency"])
+        self.assertEqual(
+            list(site.scanned_parameter_series("laser_frequency", dtype=float)),
+            [0.0, 1.0, 2.0],
+        )
         self.assertEqual(site.axis_storage_keys(), ["pseudoparam_0"])
 
     def test_reads_fixed_pseudoparams_from_schema_compiled_scan(self):
@@ -391,6 +423,7 @@ class ScanSiteReaderCase(ExpFragmentCase):
 
         self.assertIn((), snapshot.sites)
         self.assertIn(("child_scan",), snapshot.sites)
+        self.assertEqual(snapshot.format_site_tree(), "<root>\n`- child_scan")
 
         root_site = snapshot.get_site(())
         self.assertFalse(
@@ -482,6 +515,10 @@ class ScanSiteReaderCase(ExpFragmentCase):
             [("child_scan",), ("child_scan", "grandchild_scan")],
         )
         self.assertEqual(recursive_panels[1].raw_points["param_0"], [20.0, 21.0])
+        self.assertEqual(
+            snapshot.format_site_tree(),
+            "<root>\n`- child_scan\n   `- grandchild_scan",
+        )
 
     def test_reads_imaging_blob_from_three_image_snapshot(self):
         with (
@@ -694,14 +731,11 @@ class ScanSiteReaderCase(ExpFragmentCase):
         np.testing.assert_allclose(x_values[order], np.array([9.7, 10.0, 10.3]))
         self.assertEqual(y_values.shape, (3,))
         self.assertEqual(y_errors.shape, (3,))
-        group_slices = series_slices_along_axis(
-            site,
-            "bright_pair_probability_image2_given_pair_image1_by_group",
-            axis=0,
-            indices=[0, 1],
+        group_values = np.asarray(
+            site.series("bright_pair_probability_image2_given_pair_image1_by_group")
         )
-        self.assertEqual(set(group_slices), {0, 1})
-        self.assertEqual(np.asarray(group_slices[0]).shape, (3,))
+        self.assertEqual(group_values[:, 0].shape, (3,))
+        self.assertEqual(group_values[:, 1].shape, (3,))
 
     def test_three_image_plot_helper_builds_saved_vs_recomputed_payload(self):
         with (
@@ -779,7 +813,7 @@ class ScanSiteReaderCase(ExpFragmentCase):
             self.assertEqual(len(first_samples), payload["num_points"])
 
         ad_hoc_payload = three_image_quick.build_adhoc_conditional_payload(
-            lab_results_helpers.LabNdscanSite(root_site),
+            root_site,
             readout,
             x="shot/probe_frequency",
             given_syntax=None,
@@ -847,6 +881,14 @@ class ScanSiteReaderCase(ExpFragmentCase):
         self.assertIn("scan.parameter_mappings", root_site.metadata)
         self.assertIn("scan.point_policy", root_site.metadata)
         self.assertIn("carrier_frequency", root_site.fixed_pseudoparams)
+        self.assertEqual(
+            root_site.available_fixed_pseudoparam_paths(),
+            ["carrier_frequency"],
+        )
+        self.assertEqual(
+            root_site.require_fixed_pseudoparam_value("carrier_frequency"),
+            results_api_demo.CARRIER_FREQUENCY_MHZ * units.MHz,
+        )
         logical_frequency_values = np.asarray(
             root_site.series("logical_frequency"), dtype=float
         )
@@ -923,10 +965,9 @@ class ScanSiteReaderCase(ExpFragmentCase):
             three_image_rearrangement.IMAGING_READOUT_BLOB_NAME
         )
         threshold_fqn = blob["occupancy_rule"]["threshold_parameter_fqn"]
-        threshold = next(
-            entry["value"]
-            for entry in repeat_site.fixed_parameters.values()
-            if entry["param"]["fqn"] == threshold_fqn
+        threshold = repeat_site.require_fixed_parameter_value_by_fqn(
+            threshold_fqn,
+            path=blob["occupancy_rule"]["threshold_parameter_path"],
         )
 
         pair_image1 = roi_condition_stats.parse_condition_syntax("1[0,1]")

@@ -10,7 +10,6 @@ from .scan_site_reader import (
     SeriesDescription,
     read_scan_site_snapshot,
 )
-from .series import series_slices_along_axis
 
 __all__ = [
     "ScanSiteSegmentAnalysis",
@@ -20,6 +19,5 @@ __all__ = [
     "PlotAxisChoices",
     "PlotChoices",
     "SeriesDescription",
-    "series_slices_along_axis",
     "read_scan_site_snapshot",
 ]
