@@ -45,10 +45,8 @@ from ..define.result_channels import (
     ScalarDatasetSink,
 )
 from ..define.utils import dump_json, is_kernel, to_metadata_broadcast_type
+from ..schema.constants import PARAMS_ARG_KEY, SCHEMA_REVISION, SCHEMA_REVISION_KEY
 from ..utils import (
-    PARAMS_ARG_KEY,
-    SCHEMA_REVISION,
-    SCHEMA_REVISION_KEY,
     NoAxesMode,
     merge_no_duplicates,
     shorten_to_unambiguous_suffixes,

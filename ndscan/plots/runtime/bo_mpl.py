@@ -16,11 +16,11 @@ objects, so the viewer only needs the normal runtime snapshot shape.
 
 from __future__ import annotations
 
+import importlib
 import itertools
 from collections.abc import Sequence
 
 import numpy as np
-import torch
 
 from ..._qt import QtWidgets
 from ...results.scan_site_reader import ScanSiteData
@@ -33,6 +33,8 @@ except ModuleNotFoundError:
     FigureCanvas = None
     Figure = None
     Line2D = None
+
+torch = None
 
 SOURCE_COLORS = {
     "seed": "#7a7a7a",
@@ -53,7 +55,10 @@ def site_supports_bo_corner_plot(site: ScanSiteData) -> bool:
     if point_policy.get("kind") != "ask_tell_optimiser":
         return False
     backend = point_policy.get("backend", {})
-    return isinstance(backend, dict) and backend.get("kind") == "nubo_bayesian_optimisation"
+    return (
+        isinstance(backend, dict)
+        and backend.get("kind") == "nubo_bayesian_optimisation"
+    )
 
 
 def _sorted_keys(keys: Sequence[str]) -> list[str]:
@@ -127,8 +132,7 @@ def _infer_error_bar_channel_key(
     matches = [
         key
         for key, schema in site.channels.items()
-        if schema.get("display_hints", {}).get("error_bar_for")
-        == objective_path
+        if schema.get("display_hints", {}).get("error_bar_for") == objective_path
     ]
     if len(matches) > 1:
         raise ValueError(
@@ -180,7 +184,9 @@ def decode_bo_site(site: ScanSiteData) -> dict[str, object]:
         objective_err = np.asarray(site.raw_points[noise_channel_key], dtype=float)
 
     decision_source = np.asarray(
-        site.raw_points.get("metadata.decision_source", ["observed"] * len(objective_score))
+        site.raw_points.get(
+            "metadata.decision_source", ["observed"] * len(objective_score)
+        )
     )
 
     return {
@@ -195,13 +201,16 @@ def decode_bo_site(site: ScanSiteData) -> dict[str, object]:
 
 
 def _require_bo_plot_dependencies():
+    global torch
     try:
+        if torch is None:
+            torch = importlib.import_module("torch")
         from gpytorch.likelihoods import FixedNoiseGaussianLikelihood
         from nubo.models import GaussianProcess, fit_gp
         from nubo.optimisation import single
     except ModuleNotFoundError as exc:
         raise RuntimeError(
-            "Optional Bayesian optimisation dependencies are not installed"
+            "Bayesian optimisation plots require ndscan[optimisation]"
         ) from exc
 
     return FixedNoiseGaussianLikelihood, GaussianProcess, fit_gp, single
@@ -258,7 +267,9 @@ def _surrogate_argmax(
 
     def negative_gp_mean(x: torch.Tensor | np.ndarray) -> float:
         if isinstance(x, np.ndarray):
-            xt = torch.as_tensor(x, dtype=train_inputs.dtype, device=train_inputs.device)
+            xt = torch.as_tensor(
+                x, dtype=train_inputs.dtype, device=train_inputs.device
+            )
         else:
             xt = x.to(dtype=train_inputs.dtype, device=train_inputs.device)
         xt = xt.reshape(1, -1)
@@ -329,6 +340,15 @@ def render_bo_site_to_figure(
     """Populate a matplotlib figure with a GP corner plot for one BO site."""
 
     try:
+        _require_bo_plot_dependencies()
+    except RuntimeError:
+        return _draw_message_figure(
+            figure,
+            "Bayesian Optimisation",
+            "Bayesian optimisation plots require ndscan[optimisation].",
+        )
+
+    try:
         bo_site = decode_bo_site(site)
         backend = bo_site["backend"]
         fit_steps = int(
@@ -350,7 +370,9 @@ def render_bo_site_to_figure(
         x_obs = torch.as_tensor(bo_site["x_obs"], dtype=torch.float64)
         model_bounds = _normalised_bounds(bounds)
         model_x_obs = _normalise_points(x_obs, bounds)
-        objective_score = torch.as_tensor(bo_site["objective_score"], dtype=torch.float64)
+        objective_score = torch.as_tensor(
+            bo_site["objective_score"], dtype=torch.float64
+        )
         objective_err = torch.as_tensor(bo_site["objective_err"], dtype=torch.float64)
 
         if x_obs.numel() == 0:
@@ -424,7 +446,9 @@ def _plot_gp_corner(
     )
     center_x = _unnormalise_points(center_model_x, bounds)
     center_score, _ = _posterior_mean_std(gp, center_model_x)
-    center_objective = -float(center_score.item()) if minimise else float(center_score.item())
+    center_objective = (
+        -float(center_score.item()) if minimise else float(center_score.item())
+    )
 
     mins, maxs = bounds[0].cpu().numpy(), bounds[1].cpu().numpy()
     ranges = list(zip(mins.tolist(), maxs.tolist()))

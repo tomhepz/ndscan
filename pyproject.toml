@@ -6,16 +6,31 @@ authors = [{ name = "David Nadlinger", email = "code@klickverbot.at" }]
 requires-python = ">=3.10"
 license = "LGPL-3.0-or-later"
 
-# Earlier versions of qasync had horrendous threading issues on Windows, which (for not
-# entirely obvious reasons) mostly show up on Python 3.10 and up. Thus far, ndscan still
-# works against both Qt 5 and Qt 6, but since early ARTIQ 9, upstream ARTIQ has switched
-# to Qt 6. If working against older versions of ARTIQ is of interest, we can revisit the
-# way the dependencies are specified here.
 dependencies = [
-    "artiq>=8.0.dev0",
     "h5py>=3.8.0",
-    "nubopy>=1.2.1",
     "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+runtime = [
+    "artiq>=8.0.dev0",
+    "oitg",
+    "sipyco",
+]
+gui = [
+    "matplotlib>=3.8.0",
+    "oitg",
+    "pyqt6>=6.5.2",
+    "pyqtgraph>=0.13.3",
+    "qasync>=0.27.1",
+]
+optimisation = [
+    "nubopy>=1.2.1",
+]
+all = [
+    "artiq>=8.0.dev0",
+    "matplotlib>=3.8.0",
+    "nubopy>=1.2.1",
     "oitg",
     "pyqt6>=6.5.2",
     "pyqtgraph>=0.13.3",
@@ -24,15 +39,12 @@ dependencies = [
 ]
 
 [project.scripts]
-ndscan_dataset_janitor = "ndscan.dataset_janitor:main"
-ndscan_show = "ndscan.show:main"
-ndscan_runtime_show = "ndscan.plots.runtime.show:main"
-ndscan_to_txt = "ndscan.to_txt:main"
+ndscan_dataset_janitor = "ndscan._entry_points:dataset_janitor"
+ndscan_show = "ndscan._entry_points:show"
 
 [dependency-groups]
 dev = [
     "ipykernel>=7.2.0",
-    "matplotlib>=3.8.0",
     "poethepoet>=0.22.1",
     "ruff>=0.14.11",
     "sphinx-rtd-theme>=1.3.0",

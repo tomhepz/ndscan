@@ -4,7 +4,8 @@ from typing import Any
 
 from sipyco.sync_struct import ModAction
 
-from ...utils import SCHEMA_REVISION_KEY, strip_prefix
+from ...schema.constants import SCHEMA_REVISION_KEY
+from ...utils import strip_prefix
 from . import (
     Annotation,
     Context,

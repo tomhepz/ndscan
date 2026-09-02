@@ -4,7 +4,7 @@ from typing import Any
 
 import h5py
 
-from ...utils import SCHEMA_REVISION_KEY
+from ...schema.constants import SCHEMA_REVISION_KEY
 from . import Context, FixedDataSource, Model, Root, ScanModel, SinglePointModel
 
 logger = logging.getLogger(__name__)

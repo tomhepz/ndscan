@@ -40,6 +40,7 @@ from ndscan.fits import (
     fit_data_with_model,
     import_sensible_fitting,
 )
+from ndscan.fits.oitg import FIT_OBJECTS
 from ndscan.runtime.api import (
     PointObservation,
     PreparedScan,
@@ -66,6 +67,7 @@ from ndscan.scan.point_policy import (
     ZipPointPolicy,
 )
 from ndscan.scan.request import ExecutionPolicy, PreviewPolicy, ScanRequest
+from ndscan.schema.constants import PARAMS_ARG_KEY
 from ndscan.schema.scan_site import ScanSite
 from ndscan.submission.scan_submission_schema import (
     ScanSubmissionGridModeSpec,
@@ -74,7 +76,6 @@ from ndscan.submission.scan_submission_schema import (
     compile_scan_submission_schema,
     compile_scan_submission_spec,
 )
-from ndscan.utils import FIT_OBJECTS, PARAMS_ARG_KEY
 
 _REAL_NP_LINSPACE = np.linspace
 

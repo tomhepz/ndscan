@@ -8,7 +8,7 @@ from typing import Any
 
 from sipyco import pyon
 
-from ..utils import PARAMS_ARG_KEY
+from ..schema.constants import PARAMS_ARG_KEY
 
 
 def extract_param_schema(arguments: dict[str, Any]) -> dict[str, Any]:

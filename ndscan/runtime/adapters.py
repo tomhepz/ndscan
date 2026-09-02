@@ -13,6 +13,7 @@ from ..define.fragment import ExpFragment
 from ..define.parameters import ParamStore
 from ..define.result_channels import ResultChannel
 from ..scan.request import ScanRequest
+from ..schema.constants import PARAMS_ARG_KEY
 from ..schema.scan_site import make_scan_site_prefix
 from ..submission.scan_submission_schema import (
     ScanSubmissionGridModeSpec,
@@ -20,7 +21,6 @@ from ..submission.scan_submission_schema import (
     compile_scan_submission_schema,
     compile_scan_submission_spec,
 )
-from ..utils import PARAMS_ARG_KEY
 from .prepared import PreparedScan
 
 __all__ = [

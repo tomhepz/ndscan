@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from ..utils import FIT_OBJECTS
+from ..fits.oitg import FIT_OBJECTS
 from .parameters import ParamHandle
 from .result_channels import ResultChannel
 
@@ -172,7 +172,7 @@ def curve(
     supported in the plot applet at this point).
 
     If the curve data comes from a functional relationship matching one of the
-    predefined fit types (:data:`ndscan.util.FIT_OBJECTS`), prefer
+    predefined fit types (:data:`ndscan.fits.oitg.FIT_OBJECTS`), prefer
     :func:`computed_curve`, as this allows for unlimited resolution (also if the user
     looks at a range outside that corresponding to the source scan) and is more
     efficient to store.
@@ -218,7 +218,7 @@ def curve_1d(
     annotations are currently only displayed for one-dimensional scans in the applet).
 
     If the curve data comes from a functional relationship matching one of the
-    predefined fit types (:data:`ndscan.util.FIT_OBJECTS`), prefer
+    predefined fit types (:data:`ndscan.fits.oitg.FIT_OBJECTS`), prefer
     :func:`computed_curve_1d` as this allows for unlimited resolution (also if the user
     looks at a range outside that corresponding to the source scan) and is more
     efficient to store.
@@ -256,14 +256,14 @@ def computed_curve(
     associated_channels: list | None = None,
 ) -> Annotation:
     """Create a curve annotation that is computed from a well-known fit function
-    (:data:`ndscan.util.FIT_OBJECTS`).
+    (:data:`ndscan.fits.oitg.FIT_OBJECTS`).
 
     This will typically be shown as a connected line in the plot applet. See
     :func:`curve`/:func:`curve_1d` for a variant defined by a discrete list of points
     instead of the evaluation of a function.
 
     :param function_name: The name of the function to use, matching the keys in
-        :data:`ndscan.util.FIT_OBJECTS`.
+        :data:`ndscan.fits.oitg.FIT_OBJECTS`.
     :param parameters: The fixed parameters to evaluate the function with at each point,
         given as a dictionary (see :attr:`oitg.fitting.FitBase.parameter_names` for the
         expected keys).

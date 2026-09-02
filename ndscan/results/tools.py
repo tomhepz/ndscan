@@ -1,6 +1,7 @@
 from typing import Any
 
-from ..utils import SCHEMA_REVISION_KEY, strip_suffix
+from ..schema.constants import SCHEMA_REVISION_KEY
+from ..utils import strip_suffix
 
 
 def find_ndscan_roots(datasets: dict[str, Any]) -> list[str]:

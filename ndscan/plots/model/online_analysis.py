@@ -5,7 +5,7 @@ from typing import Any
 from pyqtgraph import SignalProxy
 
 from ..._qt import QtCore
-from ...utils import FIT_OBJECTS
+from ...fits.oitg import FIT_OBJECTS
 
 
 class OnlineAnalysis(QtCore.QObject):

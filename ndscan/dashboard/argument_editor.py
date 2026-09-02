@@ -10,8 +10,8 @@ from artiq.gui.tools import LayoutWidget, WheelFilter
 from sipyco import pyon
 
 from .._qt import QtCore, QtGui, QtWidgets
+from ..schema.constants import PARAMS_ARG_KEY
 from ..utils import (
-    PARAMS_ARG_KEY,
     NoAxesMode,
     shorten_to_unambiguous_suffixes,
 )

@@ -10,7 +10,7 @@ import pyqtgraph
 from oitg import uncertainty_to_string
 
 from .._qt import QtCore
-from ..utils import FIT_OBJECTS
+from ..fits.oitg import FIT_OBJECTS
 from .model import AnnotationDataSource
 
 logger = logging.getLogger(__name__)

@@ -24,7 +24,7 @@ from ndscan.define import *
 from ndscan.define.parameters import FloatParamStore
 from ndscan.define.utils import is_kernel
 from ndscan.legacy import *
-from ndscan.utils import PARAMS_ARG_KEY, SCHEMA_REVISION, SCHEMA_REVISION_KEY
+from ndscan.schema.constants import PARAMS_ARG_KEY, SCHEMA_REVISION, SCHEMA_REVISION_KEY
 
 ScanAddOneExp = make_fragment_scan_exp(AddOneFragment)
 ScanReboundAddOneExp = make_fragment_scan_exp(ReboundAddOneFragment)

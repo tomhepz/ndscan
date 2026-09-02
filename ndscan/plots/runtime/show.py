@@ -18,10 +18,7 @@ from .viewer import RuntimePlotViewer
 def get_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Display a prepared-runtime ndscan HDF5 file in the runtime viewer",
-        epilog=(
-            "For legacy ndscan HDF5 files that use axes/channels/points.channel_* "
-            "datasets, use ndscan_show instead."
-        ),
+        epilog="Legacy ndscan HDF5 schemas are not supported by this viewer.",
     )
     parser.add_argument(
         "path",
@@ -57,8 +54,8 @@ def load_runtime_snapshot(path_or_magic: str) -> ScanSiteSnapshot:
     snapshot = read_scan_site_snapshot(path)
     if not snapshot.sites:
         raise RuntimeError(
-            f"No prepared-runtime scan sites found in {path}. If this is a legacy "
-            "ndscan file, use ndscan_show instead."
+            f"No prepared-runtime scan sites found in {path}. Legacy ndscan result "
+            "schemas are not supported by this viewer."
         )
     if () not in snapshot.sites:
         raise RuntimeError(f"Prepared-runtime snapshot {path} has no root scan site")

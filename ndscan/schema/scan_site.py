@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from artiq.language import HasEnvironment
+if TYPE_CHECKING:
+    from artiq.language import HasEnvironment
 
 __all__ = [
     "SCAN_SITE_SCHEMA_REVISION",

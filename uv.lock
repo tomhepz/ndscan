@@ -1211,22 +1211,41 @@ name = "ndscan"
 version = "0.4.0"
 source = { editable = "." }
 dependencies = [
-    { name = "artiq" },
     { name = "h5py" },
-    { name = "nubopy" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+
+[package.optional-dependencies]
+all = [
+    { name = "artiq" },
+    { name = "matplotlib" },
+    { name = "nubopy" },
     { name = "oitg" },
     { name = "pyqt6" },
     { name = "pyqtgraph" },
     { name = "qasync" },
     { name = "sipyco" },
 ]
+gui = [
+    { name = "matplotlib" },
+    { name = "oitg" },
+    { name = "pyqt6" },
+    { name = "pyqtgraph" },
+    { name = "qasync" },
+]
+optimisation = [
+    { name = "nubopy" },
+]
+runtime = [
+    { name = "artiq" },
+    { name = "oitg" },
+    { name = "sipyco" },
+]
 
 [package.dev-dependencies]
 dev = [
     { name = "ipykernel" },
-    { name = "matplotlib" },
     { name = "poethepoet" },
     { name = "ruff" },
     { name = "sphinx", version = "8.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -1237,21 +1256,31 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "artiq", git = "https://github.com/m-labs/artiq.git?branch=release-8" },
+    { name = "artiq", marker = "extra == 'all'", git = "https://github.com/m-labs/artiq.git?branch=release-8" },
+    { name = "artiq", marker = "extra == 'runtime'", git = "https://github.com/m-labs/artiq.git?branch=release-8" },
     { name = "h5py", specifier = ">=3.8.0" },
-    { name = "nubopy", specifier = ">=1.2.1" },
+    { name = "matplotlib", marker = "extra == 'all'", specifier = ">=3.8.0" },
+    { name = "matplotlib", marker = "extra == 'gui'", specifier = ">=3.8.0" },
+    { name = "nubopy", marker = "extra == 'all'", specifier = ">=1.2.1" },
+    { name = "nubopy", marker = "extra == 'optimisation'", specifier = ">=1.2.1" },
     { name = "numpy", specifier = ">=1.24" },
-    { name = "oitg", git = "https://github.com/oxfordiontrapgroup/oitg.git" },
-    { name = "pyqt6", specifier = ">=6.5.2" },
-    { name = "pyqtgraph", specifier = ">=0.13.3" },
-    { name = "qasync", specifier = ">=0.27.1" },
-    { name = "sipyco", git = "https://github.com/m-labs/sipyco.git?tag=v1.9" },
+    { name = "oitg", marker = "extra == 'all'", git = "https://github.com/oxfordiontrapgroup/oitg.git" },
+    { name = "oitg", marker = "extra == 'gui'", git = "https://github.com/oxfordiontrapgroup/oitg.git" },
+    { name = "oitg", marker = "extra == 'runtime'", git = "https://github.com/oxfordiontrapgroup/oitg.git" },
+    { name = "pyqt6", marker = "extra == 'all'", specifier = ">=6.5.2" },
+    { name = "pyqt6", marker = "extra == 'gui'", specifier = ">=6.5.2" },
+    { name = "pyqtgraph", marker = "extra == 'all'", specifier = ">=0.13.3" },
+    { name = "pyqtgraph", marker = "extra == 'gui'", specifier = ">=0.13.3" },
+    { name = "qasync", marker = "extra == 'all'", specifier = ">=0.27.1" },
+    { name = "qasync", marker = "extra == 'gui'", specifier = ">=0.27.1" },
+    { name = "sipyco", marker = "extra == 'all'", git = "https://github.com/m-labs/sipyco.git?tag=v1.9" },
+    { name = "sipyco", marker = "extra == 'runtime'", git = "https://github.com/m-labs/sipyco.git?tag=v1.9" },
 ]
+provides-extras = ["runtime", "gui", "optimisation", "all"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "ipykernel", specifier = ">=7.2.0" },
-    { name = "matplotlib", specifier = ">=3.8.0" },
     { name = "poethepoet", specifier = ">=0.22.1" },
     { name = "ruff", specifier = ">=0.14.11" },
     { name = "sphinx", specifier = ">=7.2.6" },

@@ -5,46 +5,6 @@ from enum import Enum, unique
 from itertools import pairwise
 from typing import Any, Protocol, TypeVar
 
-import oitg.fitting
-
-#: Registry of well-known fit procedure names.
-FIT_OBJECTS: dict[str, oitg.fitting.FitBase.FitBase] = {
-    n: getattr(oitg.fitting, n)
-    for n in [
-        "cos",
-        "decaying_sinusoid",
-        "detuned_square_pulse",
-        "exponential_decay",
-        "gaussian",
-        "line",
-        "lorentzian",
-        "rabi_flop",
-        "sinusoid",
-        "v_function",
-    ]
-}
-FIT_OBJECTS["parabola"] = oitg.fitting.shifted_parabola
-
-#: Name of the ``artiq.language.HasEnvironment`` argument that is used to confer the
-#: list of available parameters to the dashboard plugin, and to pass the information
-#: about scanned and overridden parameters to the :class:`FragmentScanExperiment`
-#: when it is launched.
-#:
-#: Users should not need to directly interface with this.
-PARAMS_ARG_KEY = "ndscan_params"
-
-#: Revision indicator for the schema of the data produced by experiments (e.g. name of
-#: datasets, semantics of parameters, etc.). Should be incremented on
-#: backwards-incompatible changes, so that clients can issue warnings on unsupported new
-#: versions, and, where support for older results files is desired, appropriate parsing
-#: code for previous revisions can be used.
-SCHEMA_REVISION = 2
-
-#: The current :data:`.SCHEMA_REVISION` is always saved directly under the root of the
-#: respective ndscan tree as `ndscan_schema_revision`, and hence can be used by
-#: analysis tools (e.g. ndscan_show) to locate all ndscan roots in a results file.
-SCHEMA_REVISION_KEY = "ndscan_schema_revision"
-
 
 @unique
 class NoAxesMode(Enum):

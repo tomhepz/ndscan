@@ -17,11 +17,11 @@ from ndscan.define.result_channels import (
     FloatChannel,
     ResultChannel,
 )
+from ndscan.fits.oitg import FIT_OBJECTS
 from ndscan.legacy.entry_point import run_fragment_once
 from ndscan.legacy.scan_generator import LinearGenerator
 from ndscan.legacy.scan_runner import ScanAxis, match_default_analysis
 from ndscan.legacy.subscan import SubscanExpFragment
-from ndscan.utils import FIT_OBJECTS
 
 TOLERATED_FIT_ERROR = 3e-2
 TOLERATED_REDUCED_CHI_SQUARED = 0.2

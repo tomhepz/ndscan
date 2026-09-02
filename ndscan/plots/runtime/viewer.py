@@ -25,13 +25,13 @@ import numpy as np
 import pyqtgraph as pg
 
 from ..._qt import QtCore, QtGui, QtWidgets
+from ...fits.oitg import FIT_OBJECTS
 from ...fits.sensible import artifact_summary, curve_points_for_artifact
 from ...results.scan_site_reader import (
     ScanSiteData,
     ScanSiteSegment,
     ScanSiteSnapshot,
 )
-from ...utils import FIT_OBJECTS
 from .. import colormaps
 from .bo_mpl import BoCornerPlotWidget, site_supports_bo_corner_plot
 from .fitting import FitBackend, FitRequest, FitResult, default_fit_backend

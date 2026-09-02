@@ -16,6 +16,19 @@ def _run_python(code: str) -> subprocess.CompletedProcess[str]:
 
 
 class ExperimentImportTest(unittest.TestCase):
+    def test_results_import_has_only_base_dependencies(self):
+        result = _run_python(
+            """
+            from ndscan.results import read_scan_site_snapshot
+            import sys
+            print(any(name in sys.modules for name in (
+                "artiq", "oitg", "pyqtgraph", "qasync", "torch"
+            )))
+            """
+        )
+
+        self.assertEqual(result.stdout.strip(), "False")
+
     def test_scan_wildcard_import_does_not_import_torch(self):
         result = _run_python(
             """
@@ -55,6 +68,17 @@ class ExperimentImportTest(unittest.TestCase):
                 install_hook()
                 tools.file_import(str(path))
 
+            print("torch" in sys.modules)
+            """
+        )
+
+        self.assertEqual(result.stdout.strip(), "False")
+
+    def test_runtime_viewer_import_does_not_import_torch(self):
+        result = _run_python(
+            """
+            from ndscan.plots.runtime import RuntimePlotViewer
+            import sys
             print("torch" in sys.modules)
             """
         )

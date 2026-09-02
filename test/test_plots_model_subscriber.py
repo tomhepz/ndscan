@@ -5,7 +5,7 @@ from sipyco.sync_struct import Notifier
 
 from ndscan.plots.model import Context
 from ndscan.plots.model.subscriber import SubscriberRoot
-from ndscan.utils import SCHEMA_REVISION, SCHEMA_REVISION_KEY
+from ndscan.schema.constants import SCHEMA_REVISION, SCHEMA_REVISION_KEY
 
 
 class SinglePointTest(unittest.TestCase):

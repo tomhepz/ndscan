@@ -59,14 +59,13 @@ older ARTIQ version, please see the
 branch instead** (or be prepared to resolve some issues yourself by
 selectively reverting a few changes).
 
-Once your environment is set up, install this package. For example, to use
-`ndscan` directly from the Git checkout without directly using the
-[Poetry](https://python-poetry.org/) dependency manager (see below):
+Plain `ndscan` is the lightweight offline result-reader installation and depends
+only on NumPy and h5py. To run experiments and the dashboard, install the runtime
+and GUI capabilities. For example, from this checkout:
 
-    (artiq) $ pip install -e .
+    (artiq) $ pip install -e '.[runtime,gui]'
 
-If you haven't already, also install the
-[oitg](http://github.com/OxfordIonTrapGroup/oitg) package.
+Add `optimisation`, or use `all`, when running Bayesian optimisation scans.
 
 You are then ready to run the sample experiments. Start the ARTIQ master
 process as usual
@@ -91,6 +90,13 @@ database, run the janitor process:
 generated datasets after a few minutes of delay. It should typically be
 started alongside `artiq_master`.
 
+Prepared-runtime HDF5 files can be opened with:
+
+    (artiq) $ ndscan_show result.h5
+
+The legacy viewer and text-export modules remain in the source tree pending a
+separate cleanup, but they are no longer installed as console commands.
+
 
 Developer notes
 ---------------
@@ -112,8 +118,8 @@ environment:
     # Create an isolated virtualenv in .venv
     $ uv venv
 
-    # Install all dependencies
-    $ uv sync
+    # Install all package capabilities and contributor tools
+    $ uv sync --all-extras
 
     # Activate the venv as usual
     # . .venv/bin/activate

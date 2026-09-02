@@ -25,7 +25,7 @@ from typing import Any
 import numpy as np
 from oitg.fitting.FitBase import FitBase, FitError
 
-from ..utils import FIT_OBJECTS
+from ..fits.oitg import FIT_OBJECTS
 from .annotations import (
     Annotation,
     AnnotationContext,

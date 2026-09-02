@@ -62,7 +62,7 @@ from ndscan.runtime.api import (
 )
 from ndscan.scan.mapping import ParameterMapping, ScanVariable
 from ndscan.scan.request import ExecutionPolicy, ScanRequest
-from ndscan.utils import SCHEMA_REVISION, SCHEMA_REVISION_KEY
+from ndscan.schema.constants import SCHEMA_REVISION, SCHEMA_REVISION_KEY
 
 
 def _execute_and_inspect(scan):
