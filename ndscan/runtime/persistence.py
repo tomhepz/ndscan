@@ -379,7 +379,10 @@ class ScanSiteDatasetWriter:
                 sink = streams.get(key)
                 if sink is None:
                     group = channel.stream if isinstance(channel.stream, str) else "streams"
-                    sink = StreamDatasetSink(self._owner, key, channel.shape, group)
+                    sink = StreamDatasetSink(
+                        self._owner, key, channel.shape, group,
+                        getattr(channel, "stream_compression", None),
+                    )
                     streams[key] = sink
                 elif sink.shape != channel.shape:
                     raise ValueError(f"Stream shape changed for {key!r}")

@@ -51,6 +51,20 @@ class RepeatedCameraFragment(ExpFragment):
         self.total.push(sum(result.values[self.camera.counts]))
 
 
+class CompressedCameraFragment(ExpFragment):
+    def build_fragment(self):
+        self.setattr_param("value", FloatParam, "value", 0.0)
+        self.setattr_result(
+            "image", ArrayChannel, shape=(2, 3), element_type="int",
+            stream="images",
+            stream_compression=dict(compression="gzip", compression_opts=4,
+                                    shuffle=True),
+        )
+
+    def run_once(self):
+        self.image.push(np.full((2, 3), int(self.value.get()), dtype=np.uint16))
+
+
 class StreamRuntimeTest(HasEnvironmentCase):
     def setUp(self):
         super().setUp()
@@ -174,3 +188,36 @@ class StreamRuntimeTest(HasEnvironmentCase):
                 self.assertEqual(f["datasets/ndscan.rid_0.site.root.state.num_points"][()], 1)
                 self.assertEqual(f["datasets"][
                     "ndscan.rid_0.site.root.points.channel_0"][0, 0, 0], 1)
+
+    def test_stream_group_and_compression_reach_artiq(self):
+        fragment = self.create(CompressedCameraFragment, [])
+        manager = fragment._HasEnvironment__dataset_mgr
+        with tempfile.TemporaryDirectory() as directory:
+            manager.results_filename = os.path.join(directory, "run.h5")
+            request = ScanRequest.explicit([fragment.value], [[1.0], [2.0]])
+            PreparedScan(fragment, fragment, request).execute()
+            manager.finalise()
+            with h5py.File(os.path.join(directory, "run.images.h5"), "r") as f:
+                (dataset,) = f["datasets"].values()
+                self.assertEqual(dataset.compression, "gzip")
+                self.assertTrue(dataset.shuffle)
+                np.testing.assert_array_equal(dataset[:, 0, 0], [1, 2])
+
+    def test_options_dropped_for_older_artiq(self):
+        from ndscan.define.result_channels import StreamDatasetSink
+
+        calls = []
+
+        class OldArtiqSink(StreamDatasetSink):
+            def create_stream_dataset(self, key, dtype, item_shape=()):
+                calls.append((key, dtype, item_shape))
+
+            def append_to_dataset(self, key, value):
+                pass
+
+        fragment = self.create(CameraFragment, [])
+        sink = OldArtiqSink(fragment, "k", (2,), "images", {"compression": "gzip"})
+        with self.assertLogs("ndscan.define.result_channels", "WARNING") as logs:
+            sink.push(np.zeros(2, dtype=np.uint16))
+        self.assertEqual(calls, [("k", np.dtype("uint16"), (2,))])
+        self.assertEqual(len(logs.records), 2)

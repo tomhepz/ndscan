@@ -178,30 +178,38 @@ class AppendingDatasetSink(ResultSink, HasEnvironment):
 class StreamDatasetSink(ResultSink, HasEnvironment):
     """Archive fixed-shape arrays without broadcasting or retaining their history."""
 
-    def build(self, key: str, shape: tuple[int, ...], group: str = "streams") -> None:
+    def build(
+        self,
+        key: str,
+        shape: tuple[int, ...],
+        group: str = "streams",
+        compression: dict[str, Any] | None = None,
+    ) -> None:
         self.key = key
         self.shape = shape
         self.group = group
+        self.compression = compression
         self._created = False
 
     def push(self, value: Any) -> None:
         # Integer channels preserve camera dtypes. Fix the exact dtype on first use;
         # ARTIQ then checks every append against this schema.
         if not self._created:
-            if self.group == "streams":
-                self.create_stream_dataset(self.key, value.dtype, self.shape)
-            elif "group" in inspect.signature(self.create_stream_dataset).parameters:
-                self.create_stream_dataset(
-                    self.key, value.dtype, self.shape, group=self.group
-                )
-            else:
+            options = {}
+            if self.group != "streams":
+                options["group"] = self.group
+            if self.compression:
+                options["compression"] = self.compression
+            supported = inspect.signature(self.create_stream_dataset).parameters
+            for name in [name for name in options if name not in supported]:
+                # Older ARTIQ: store the stream anyway, without this option.
                 logger.warning(
-                    "ARTIQ does not support stream groups; storing %s in the "
-                    "default stream group instead of %r",
+                    "ARTIQ does not support stream %s; ignoring %r for %s",
+                    name,
+                    options.pop(name),
                     self.key,
-                    self.group,
                 )
-                self.create_stream_dataset(self.key, value.dtype, self.shape)
+            self.create_stream_dataset(self.key, value.dtype, self.shape, **options)
             self._created = True
         self.append_to_dataset(self.key, value)
 
@@ -459,6 +467,8 @@ class ArrayChannel(ResultChannel):
         history is absent from runtime analysis/inspection. Current batch values
         remain available. The first value fixes the dtype; an unpushed channel has
         no dataset. Requires stream-capable ARTIQ and an HDF5 output location.
+    :param stream_compression: h5py filter options for a streamed channel, e.g.
+        ``dict(compression="gzip", compression_opts=4, shuffle=True)``.
     :param element_type: Numeric element type, currently ``"float"`` or ``"int"``.
         Integer numpy array payloads keep their concrete dtype, so camera-like data
         can be stored as e.g. ``uint16`` instead of being widened to platform ``int``.
@@ -478,6 +488,7 @@ class ArrayChannel(ResultChannel):
         save_by_default: bool = True,
         *,
         stream: bool | str = False,
+        stream_compression: dict[str, Any] | None = None,
         element_type: str = "float",
         shape: tuple[int, ...] | list[int],
         dim_names: tuple[str, ...] | list[str] | None = None,
@@ -519,6 +530,7 @@ class ArrayChannel(ResultChannel):
                     )
 
         self.stream = stream
+        self.stream_compression = stream_compression
         self.retain_history = not stream
         self.element_type = element_type
         self.shape = shape_tuple
