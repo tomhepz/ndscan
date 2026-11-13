@@ -145,6 +145,29 @@ class StreamGroupResultsTest(unittest.TestCase):
             np.testing.assert_array_equal(
                 file["datasets/" + IMAGE_KEY][1], self.images[1])
 
+    def test_partial_and_final_names_are_interchangeable(self):
+        data = _write_split(self.directory, self.images, self.traces)
+        images = self.directory / "000000007-Camera.images.h5"
+        # Results naming the final file while only the .partial one exists.
+        images.rename(images.with_name(images.name + ".partial"))
+        with read_scan_site_snapshot(data) as snapshot:
+            np.testing.assert_array_equal(
+                snapshot.get_site().series("camera/image")[0], self.images[0])
+        # Results naming the .partial file after it has been renamed.
+        with h5py.File(data, "a") as file:
+            manifest = json.loads(file.attrs["artiq_streams"])
+            manifest["images"]["file"] += ".partial"
+            file.attrs["artiq_streams"] = json.dumps(manifest)
+        images.with_name(images.name + ".partial").rename(images)
+        with read_scan_site_snapshot(data) as snapshot:
+            np.testing.assert_array_equal(
+                snapshot.get_site().series("camera/image")[1], self.images[1])
+        # Neither present (e.g. a synchronised copy during the run).
+        images.unlink()
+        with read_scan_site_snapshot(data) as snapshot:
+            with self.assertRaisesRegex(FileNotFoundError, "still being written"):
+                snapshot.get_site().series("camera/image")[0]
+
     def test_earlier_layout_without_links(self):
         data = _write_split(self.directory, self.images, self.traces, links=False)
         with read_scan_site_snapshot(data) as snapshot:

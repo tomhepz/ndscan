@@ -106,7 +106,9 @@ class StreamRuntimeTest(HasEnvironmentCase):
             scan = PreparedScan(fragment, fragment, request)
             scan.execute()
             self.assertEqual(scan.inspect().values[fragment.total], [3, 7])
-            self.assertEqual(sorted(os.listdir(directory)), ["run.h5", "run.streams.h5"])
+            # Mid-run (no finalise yet): the stream file is still .partial.
+            self.assertEqual(sorted(os.listdir(directory)),
+                             ["run.h5", "run.streams.h5.partial"])
             with read_scan_site_snapshot(manager.results_filename) as snapshot:
                 self.assertTrue(snapshot.in_progress)
                 child = snapshot.get_site(("shots",))

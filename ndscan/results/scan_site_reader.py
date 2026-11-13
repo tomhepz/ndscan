@@ -293,6 +293,12 @@ class MissingStreamSeries(FileSeries):
         self._set_shape((length, *schema.get("shape", ())), dtype)
 
     def __getitem__(self, selection):
+        if self.path.name.endswith(_PARTIAL_SUFFIX):
+            raise FileNotFoundError(
+                f"This stream is in {self.path.name}, which is still being written "
+                "and is not here (synchronised copies get it, without .partial, "
+                "when the run finishes)."
+            )
         raise FileNotFoundError(
             f"This stream is stored in {self.path.name}, which is not next to the "
             f"data file. Copy it to {self.path.parent} to read it."
@@ -337,6 +343,26 @@ def _read_datasets_group(
 
 
 _STREAMS_MANIFEST_ATTR = "artiq_streams"
+_PARTIAL_SUFFIX = ".partial"
+
+
+def _stream_file_path(directory: Path, name: str) -> Path:
+    """Locate a stream file, allowing for its ``.partial`` rename.
+
+    ARTIQ names a stream file ``<results>.<group>.h5.partial`` until the run is
+    complete, then renames it. A results file (or a copy synchronised separately)
+    may name either form while the other exists.
+    """
+    path = directory / name
+    if not path.exists():
+        other = (path.with_name(name[: -len(_PARTIAL_SUFFIX)])
+                 if name.endswith(_PARTIAL_SUFFIX)
+                 else path.with_name(name + _PARTIAL_SUFFIX))
+        if other.exists():
+            return other
+    return path
+
+
 def _open_stream_file(path: Path, attempts: int = 5) -> h5py.File:
     """Open a stream file, retrying while ARTIQ is briefly appending to it."""
     for attempt in range(attempts):
@@ -366,7 +392,7 @@ def _attach_streams(
     opened = []
     try:
         for entry in manifest.values():
-            path = file_path.parent / entry["file"]
+            path = _stream_file_path(file_path.parent, entry["file"])
             handle = _open_stream_file(path) if path.exists() else None
             if handle is not None:
                 opened.append(handle)
