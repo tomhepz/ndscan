@@ -31,6 +31,7 @@ from ndscan.plots.runtime.viewer import (
     _default_y_choices,
     _DisplayedPointSelection,
     _group_by_choices,
+    _is_numeric_point_stream,
     _series_error_bar_pen,
     _SeriesUiState,
     _SiteColumnWidget,
@@ -332,6 +333,49 @@ class RuntimeLiveSnapshotTest(unittest.TestCase):
                 ("__point_index__", "point_index"),
             ],
         )
+
+    def test_site_column_widget_handles_missing_channel_payload(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+        values = self._make_basic_root_values()
+        prefix = "ndscan.rid_0.site.root."
+        channels = json.loads(values[prefix + "scan.channels"])
+        channels["image"] = {
+            "path": "camera/image",
+            "type": "array",
+            "element_type": "int",
+            "shape": [2, 2],
+            "storage": "stream",
+        }
+        values[prefix + "scan.channels"] = json.dumps(channels)
+        values[prefix + "points.image"] = None
+        root = snapshot_from_live_values(prefix, values).get_site(())
+
+        self.assertIn("image", root.channels)
+        self.assertNotIn("image", root.raw_points)
+        self.assertFalse(_is_numeric_point_stream(None))
+
+        # A channel without live data must not prevent plotting other channels.
+        widget = _SiteColumnWidget(
+            site=root,
+            child_site_options=[],
+            selected_child_path=None,
+            parent_point_index=None,
+            selected_point_index=None,
+            selected_plot_mode=_PLOT_MODE_1D,
+            selected_x_key="param_0",
+            selected_y_key="channel_value",
+            selected_z_key=None,
+            selected_group_key=None,
+            show_lines=False,
+        )
+        try:
+            x, y = widget._current_plot_arrays
+            np.testing.assert_array_equal(x, [0.0, 1.0])
+            np.testing.assert_array_equal(y, [20.0, 21.0])
+        finally:
+            widget.close()
 
     def test_site_column_widget_shows_run_id_overlay(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

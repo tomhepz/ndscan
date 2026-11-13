@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+import logging
 from typing import Any
 
 import numpy as np
@@ -27,6 +28,8 @@ from nubo.models import GaussianProcess, fit_gp
 from nubo.optimisation import multi_sequential, single
 
 from .point_policy import BatchFeedback, OptimiserObservation, OptimiserSuggestion
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "CompositeExplorationStrategy",
@@ -43,7 +46,7 @@ __all__ = [
 
 @dataclass(frozen=True)
 class ScalarChannelObjectiveExtractor:
-    """Extract optimiser observations from one scalar result channel.
+    """Extract scalar optimiser observations, averaging array-valued channels.
 
     This is the common BO case:
 
@@ -53,21 +56,52 @@ class ScalarChannelObjectiveExtractor:
 
     The extractor is a real object rather than an anonymous closure so the runtime can
     persist enough metadata in ``scan.point_policy`` for offline GP refits.
+
+    Array objectives and error estimates use the arithmetic mean over all elements.
+    For error arrays this is a mean supplied error, not propagated uncertainty of
+    the mean (which would require assumptions about correlations).
     """
 
     channel_key: str
     noise_channel_key: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    _warned_array_channels: set[str] = field(
+        default_factory=set, init=False, repr=False, compare=False
+    )
+
+    def _as_scalar(self, channel_key: str, value: Any) -> float:
+        array = np.asarray(value)
+        if array.ndim == 0:
+            return float(array)
+        if array.size == 0:
+            raise ValueError(
+                f"Optimisation channel {channel_key!r} contains an empty array; "
+                "cannot compute its mean"
+            )
+        if channel_key not in self._warned_array_channels:
+            logger.warning(
+                "Optimisation channel %r contains an array (shape %s); using the "
+                "arithmetic mean over all elements as its scalar value. "
+                "Further array reductions for this channel will not be logged.",
+                channel_key,
+                array.shape,
+            )
+            self._warned_array_channels.add(channel_key)
+        return float(np.mean(array))
 
     def __call__(
         self, observation: Any, _feedback: BatchFeedback
     ) -> OptimiserObservation:
         axis_values = tuple(float(value) for value in observation.axis_values.values())
-        objective = float(observation.channel_values[self.channel_key])
+        objective = self._as_scalar(
+            self.channel_key, observation.channel_values[self.channel_key]
+        )
         noise_std = (
             None
             if self.noise_channel_key is None
-            else float(observation.channel_values[self.noise_channel_key])
+            else self._as_scalar(
+                self.noise_channel_key, observation.channel_values[self.noise_channel_key]
+            )
         )
         return OptimiserObservation(
             point=axis_values,
@@ -81,6 +115,7 @@ class ScalarChannelObjectiveExtractor:
             "kind": "scalar_channel",
             "channel_key": self.channel_key,
             "noise_channel_key": self.noise_channel_key,
+            "array_reduction": "mean",
             "metadata": dict(self.metadata),
         }
 
@@ -91,7 +126,7 @@ def extract_scalar_channel_objective(
     noise_channel_key: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> ScalarChannelObjectiveExtractor:
-    """Return a scalar-channel objective extractor for ask/tell optimisation."""
+    """Return an objective extractor; array-valued channels are reduced by mean."""
 
     return ScalarChannelObjectiveExtractor(
         channel_key=channel_key,

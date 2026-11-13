@@ -20,6 +20,7 @@ __all__ = [
     "ArraySink",
     "TeeSink",
     "AppendingDatasetSink",
+    "StreamDatasetSink",
     "ResettableAppendingDatasetSink",
     "ScalarDatasetSink",
     "ResultChannel",
@@ -37,11 +38,9 @@ class ResultSink:
     def push(self, value: Any) -> None:
         """Record a new value.
 
-        This should never fail; neither in the sense of raising an exception, nor (for
-        sinks that record a series of values) in the sense of failing to record the
-        presence of a value, as code consuming results relies on one ``push()`` each to
-        a set of result channels and subsequently sinks representing a single multi-
-        dimensional data point.
+        Successful pushes must record every value: consumers rely on one push to
+        each channel representing a complete point. Storage sinks can raise on
+        validation or I/O failure; callers must abort rather than silently omit data.
         """
         raise NotImplementedError
 
@@ -172,6 +171,23 @@ class AppendingDatasetSink(ResultSink, HasEnvironment):
         return [] if (self.last_value is None) else self.get_dataset(self.key)
 
 
+class StreamDatasetSink(ResultSink, HasEnvironment):
+    """Archive fixed-shape arrays without broadcasting or retaining their history."""
+
+    def build(self, key: str, shape: tuple[int, ...]) -> None:
+        self.key = key
+        self.shape = shape
+        self._created = False
+
+    def push(self, value: Any) -> None:
+        # Integer channels preserve camera dtypes. Fix the exact dtype on first use;
+        # ARTIQ then checks every append against this schema.
+        if not self._created:
+            self.create_stream_dataset(self.key, value.dtype, self.shape)
+            self._created = True
+        self.append_to_dataset(self.key, value)
+
+
 class ResettableAppendingDatasetSink(AppendingDatasetSink):
     """Appending dataset sink that can be reset to an empty dataset."""
 
@@ -263,6 +279,7 @@ class ResultChannel:
         self.description = description
         self.display_hints = {} if display_hints is None else display_hints
         self.save_by_default = save_by_default
+        self.retain_history = True
         self.sink = None
 
     def __repr__(self) -> str:
@@ -417,6 +434,11 @@ class ArrayChannel(ResultChannel):
     scalar slices or simple line families without forcing experiments to flatten the
     data into many separate scalar channels.
 
+    :param stream: Archive through ARTIQ stream storage in the prepared runtime.
+        Streamed channels are not broadcast and their history is absent from runtime
+        analysis/inspection. Current batch values remain available. The first value
+        fixes the dtype; an unpushed channel has no dataset. Requires stream-capable
+        ARTIQ and an HDF5 output location.
     :param element_type: Numeric element type, currently ``"float"`` or ``"int"``.
         Integer numpy array payloads keep their concrete dtype, so camera-like data
         can be stored as e.g. ``uint16`` instead of being widened to platform ``int``.
@@ -435,6 +457,7 @@ class ArrayChannel(ResultChannel):
         display_hints: dict[str, Any] | None = None,
         save_by_default: bool = True,
         *,
+        stream: bool = False,
         element_type: str = "float",
         shape: tuple[int, ...] | list[int],
         dim_names: tuple[str, ...] | list[str] | None = None,
@@ -475,6 +498,8 @@ class ArrayChannel(ResultChannel):
                         "the scale manually".format(unit)
                     )
 
+        self.stream = stream
+        self.retain_history = not stream
         self.element_type = element_type
         self.shape = shape_tuple
         self.dim_names = dim_names_tuple
@@ -501,6 +526,8 @@ class ArrayChannel(ResultChannel):
 
     def describe(self) -> dict[str, Any]:
         result = super().describe()
+        if self.stream:
+            result["storage"] = "stream"
         result["element_type"] = self.element_type
         result["shape"] = list(self.shape)
         result["dim_names"] = list(self.dim_names)

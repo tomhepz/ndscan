@@ -125,6 +125,10 @@ class ScanProgramBuilder:
             )
         ]
 
+        if any(getattr(binding.channel, "stream", False) for binding in channels):
+            if not hasattr(self._owner, "create_stream_dataset"):
+                raise RuntimeError("Streamed channels require stream-capable ARTIQ")
+
         parameter_mappings = _collect_parameter_mappings(fragment, request, axes)
         parameters = _build_bound_parameters(axes, parameter_mappings)
         missing_kernel_devices = _missing_kernel_core_devices(fragment)
@@ -151,7 +155,7 @@ class ScanProgramBuilder:
                 "fragment parameter to vary point-to-point; pure pseudoparam scans "
                 "with no mapped parameter targets are not yet supported"
             )
-        site_writer = ScanSiteDatasetWriter(self._owner, request.site)
+        site_writer = ScanSiteDatasetWriter(self._owner, request.site, channels)
         analysis_engine = ScanAnalysisEngine.build(fragment, axes, channels)
         return ScanProgram(
             fragment,
@@ -381,11 +385,12 @@ class ScanProgramRunner:
             return self._run_context
 
         inherited = current_run_context()
-        preview_policy = self._program.request.execution_policy.preview_policy
+        execution_policy = self._program.request.execution_policy
+        preview_policy = execution_policy.checkpoint_policy or execution_policy.preview_policy
         if inherited is not None:
             if preview_policy is not None:
                 raise ValueError(
-                    "Nested scans cannot configure their own preview policy; "
+                    "Nested scans cannot configure their own preview policy or checkpoint policy; "
                     "preview cadence is owned by the root run"
                 )
             self._run_context = inherited

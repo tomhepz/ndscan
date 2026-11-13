@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextlib import suppress
+from dataclasses import replace
 from typing import Any
 
 from artiq.language import EnvExperiment, HasEnvironment, PYONValue
@@ -12,7 +13,7 @@ from artiq.language.core import TerminationRequested
 from ..define.fragment import ExpFragment
 from ..define.parameters import ParamStore
 from ..define.result_channels import ResultChannel
-from ..scan.request import ScanRequest
+from ..scan.request import CheckpointPolicy, ScanRequest
 from ..schema.constants import PARAMS_ARG_KEY
 from ..schema.scan_site import make_scan_site_prefix
 from ..submission.scan_submission_schema import (
@@ -183,6 +184,7 @@ class PreparedDashboardScanExperiment(EnvExperiment):
         fragment_init,
         *,
         default_request_spec: ScanSubmissionSpec | Mapping[str, Any] | None = None,
+        checkpoint_policy: CheckpointPolicy | None = None,
         max_rtio_underflow_retries: int = 3,
         max_transitory_error_retries: int = 10,
     ) -> None:
@@ -191,6 +193,7 @@ class PreparedDashboardScanExperiment(EnvExperiment):
         if default_request_spec is None:
             default_request_spec = ScanSubmissionSpec(mode=ScanSubmissionGridModeSpec())
         self._default_request_spec = default_request_spec
+        self._checkpoint_policy = checkpoint_policy
         self._max_rtio_underflow_retries = max_rtio_underflow_retries
         self._max_transitory_error_retries = max_transitory_error_retries
         self._session = None
@@ -202,6 +205,10 @@ class PreparedDashboardScanExperiment(EnvExperiment):
             self.fragment,
             self._default_request_spec,
         )
+        if self._checkpoint_policy is not None:
+            request = replace(request, execution_policy=replace(
+                request.execution_policy, checkpoint_policy=self._checkpoint_policy
+            ))
         self._plot_prefix = make_scan_site_prefix(self, request.site)
         self._session = PreparedScan(
             self,
@@ -251,6 +258,7 @@ def make_fragment_prepared_dashboard_scan_exp(
     fragment_class: type[ExpFragment],
     default_request_spec: ScanSubmissionSpec | Mapping[str, Any] | None = None,
     *args,
+    checkpoint_policy: CheckpointPolicy | None = None,
     max_rtio_underflow_retries: int = 3,
     max_transitory_error_retries: int = 10,
 ) -> type[PreparedDashboardScanExperiment]:
@@ -261,6 +269,7 @@ def make_fragment_prepared_dashboard_scan_exp(
             super().build(
                 lambda: fragment_class(self, [], *args),
                 default_request_spec=default_request_spec,
+                checkpoint_policy=checkpoint_policy,
                 max_rtio_underflow_retries=max_rtio_underflow_retries,
                 max_transitory_error_retries=max_transitory_error_retries,
             )

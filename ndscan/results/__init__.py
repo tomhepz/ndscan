@@ -9,6 +9,7 @@ from .scan_site_reader import (
     ScanSiteSnapshot,
     SeriesDescription,
     read_scan_site_snapshot,
+    open_scan_site_snapshot,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "PlotChoices",
     "SeriesDescription",
     "read_scan_site_snapshot",
+    "open_scan_site_snapshot",
 ]

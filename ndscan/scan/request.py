@@ -31,6 +31,7 @@ from .point_policy import (
 
 __all__ = [
     "PreviewPolicy",
+    "CheckpointPolicy",
     "ExecutionPolicy",
     "ScanRequest",
 ]
@@ -63,6 +64,22 @@ class PreviewPolicy:
 
 
 @dataclass(frozen=True)
+class CheckpointPolicy:
+    """Archive the root run at completed batch boundaries, including child sites.
+
+    The interval is checked at those boundaries, not by a background timer. Completed
+    checkpoints are retained for recovery and mirroring, including after completion.
+    """
+
+    min_interval_s: float = 300.0
+    write_on_completion: bool = True
+
+    def __post_init__(self) -> None:
+        if not np.isfinite(self.min_interval_s) or self.min_interval_s < 0:
+            raise ValueError("min_interval_s must be finite and non-negative")
+
+
+@dataclass(frozen=True)
 class ExecutionPolicy:
     """Prepared-runtime scheduling and flush policy for one scan request.
 
@@ -73,8 +90,14 @@ class ExecutionPolicy:
 
     max_points_per_batch: int | None = None
     preview_policy: PreviewPolicy | None = None
+    checkpoint_policy: CheckpointPolicy | None = None
 
     def __post_init__(self) -> None:
+        if self.checkpoint_policy is not None:
+            if not isinstance(self.checkpoint_policy, CheckpointPolicy):
+                raise TypeError("checkpoint_policy must be a CheckpointPolicy instance")
+            if self.preview_policy is not None:
+                raise ValueError("Choose either preview_policy or checkpoint_policy")
         if self.max_points_per_batch is not None and self.max_points_per_batch <= 0:
             raise ValueError("max_points_per_batch must be positive when specified")
         if self.preview_policy is not None and not isinstance(

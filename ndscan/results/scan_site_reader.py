@@ -13,8 +13,8 @@ view.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +31,7 @@ __all__ = [
     "PlotChoices",
     "ScanSiteData",
     "read_scan_site_snapshot",
+    "open_scan_site_snapshot",
 ]
 
 
@@ -89,6 +90,8 @@ def _is_numeric_channel_schema(schema: dict[str, Any]) -> bool:
 
 
 def _is_numeric_point_stream(values: Any) -> bool:
+    if isinstance(values, FileSeries):
+        return values.ndim == 1 and values.dtype.kind in "biufc"
     try:
         array = np.asarray(values)
     except (TypeError, ValueError):
@@ -220,10 +223,59 @@ def _decode_dataset_value(key: str, raw: Any) -> Any:
     return raw
 
 
-def _read_datasets_group(group: h5py.Group) -> dict[str, Any]:
+class FileSeries:
+    """A sliceable HDF5 series. Metadata is cheap; indexing reads only that slice.
+
+    Keep the owning snapshot open while reading. NumPy conversion explicitly
+    loads the entire series; use slices for large image histories.
+    """
+
+    def __init__(self, dataset: h5py.Dataset):
+        self._dataset = dataset
+        self.shape = dataset.shape
+        self.dtype = dataset.dtype
+        self.ndim = dataset.ndim
+        self.size = dataset.size
+        self.nbytes = dataset.size * dataset.dtype.itemsize
+
+    def __len__(self):
+        return self.shape[0]
+
+    def __getitem__(self, selection):
+        if not self._dataset.id.valid:
+            raise ValueError("Snapshot is closed; load the selected data before closing it")
+        return self._dataset[selection]
+
+    def __array__(self, dtype=None, copy=None):
+        if copy is False:
+            raise ValueError("Reading an HDF5 series requires allocating an array")
+        return np.asarray(self[()], dtype=dtype)
+
+
+def _read_datasets_group(
+    group: h5py.Group, channel_filter: Callable[[str], bool] | None = None,
+    *, lazy: bool = False,
+) -> dict[str, Any]:
+    # Resolve semantic channel paths from the small schema before touching payloads.
+    excluded = set()
+    if channel_filter is not None:
+        for key, dataset in group.items():
+            if key.endswith("scan.channels"):
+                prefix = key[:-len("scan.channels")]
+                channels = _decode_dataset_value(key, dataset[()])
+                for name, schema in channels.items():
+                    if not channel_filter(_channel_series_path(name, schema)):
+                        excluded.add(prefix + "points." + name)
     datasets = {}
     for key, dataset in group.items():
-        datasets[key] = _decode_dataset_value(key, dataset[()])
+        if key in excluded:
+            continue
+        # All point streams stay on disk, including axes and point metadata.
+        # Scan schemas and bookkeeping are small and remain ordinary Python values.
+        if lazy and ".points." in key:
+            datasets[key] = FileSeries(dataset)
+        else:
+            datasets[key] = _decode_dataset_value(key, dataset[()])
     return datasets
 
 
@@ -585,7 +637,7 @@ class ScanSiteData:
         values: Any,
         schema: Mapping[str, Any] | None = None,
     ) -> SeriesDescription:
-        array = np.asarray(values)
+        array = values if isinstance(values, FileSeries) else np.asarray(values)
         display_metadata = self._series_display_metadata(
             path=path,
             kind=kind,
@@ -799,16 +851,21 @@ class ScanSiteData:
             return np.arange(self.num_points, dtype=np.int64)
         return self.raw_points[self.require_series_storage_key(path)]
 
-    def series(self, path: str, *, dtype: Any | None = None) -> np.ndarray:
-        """Return one saved series as a NumPy array by public series path.
+    def series(self, path: str, *, dtype: Any | None = None) -> np.ndarray | FileSeries:
+        """Return one saved series by public series path.
 
         The path may name a scanned parameter, pseudoparameter, result channel, direct
         runtime series, or synthetic stream such as ``point_index``. This is the
         simplest API for offline plotting code that wants to treat all saved series
-        uniformly.
+        uniformly. Snapshots opened with open_scan_site_snapshot() return a
+        FileSeries instead: index it to load a selection. Passing dtype explicitly
+        loads and converts the whole selected series.
         """
 
-        values = np.asarray(self._series_for_path(path))
+        source = self._series_for_path(path)
+        if isinstance(source, FileSeries) and dtype is None:
+            return source
+        values = np.asarray(source)
         if dtype is None:
             return values
         return values.astype(dtype, copy=False)
@@ -1297,6 +1354,20 @@ class ScanSiteSnapshot:
     path: Path
     top_level_metadata: dict[str, Any]
     sites: dict[tuple[str, ...], ScanSiteData]
+    _file: h5py.File | None = field(default=None, repr=False, compare=False)
+
+    def close(self) -> None:
+        """Close a lazy snapshot. Arrays already read remain usable."""
+        if self._file is not None:
+            self._file.close()
+
+    def __enter__(self):
+        if self._file is not None and not self._file.id.valid:
+            raise ValueError("Snapshot is closed")
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
 
     def get_site(self, path: tuple[str, ...] = ()) -> ScanSiteData:
         return self.sites[path]
@@ -1336,17 +1407,47 @@ class ScanSiteSnapshot:
         return "\n".join(lines)
 
 
-def read_scan_site_snapshot(path: str | Path) -> ScanSiteSnapshot:
-    """Read a prepared-runtime preview or final HDF5 snapshot."""
+def read_scan_site_snapshot(
+    path: str | Path, *, channel_filter: Callable[[str], bool] | None = None
+) -> ScanSiteSnapshot:
+    """Read a prepared-runtime checkpoint, preview, or final HDF5 snapshot.
 
-    file_path = Path(path)
-    with h5py.File(file_path, "r") as h5_file:
-        datasets = _read_datasets_group(h5_file["datasets"])
-        top_level_metadata = {
-            key: _decode_dataset_value(key, dataset[()])
-            for key, dataset in h5_file.items()
-            if key != "datasets" and key != "archive"
-        }
+    ``channel_filter`` receives each semantic channel path. Returning False skips
+    its payload before any HDF5 read; schema remains available in ``site.channels``.
+    Accessing an omitted series raises KeyError. The default loads all channels.
+    """
+
+    with h5py.File(path, "r") as file:
+        return _snapshot_from_file(file, Path(path), channel_filter)
+
+
+def open_scan_site_snapshot(
+    path: str | Path, *, channel_filter: Callable[[str], bool] | None = None
+) -> ScanSiteSnapshot:
+    """Open a fixed snapshot with file-backed point streams.
+
+    Use as a context manager or call close(). Tree/channel discovery and series
+    shape/dtype inspection do not read point payloads. Normal h5py slicing applies,
+    including images[50] and images[:, y0:y1, x0:x1]. Analysis/plotting helpers that
+    calculate from values may still load whole series. Virtual sources must remain
+    alongside their checkpoint throughout the reads.
+    """
+    file = h5py.File(path, "r")
+    try:
+        snapshot = _snapshot_from_file(file, Path(path), channel_filter, lazy=True)
+    except BaseException:
+        file.close()
+        raise
+    return snapshot
+
+
+def _snapshot_from_file(file, file_path, channel_filter, *, lazy=False):
+    datasets = _read_datasets_group(file["datasets"], channel_filter, lazy=lazy)
+    top_level_metadata = {
+        key: _decode_dataset_value(key, dataset[()])
+        for key, dataset in file.items()
+        if key != "datasets" and key != "archive"
+    }
 
     sites = {}
     for prefix in _find_site_prefixes(datasets):
@@ -1396,4 +1497,5 @@ def read_scan_site_snapshot(path: str | Path) -> ScanSiteSnapshot:
         path=file_path,
         top_level_metadata=top_level_metadata,
         sites=sites,
+        _file=file if lazy else None,
     )

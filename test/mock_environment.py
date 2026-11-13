@@ -19,6 +19,10 @@ class MockDatasetDB:
     def get(self, key):
         return self.data[key][1]
 
+    def get_metadata(self, key):
+        entry = self.data[key]
+        return entry[2] if len(entry) > 2 else {}
+
     def update(self, mod):
         # Copy mod before applying to avoid sharing references to objects
         # between this and the DatasetManager, which would lead to mods being

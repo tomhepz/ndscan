@@ -644,13 +644,12 @@ def _generic_point_stream_choice_label(key: str) -> str:
 
 
 def _is_numeric_point_stream(values: Any) -> bool:
-    if len(values) == 0:
-        return False
     try:
         array = np.asarray(values)
     except (TypeError, ValueError):
         return False
-    if array.ndim != 1:
+    # Channel metadata can arrive without a point payload (None).
+    if array.ndim != 1 or array.size == 0:
         return False
     try:
         np.asarray(values, dtype=float)

@@ -25,7 +25,7 @@ from artiq import __version__ as artiq_version
 from artiq.language import HasEnvironment
 from sipyco import pyon
 
-from ..scan.request import PreviewPolicy
+from ..scan.request import CheckpointPolicy, PreviewPolicy
 from ..schema.scan_site import ScanSite
 from .persistence import ScanSiteDatasetWriter
 
@@ -76,7 +76,7 @@ _persistent_kernel_parent_scan_context: list[_KernelParentScanContextProvider] =
 
 
 class PreviewCoordinator:
-    """Root-scoped coordination for preview HDF5 snapshots.
+    """Root-scoped coordination for previews or ARTIQ checkpoints.
 
     Every active scan-site writer registers here. A preview write first flushes those
     writers, then asks ARTIQ's dataset manager to write one HDF5 snapshot containing all
@@ -86,14 +86,17 @@ class PreviewCoordinator:
     def __init__(
         self,
         owner: HasEnvironment,
-        policy: PreviewPolicy,
+        policy: PreviewPolicy | CheckpointPolicy,
         *,
         run_start_unix_time: float,
     ):
         self.policy = policy
         self._owner = owner
         self._run_start_unix_time = run_start_unix_time
-        self._path = policy.resolve_path(owner)
+        self._checkpoint = isinstance(policy, CheckpointPolicy)
+        if self._checkpoint and not hasattr(owner, "checkpoint_datasets"):
+            raise RuntimeError("CheckpointPolicy requires checkpoint-capable ARTIQ")
+        self._path = None if self._checkpoint else policy.resolve_path(owner)
         self._writers: WeakSet[ScanSiteDatasetWriter] = WeakSet()
         self._last_preview_monotonic = time.monotonic()
         self._write_in_progress = False
@@ -113,7 +116,12 @@ class PreviewCoordinator:
         self._write_preview(preview_complete=False, monotonic_time=now)
 
     def write_completion_preview(self) -> None:
-        if self.policy.remove_on_completion:
+        # Finishing a repeated child is not the end of the run. Its batch
+        # boundaries already check the shared interval; only the root forces
+        # a final checkpoint.
+        if self._checkpoint and _current_effective_scan_context() is not None:
+            return
+        if not self._checkpoint and self.policy.remove_on_completion:
             self.remove_preview()
             return
         if not self.policy.write_on_completion or self._write_in_progress:
@@ -121,7 +129,7 @@ class PreviewCoordinator:
         self._write_preview(preview_complete=True, monotonic_time=time.monotonic())
 
     def remove_preview(self) -> None:
-        if self._write_in_progress:
+        if self._write_in_progress or self._checkpoint:
             return
         try:
             os.remove(self._path)
@@ -133,6 +141,13 @@ class PreviewCoordinator:
         try:
             for writer in tuple(self._writers):
                 writer.flush()
+
+            # ARTIQ checkpoints publish a fixed view without copying old images.
+            # Keep legacy preview filenames/cleanup unchanged for existing users.
+            if self._checkpoint:
+                self._owner.checkpoint_datasets()
+                self._last_preview_monotonic = time.monotonic()
+                return
 
             # Write through a temporary path and atomically replace the visible file so
             # external readers never see a half-written preview.

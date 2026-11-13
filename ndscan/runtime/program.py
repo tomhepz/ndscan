@@ -215,7 +215,11 @@ class ScanRuntimeStats:
 
 @dataclass
 class ScanInspection:
-    """Host-only inspection artifact for one completed prepared scan execution."""
+    """Host-only inspection artifact for one completed prepared scan execution.
+
+    ``values`` contains retained histories only; streamed channels are archived
+    separately and absent here, rather than represented by misleading empty lists.
+    """
 
     coordinates: OrderedDict[str, list[Any]]
     parameters: OrderedDict[str, list[Any]]
@@ -243,7 +247,10 @@ class ScanInspection:
         return cls(
             coordinates=OrderedDict((axis.identity, []) for axis in axes),
             parameters=OrderedDict((parameter.identity, []) for parameter in parameters),
-            values={binding.channel: [] for binding in channels},
+            values={
+                binding.channel: [] for binding in channels
+                if binding.channel.retain_history
+            },
             analysis_results={},
             analysis_artifacts={},
             online_analysis_results={},
@@ -277,8 +284,13 @@ class ScanInspection:
                 observation.parameter_values[parameter.key]
             )
 
+        # Archival streams remain in the current batch but must not accumulate
+        # in this second, analysis-facing history. Missing access raises KeyError.
         for binding in channels:
-            self.values[binding.channel].append(observation.channel_values[binding.key])
+            if binding.channel.retain_history:
+                self.values[binding.channel].append(
+                    observation.channel_values[binding.key]
+                )
 
         if observation.acquired_at_unix is not None:
             self.point_metadata.setdefault("point.acquired_at_unix", []).append(
@@ -486,6 +498,7 @@ def _make_batch_feedback(
         },
         result_data={
             binding.channel: tuple(result.values[binding.channel]) for binding in channels
+            if binding.channel.retain_history
         },
         online_analyses=online_analyses,
     )

@@ -16,7 +16,9 @@ from typing import TYPE_CHECKING, Any
 
 from artiq.language import HasEnvironment
 
-from ..define.result_channels import AppendingDatasetSink, ScalarDatasetSink
+from ..define.result_channels import (
+    AppendingDatasetSink, ScalarDatasetSink, StreamDatasetSink,
+)
 from ..define.utils import dump_json, to_metadata_broadcast_type
 from ..schema.constants import SCHEMA_REVISION_KEY
 from ..schema.scan_site import (
@@ -26,7 +28,7 @@ from ..schema.scan_site import (
 )
 
 if TYPE_CHECKING:
-    from .program import PointObservation
+    from .program import BoundResultChannel, PointObservation
 
 __all__ = ["ScanSiteDatasetWriter"]
 
@@ -50,7 +52,10 @@ class ScanSiteDatasetWriter:
     - ``points.channel_*`` for result channels.
     """
 
-    def __init__(self, owner: HasEnvironment, site: ScanSite):
+    def __init__(
+        self, owner: HasEnvironment, site: ScanSite,
+        channels: Sequence["BoundResultChannel"] = (),
+    ):
         self._owner = owner
         self._site = site
         self.prefix = make_scan_site_prefix(owner, site)
@@ -58,7 +63,11 @@ class ScanSiteDatasetWriter:
         # Point payload sinks are allocated lazily because their keys come from the
         # bound request. Structural streams such as batch/segment starts are known once
         # the site is created, so they are installed up front.
-        self._point_sinks = dict[str, AppendingDatasetSink]()
+        self._stream_channels = {
+            binding.key: binding.channel for binding in channels
+            if getattr(binding.channel, "stream", False)
+        }
+        self._point_sinks = dict[str, AppendingDatasetSink | StreamDatasetSink]()
         self._analysis_result_sinks = dict[str, ScalarDatasetSink]()
         self._batch_start_sink = self._make_appending_sink("batches.start_index")
         self._batch_start_time_sink = self._make_appending_sink(
@@ -353,10 +362,26 @@ class ScanSiteDatasetWriter:
         """
         self.flush()
 
-    def _get_point_sink(self, point_key: str) -> AppendingDatasetSink:
+    def _get_point_sink(self, point_key: str) -> AppendingDatasetSink | StreamDatasetSink:
         sink = self._point_sinks.get(point_key, None)
         if sink is None:
-            sink = self._make_appending_sink("points." + point_key)
+            channel = self._stream_channels.get(point_key)
+            if channel is None:
+                sink = self._make_appending_sink("points." + point_key)
+            else:
+                # Repeated child scans construct new writers for the same keys.
+                # Keep declarations on their owner so the next invocation resumes
+                # the stream without probing or loading its archived contents.
+                if not hasattr(self._owner, "_ndscan_stream_sinks"):
+                    self._owner._ndscan_stream_sinks = {}
+                streams = self._owner._ndscan_stream_sinks
+                key = self.prefix + "points." + point_key
+                sink = streams.get(key)
+                if sink is None:
+                    sink = StreamDatasetSink(self._owner, key, channel.shape)
+                    streams[key] = sink
+                elif sink.shape != channel.shape:
+                    raise ValueError(f"Stream shape changed for {key!r}")
             self._point_sinks[point_key] = sink
         return sink
 

@@ -132,10 +132,11 @@ def _find_site_prefixes(dataset_values: dict[str, Any]) -> list[str]:
 def _point_keys_for_prefix(dataset_values: dict[str, Any], prefix: str) -> dict[str, Any]:
     """Extract one site's point streams from the live dataset mapping."""
     point_prefix = prefix + "points."
+    # Missing payloads are not point streams; their channel schemas remain available.
     return {
         key[len(point_prefix) :]: value
         for key, value in dataset_values.items()
-        if key.startswith(point_prefix)
+        if key.startswith(point_prefix) and value is not None
     }
 
 

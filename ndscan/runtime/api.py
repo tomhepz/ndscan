@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 
 from ..scan.mapping import ParameterMapping, ScanVariable
-from ..scan.request import ExecutionPolicy, PreviewPolicy, ScanRequest
+from ..scan.request import CheckpointPolicy, ExecutionPolicy, PreviewPolicy, ScanRequest
 from ..submission.scan_submission_schema import (
     ScanSubmissionSchemaError,
     ScanSubmissionSpec,
@@ -20,6 +20,7 @@ from .program import *
 
 __all__ = [
     "ExecutionPolicy",
+    "CheckpointPolicy",
     "PreviewPolicy",
     "ScanSubmissionSchemaError",
     "ScanSubmissionSpec",
