@@ -230,13 +230,20 @@ class FileSeries:
     loads the entire series; use slices for large image histories.
     """
 
-    def __init__(self, dataset: h5py.Dataset):
+    def __init__(
+        self, dataset: h5py.Dataset, check: Callable[[], None] | None = None
+    ):
         self._dataset = dataset
-        self.shape = dataset.shape
-        self.dtype = dataset.dtype
-        self.ndim = dataset.ndim
-        self.size = dataset.size
-        self.nbytes = dataset.size * dataset.dtype.itemsize
+        # Called before each read, e.g. to confirm checkpoint segments still exist.
+        self._check = check
+        self._set_shape(dataset.shape, dataset.dtype)
+
+    def _set_shape(self, shape, dtype) -> None:
+        self.shape = tuple(shape)
+        self.dtype = np.dtype(dtype)
+        self.ndim = len(self.shape)
+        self.size = int(np.prod(self.shape))
+        self.nbytes = self.size * self.dtype.itemsize
 
     def __len__(self):
         return self.shape[0]
@@ -244,6 +251,8 @@ class FileSeries:
     def __getitem__(self, selection):
         if not self._dataset.id.valid:
             raise ValueError("Snapshot is closed; load the selected data before closing it")
+        if self._check is not None:
+            self._check()
         return self._dataset[selection]
 
     def __array__(self, dtype=None, copy=None):
@@ -252,10 +261,32 @@ class FileSeries:
         return np.asarray(self[()], dtype=dtype)
 
 
-def _read_datasets_group(
-    group: h5py.Group, channel_filter: Callable[[str], bool] | None = None,
-    *, lazy: bool = False,
-) -> dict[str, Any]:
+class MissingImagesSeries(FileSeries):
+    """A stream stored in a split images file that is not present.
+
+    Length, dtype and shape come from the data file's manifest, so the series can be
+    described and counted. Reading values raises ``FileNotFoundError``.
+    """
+
+    def __init__(self, images_path: Path, length: int, schema: Mapping[str, Any]):
+        self._dataset = None
+        self._check = None
+        self.images_path = images_path
+        self._set_shape(
+            (length, *schema.get("item_shape", ())), schema.get("dtype", "f8")
+        )
+
+    def __getitem__(self, selection):
+        raise FileNotFoundError(
+            f"These images are stored in {self.images_path.name}, which is not "
+            f"next to the data file. Copy it to {self.images_path.parent} to read "
+            "them."
+        )
+
+
+def _excluded_point_keys(
+    group: h5py.Group, channel_filter: Callable[[str], bool] | None
+) -> set[str]:
     # Resolve semantic channel paths from the small schema before touching payloads.
     excluded = set()
     if channel_filter is not None:
@@ -266,6 +297,14 @@ def _read_datasets_group(
                 for name, schema in channels.items():
                     if not channel_filter(_channel_series_path(name, schema)):
                         excluded.add(prefix + "points." + name)
+    return excluded
+
+
+def _read_datasets_group(
+    group: h5py.Group, channel_filter: Callable[[str], bool] | None = None,
+    *, lazy: bool = False, check: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    excluded = _excluded_point_keys(group, channel_filter)
     datasets = {}
     for key, dataset in group.items():
         if key in excluded:
@@ -273,10 +312,82 @@ def _read_datasets_group(
         # All point streams stay on disk, including axes and point metadata.
         # Scan schemas and bookkeeping are small and remain ordinary Python values.
         if lazy and ".points." in key:
-            datasets[key] = FileSeries(dataset)
+            datasets[key] = FileSeries(
+                dataset, check if dataset.is_virtual else None
+            )
         else:
             datasets[key] = _decode_dataset_value(key, dataset[()])
     return datasets
+
+
+_IMAGES_MANIFEST_ATTR = "artiq_images"
+_CHECKPOINT_MANIFEST_ATTR = "artiq_checkpoint"
+
+
+def _checkpoint_segment_check(file, file_path: Path) -> Callable[[], None] | None:
+    """Return a check that a checkpoint's segment files still exist, if relevant.
+
+    A finalised run deletes its segments. HDF5 then reads the missing parts of a
+    checkpoint's virtual datasets as fill values instead of failing, so check first.
+    """
+    if _CHECKPOINT_MANIFEST_ATTR not in file.attrs:
+        return None
+    manifest = json.loads(file.attrs[_CHECKPOINT_MANIFEST_ATTR])
+    paths = [file_path.parent / entry["path"] for entry in manifest["segments"]]
+
+    def check() -> None:
+        for path in paths:
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"{path} no longer exists: the run has probably been finalised. "
+                    "Open its final results file instead of this checkpoint."
+                )
+
+    return check
+
+
+def _attach_images(
+    file, file_path: Path, datasets: dict[str, Any], channel_filter
+) -> h5py.File | None:
+    """Add stream channels kept in a split ``.images.h5`` file next to the data file.
+
+    Returns the open images file (owned by the snapshot), or None when absent.
+    Image channels are always file-backed, even for an eager snapshot.
+    """
+    if _IMAGES_MANIFEST_ATTR not in file.attrs:
+        return None
+    manifest = json.loads(file.attrs[_IMAGES_MANIFEST_ATTR])
+    images_path = file_path.parent / manifest["file"]
+    excluded = _excluded_point_keys(file["datasets"], channel_filter)
+    keys = [key for key in manifest["streams"] if key not in excluded]
+    images = h5py.File(images_path, "r") if images_path.exists() else None
+    try:
+        if images is not None and "rid" in file and "rid" in images:
+            if images["rid"][()] != file["rid"][()]:
+                raise ValueError(f"{images_path} belongs to a different run")
+        for key in keys:
+            length = manifest["streams"][key]
+            if images is None:
+                datasets[key] = MissingImagesSeries(
+                    images_path, length, manifest.get("schema", {}).get(key, {})
+                )
+            else:
+                datasets[key] = FileSeries(images["datasets"][key])
+            # Image rows follow the site's point index; say so if they cannot.
+            num_points = datasets.get(key.split("points.")[0] + "state.num_points")
+            if num_points is not None and int(num_points) != length:
+                import warnings
+
+                warnings.warn(
+                    f"{key} has {length} images but its site has {num_points} "
+                    "points, so image rows may not align with point indices.",
+                    stacklevel=3,
+                )
+    except BaseException:
+        if images is not None:
+            images.close()
+        raise
+    return images
 
 
 def _find_site_prefixes(dataset_values: dict[str, Any]) -> list[str]:
@@ -1355,15 +1466,25 @@ class ScanSiteSnapshot:
     top_level_metadata: dict[str, Any]
     sites: dict[tuple[str, ...], ScanSiteData]
     _file: h5py.File | None = field(default=None, repr=False, compare=False)
+    #: Split ``.images.h5`` file backing image channels, kept open for slicing.
+    _images_file: h5py.File | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def images_path(self) -> Path | None:
+        """The split images file for this result, if it has one (present or not)."""
+        name = self.top_level_metadata.get("_images_file_name")
+        return None if name is None else self.path.parent / name
 
     def close(self) -> None:
-        """Close a lazy snapshot. Arrays already read remain usable."""
-        if self._file is not None:
-            self._file.close()
+        """Close file handles. Arrays already read remain usable."""
+        for handle in (self._file, self._images_file):
+            if handle is not None:
+                handle.close()
 
     def __enter__(self):
-        if self._file is not None and not self._file.id.valid:
-            raise ValueError("Snapshot is closed")
+        for handle in (self._file, self._images_file):
+            if handle is not None and not handle.id.valid:
+                raise ValueError("Snapshot is closed")
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -1415,6 +1536,11 @@ def read_scan_site_snapshot(
     ``channel_filter`` receives each semantic channel path. Returning False skips
     its payload before any HDF5 read; schema remains available in ``site.channels``.
     Accessing an omitted series raises KeyError. The default loads all channels.
+
+    For split results, image channels stay in ``<rid>-<class>.images.h5`` and are
+    returned file-backed (slice them to read). Close the snapshot when finished with
+    them. If the images file is absent, everything else still loads and reading an
+    image channel raises ``FileNotFoundError``.
     """
 
     with h5py.File(path, "r") as file:
@@ -1442,12 +1568,23 @@ def open_scan_site_snapshot(
 
 
 def _snapshot_from_file(file, file_path, channel_filter, *, lazy=False):
-    datasets = _read_datasets_group(file["datasets"], channel_filter, lazy=lazy)
+    check = _checkpoint_segment_check(file, file_path)
+    if check is not None and not lazy:
+        # Eager reads materialise virtual image streams now.
+        check()
+    datasets = _read_datasets_group(
+        file["datasets"], channel_filter, lazy=lazy, check=check
+    )
+    images_file = _attach_images(file, file_path, datasets, channel_filter)
     top_level_metadata = {
         key: _decode_dataset_value(key, dataset[()])
         for key, dataset in file.items()
         if key != "datasets" and key != "archive"
     }
+    if _IMAGES_MANIFEST_ATTR in file.attrs:
+        top_level_metadata["_images_file_name"] = json.loads(
+            file.attrs[_IMAGES_MANIFEST_ATTR]
+        )["file"]
 
     sites = {}
     for prefix in _find_site_prefixes(datasets):
@@ -1498,4 +1635,5 @@ def _snapshot_from_file(file, file_path, channel_filter, *, lazy=False):
         top_level_metadata=top_level_metadata,
         sites=sites,
         _file=file if lazy else None,
+        _images_file=images_file,
     )

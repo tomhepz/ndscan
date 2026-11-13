@@ -1,6 +1,7 @@
 """Small end-to-end checks for disk-backed prepared scan channels."""
 
 import os
+import shutil
 import tempfile
 from unittest.mock import patch
 
@@ -52,6 +53,17 @@ class RepeatedCameraFragment(ExpFragment):
 
 
 class StreamRuntimeTest(HasEnvironmentCase):
+    def setUp(self):
+        super().setUp()
+        # Checkpoints check free space; keep these tests independent of the host disk
+        # (test_runtime_storage_guard covers the low-space behaviour).
+        roomy = shutil.disk_usage(tempfile.gettempdir())._replace(
+            total=10**15, free=10**15
+        )
+        patcher = patch("ndscan.runtime.context.shutil.disk_usage", return_value=roomy)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_dashboard_factory_passes_checkpoint_policy(self):
         experiment_class = make_fragment_prepared_dashboard_scan_exp(
             CameraFragment, checkpoint_policy=CheckpointPolicy(min_interval_s=999999)
@@ -117,10 +129,11 @@ class StreamRuntimeTest(HasEnvironmentCase):
                 self.assertNotIn(image_key, self.dataset_db.data)
                 self.assertNotIn(image_key, manager.local)
 
-                # Old snapshots stay fixed; completion includes the final state.
-                first = os.path.join(manager.stream_directory, "checkpoints/000000000.h5")
-                with h5py.File(first, "r") as f:
-                    self.assertEqual(f["datasets"][image_key].shape, (1, 2, 3))
+                # Only the newest checkpoint is kept; it includes the final state.
+                checkpoints = os.listdir(
+                    os.path.join(manager.stream_directory, "checkpoints")
+                )
+                self.assertEqual(len([c for c in checkpoints if c.endswith(".h5")]), 1)
                 checkpoint = latest_checkpoint(manager.stream_directory)
                 with h5py.File(checkpoint, "r") as f:
                     image = f["datasets"][image_key]

@@ -45,6 +45,8 @@ from .context import (
     _persistent_kernel_parent_scan_context,
     current_run_context,
     make_child_scan_site,
+    raise_storage_stop,
+    storage_stop_requested,
 )
 from .executors import (
     KernelStreamingExecutor,
@@ -558,6 +560,8 @@ class _PreparedChildKernelAcquireSession:
         self._host_setup_active = True
 
     def pause_after_batch(self) -> None:
+        if storage_stop_requested():
+            raise_storage_stop()
         scheduler = self._owner.get_device("scheduler")
         scheduler.pause()
 
@@ -582,7 +586,7 @@ class _PreparedChildKernelAcquireSession:
         if not self._program.point_source.has_more_work():
             return KernelStreamingExecutor._STATUS_COMPLETE
         scheduler = self._owner.get_device("scheduler")
-        if scheduler.check_pause():
+        if storage_stop_requested() or scheduler.check_pause():
             return KernelStreamingExecutor._STATUS_PAUSE
         return KernelStreamingExecutor._STATUS_PROCEED
 

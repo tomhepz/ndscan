@@ -39,6 +39,8 @@ from .context import (
     _current_effective_scan_context,
     _push_run_context,
     current_run_context,
+    raise_storage_stop,
+    storage_stop_requested,
 )
 from .executors import HostExecutor, KernelStreamingExecutor
 from .persistence import ScanSiteDatasetWriter
@@ -439,7 +441,9 @@ class ScanProgramRunner:
     def _should_pause_after_batch(self) -> bool:
         if not self._has_more_work():
             return False
-        return self._scheduler.check_pause()
+        return storage_stop_requested() or self._scheduler.check_pause()
 
     def _pause_after_batch(self) -> None:
+        if storage_stop_requested():
+            raise_storage_stop()
         self._scheduler.pause()

@@ -12,7 +12,9 @@ the parent point is still inside a kernel.
 
 from __future__ import annotations
 
+import logging
 import os
+import shutil
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -74,6 +76,26 @@ _active_kernel_parent_scan_context: ContextVar[
 ] = ContextVar("_active_kernel_parent_scan_context", default=())
 _persistent_kernel_parent_scan_context: list[_KernelParentScanContextProvider] = []
 
+logger = logging.getLogger(__name__)
+
+# Set by a checkpoint that finds too little free space to finalise the run. Batch
+# boundaries then end the run as if termination had been requested.
+_storage_stop_reason: str | None = None
+
+
+def storage_stop_requested() -> bool:
+    """Whether the run should stop cleanly because the results disk is filling."""
+
+    return _storage_stop_reason is not None
+
+
+def raise_storage_stop() -> None:
+    """End the run through ndscan's normal termination path."""
+
+    from artiq.language.core import TerminationRequested
+
+    raise TerminationRequested(_storage_stop_reason)
+
 
 class PreviewCoordinator:
     """Root-scoped coordination for previews or ARTIQ checkpoints.
@@ -100,6 +122,41 @@ class PreviewCoordinator:
         self._writers: WeakSet[ScanSiteDatasetWriter] = WeakSet()
         self._last_preview_monotonic = time.monotonic()
         self._write_in_progress = False
+        # One root run per worker process; start each run with a clear flag.
+        global _storage_stop_reason
+        _storage_stop_reason = None
+
+    def _check_free_space(self) -> None:
+        """Request a clean stop when finalising would no longer fit on disk."""
+        global _storage_stop_reason
+        if _storage_stop_reason is not None:
+            return
+        try:
+            dataset_mgr = self._owner._HasEnvironment__dataset_mgr
+            directory = getattr(dataset_mgr, "stream_directory", None)
+            if directory is None or not os.path.isdir(directory):
+                return
+            segment_bytes = sum(
+                entry.stat().st_size
+                for entry in os.scandir(directory)
+                if entry.is_file()
+            )
+            usage = shutil.disk_usage(directory)
+        except OSError:
+            logger.warning("Could not check free space for results", exc_info=True)
+            return
+        reserve = max(
+            self.policy.min_free_bytes, self.policy.min_free_fraction * usage.total
+        )
+        needed = segment_bytes + reserve
+        if usage.free < needed:
+            _storage_stop_reason = (
+                f"Results disk nearly full: {usage.free / 1e9:.1f} GB free, "
+                f"{needed / 1e9:.1f} GB needed to finalise this run "
+                f"({segment_bytes / 1e9:.1f} GB of images plus "
+                f"{reserve / 1e9:.1f} GB reserve). Stopping the run cleanly."
+            )
+            logger.error(_storage_stop_reason)
 
     def register_writer(self, writer: ScanSiteDatasetWriter) -> None:
         self._writers.add(writer)
@@ -147,6 +204,7 @@ class PreviewCoordinator:
             if self._checkpoint:
                 self._owner.checkpoint_datasets()
                 self._last_preview_monotonic = time.monotonic()
+                self._check_free_space()
                 return
 
             # Write through a temporary path and atomically replace the visible file so

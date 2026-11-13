@@ -67,16 +67,29 @@ class PreviewPolicy:
 class CheckpointPolicy:
     """Archive the root run at completed batch boundaries, including child sites.
 
-    The interval is checked at those boundaries, not by a background timer. Completed
-    checkpoints are retained for recovery and mirroring, including after completion.
+    The interval is checked at those boundaries, not by a background timer. ARTIQ
+    keeps only the newest checkpoint; at the end of the run the results are
+    finalised and the checkpoint and stream segments are deleted.
+
+    At each checkpoint the free space on the results disk is compared with what the
+    run needs to finalise: the stream segment bytes written so far, plus a reserve
+    of ``max(min_free_bytes, min_free_fraction * disk size)``. If there is less,
+    the run ends cleanly after the current batch, as if termination had been
+    requested, so that its results can be written.
     """
 
     min_interval_s: float = 300.0
     write_on_completion: bool = True
+    min_free_bytes: float = 20e9
+    min_free_fraction: float = 0.02
 
     def __post_init__(self) -> None:
         if not np.isfinite(self.min_interval_s) or self.min_interval_s < 0:
             raise ValueError("min_interval_s must be finite and non-negative")
+        if not np.isfinite(self.min_free_bytes) or self.min_free_bytes < 0:
+            raise ValueError("min_free_bytes must be finite and non-negative")
+        if not 0.0 <= self.min_free_fraction < 1.0:
+            raise ValueError("min_free_fraction must be in [0, 1)")
 
 
 @dataclass(frozen=True)
