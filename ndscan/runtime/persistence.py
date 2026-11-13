@@ -378,7 +378,8 @@ class ScanSiteDatasetWriter:
                 key = self.prefix + "points." + point_key
                 sink = streams.get(key)
                 if sink is None:
-                    sink = StreamDatasetSink(self._owner, key, channel.shape)
+                    group = channel.stream if isinstance(channel.stream, str) else "streams"
+                    sink = StreamDatasetSink(self._owner, key, channel.shape, group)
                     streams[key] = sink
                 elif sink.shape != channel.shape:
                     raise ValueError(f"Stream shape changed for {key!r}")

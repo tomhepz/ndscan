@@ -1,4 +1,4 @@
-"""Split results: data file plus a sibling ``.images.h5`` holding stream channels."""
+"""Results whose streams ARTIQ finalised into ``<results>.<group>.h5`` files."""
 
 import json
 from pathlib import Path
@@ -11,7 +11,9 @@ import numpy as np
 
 from ndscan.results import open_scan_site_snapshot, read_scan_site_snapshot
 
-STREAM_KEY = "scan.points.channel_0"
+IMAGE_KEY = "scan.points.channel_0"
+TRACE_KEY = "scan.points.channel_2"
+DATA = "000000007-Camera.h5"
 
 
 def _write_site(group, num_points):
@@ -24,66 +26,73 @@ def _write_site(group, num_points):
             "shape": [5, 6], "dim_names": ["y", "x"],
         },
         "channel_1": {"path": "camera/counts", "type": "float"},
+        "channel_2": {
+            "path": "scope/trace", "type": "array", "element_type": "float",
+            "shape": [3], "dim_names": ["t"],
+        },
     })
     group["scan.points.channel_1"] = np.arange(num_points, dtype=float)
 
 
-def _write_split(directory, images, *, rid=7, images_rid=7, num_points=None):
+def _write_split(directory, images, traces, *, group_rid=7, num_points=None):
     num_points = len(images) if num_points is None else num_points
-    data = directory / "000000007-Camera.h5"
-    with h5py.File(data, "w") as file:
-        file["rid"] = rid
+    with h5py.File(directory / DATA, "w") as file:
+        file["rid"] = 7
         _write_site(file.create_group("datasets"), num_points)
-        file.attrs["artiq_images"] = json.dumps({
-            "version": 1,
-            "file": "000000007-Camera.images.h5",
-            "streams": {STREAM_KEY: len(images)},
-            "schema": {STREAM_KEY: {"dtype": "<u2", "item_shape": [5, 6]}},
+        file.attrs["artiq_streams"] = json.dumps({
+            "images": {"file": "000000007-Camera.images.h5",
+                       "streams": {IMAGE_KEY: len(images)}},
+            "streams": {"file": "000000007-Camera.streams.h5",
+                        "streams": {TRACE_KEY: len(traces)}},
         })
-    with h5py.File(directory / "000000007-Camera.images.h5", "w") as file:
-        file["rid"] = images_rid
-        file.create_group("datasets")[STREAM_KEY] = images
-    return data
+    for name, key, values in (("images", IMAGE_KEY, images),
+                              ("streams", TRACE_KEY, traces)):
+        with h5py.File(directory / f"000000007-Camera.{name}.h5", "w") as file:
+            file["rid"] = group_rid
+            file.create_group("datasets")[key] = values
+    return directory / DATA
 
 
-class SplitResultsTest(unittest.TestCase):
+class StreamGroupResultsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.directory = Path(self.tmp.name)
         self.images = np.arange(4 * 5 * 6, dtype=np.uint16).reshape(4, 5, 6)
+        self.traces = np.arange(12, dtype=float).reshape(4, 3)
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_eager_and_lazy_read_images_from_sibling(self):
-        data = _write_split(self.directory, self.images)
+    def test_eager_and_lazy_read_group_files(self):
+        data = _write_split(self.directory, self.images, self.traces)
         for reader in (read_scan_site_snapshot, open_scan_site_snapshot):
             with self.subTest(reader=reader.__name__), reader(data) as snapshot:
                 site = snapshot.get_site()
                 np.testing.assert_array_equal(
                     site.series("camera/counts"), np.arange(4.0))
                 stream = site.series("camera/image")
-                # Images stay on disk even for an eager snapshot.
+                # Stream channels stay on disk even for an eager snapshot.
                 self.assertNotIsInstance(stream, np.ndarray)
-                self.assertEqual(stream.shape, self.images.shape)
                 np.testing.assert_array_equal(stream[1], self.images[1])
-                self.assertEqual(snapshot.images_path,
-                                 self.directory / "000000007-Camera.images.h5")
+                np.testing.assert_array_equal(
+                    site.series("scope/trace")[:], self.traces)
+                self.assertEqual(set(snapshot.stream_files), {"images", "streams"})
 
-    def test_missing_images_file_keeps_data_usable(self):
-        data = _write_split(self.directory, self.images)
+    def test_missing_group_file_keeps_data_usable(self):
+        data = _write_split(self.directory, self.images, self.traces)
         (self.directory / "000000007-Camera.images.h5").unlink()
         snapshot = read_scan_site_snapshot(data)
         site = snapshot.get_site()
         np.testing.assert_array_equal(site.series("camera/counts"), np.arange(4.0))
+        np.testing.assert_array_equal(site.series("scope/trace")[:], self.traces)
         stream = site.series("camera/image")
         self.assertEqual(stream.shape, (4, 5, 6))
-        self.assertEqual(stream.dtype, np.uint16)
         with self.assertRaisesRegex(FileNotFoundError, "images.h5"):
             stream[0]
+        snapshot.close()
 
-    def test_channel_filter_skips_images(self):
-        data = _write_split(self.directory, self.images)
+    def test_channel_filter_skips_streams(self):
+        data = _write_split(self.directory, self.images, self.traces)
         snapshot = read_scan_site_snapshot(
             data, channel_filter=lambda path: path != "camera/image")
         with self.assertRaises(KeyError):
@@ -91,21 +100,21 @@ class SplitResultsTest(unittest.TestCase):
         snapshot.close()
 
     def test_mismatched_run_is_rejected(self):
-        data = _write_split(self.directory, self.images, images_rid=8)
+        data = _write_split(self.directory, self.images, self.traces, group_rid=8)
         with self.assertRaisesRegex(ValueError, "different run"):
             read_scan_site_snapshot(data)
 
     def test_row_count_mismatch_warns(self):
-        data = _write_split(self.directory, self.images, num_points=5)
+        data = _write_split(self.directory, self.images, self.traces, num_points=5)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             read_scan_site_snapshot(data).close()
         self.assertTrue(any("may not align" in str(w.message) for w in caught))
 
-    def test_checkpoint_with_retired_segments_fails_loudly(self):
+    def test_checkpoint_with_deleted_segments_fails_loudly(self):
         segment = self.directory / "000000000.h5"
         with h5py.File(segment, "w") as file:
-            file.create_group("datasets")[STREAM_KEY] = self.images
+            file.create_group("datasets")[IMAGE_KEY] = self.images
         checkpoints = self.directory / "checkpoints"
         checkpoints.mkdir()
         checkpoint = checkpoints / "000000000.h5"
@@ -114,11 +123,10 @@ class SplitResultsTest(unittest.TestCase):
             _write_site(group, 4)
             layout = h5py.VirtualLayout(self.images.shape, dtype=np.uint16)
             layout[:] = h5py.VirtualSource(
-                "../000000000.h5", "datasets/" + STREAM_KEY,
-                shape=self.images.shape)
-            group.create_virtual_dataset(STREAM_KEY, layout, fillvalue=65535)
+                "../000000000.h5", "datasets/" + IMAGE_KEY, shape=self.images.shape)
+            group.create_virtual_dataset(IMAGE_KEY, layout)
             file.attrs["artiq_checkpoint"] = json.dumps({
-                "version": 1, "streams": [STREAM_KEY],
+                "version": 1, "streams": [IMAGE_KEY],
                 "segments": [{"path": "../000000000.h5",
                               "size": segment.stat().st_size}],
             })

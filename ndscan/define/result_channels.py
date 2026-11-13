@@ -6,6 +6,8 @@ temporarily swaps sinks while executing a point so it can collect exactly one va
 saved channel, then writes those values into scan-site datasets.
 """
 
+import inspect
+import logging
 from typing import Any
 
 import artiq.language.units
@@ -13,6 +15,8 @@ import numpy as np
 from artiq.language import HasEnvironment, kernel, portable, rpc
 
 from .utils import dump_json
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "SingleUseSink",
@@ -174,16 +178,30 @@ class AppendingDatasetSink(ResultSink, HasEnvironment):
 class StreamDatasetSink(ResultSink, HasEnvironment):
     """Archive fixed-shape arrays without broadcasting or retaining their history."""
 
-    def build(self, key: str, shape: tuple[int, ...]) -> None:
+    def build(self, key: str, shape: tuple[int, ...], group: str = "streams") -> None:
         self.key = key
         self.shape = shape
+        self.group = group
         self._created = False
 
     def push(self, value: Any) -> None:
         # Integer channels preserve camera dtypes. Fix the exact dtype on first use;
         # ARTIQ then checks every append against this schema.
         if not self._created:
-            self.create_stream_dataset(self.key, value.dtype, self.shape)
+            if self.group == "streams":
+                self.create_stream_dataset(self.key, value.dtype, self.shape)
+            elif "group" in inspect.signature(self.create_stream_dataset).parameters:
+                self.create_stream_dataset(
+                    self.key, value.dtype, self.shape, group=self.group
+                )
+            else:
+                logger.warning(
+                    "ARTIQ does not support stream groups; storing %s in the "
+                    "default stream group instead of %r",
+                    self.key,
+                    self.group,
+                )
+                self.create_stream_dataset(self.key, value.dtype, self.shape)
             self._created = True
         self.append_to_dataset(self.key, value)
 
@@ -435,10 +453,12 @@ class ArrayChannel(ResultChannel):
     data into many separate scalar channels.
 
     :param stream: Archive through ARTIQ stream storage in the prepared runtime.
-        Streamed channels are not broadcast and their history is absent from runtime
-        analysis/inspection. Current batch values remain available. The first value
-        fixes the dtype; an unpushed channel has no dataset. Requires stream-capable
-        ARTIQ and an HDF5 output location.
+        ``True`` uses ARTIQ's default stream group (``"streams"``); a string names
+        the group, e.g. ``"images"``. Each group is finalised to
+        ``<results>.<group>.h5``. Streamed channels are not broadcast and their
+        history is absent from runtime analysis/inspection. Current batch values
+        remain available. The first value fixes the dtype; an unpushed channel has
+        no dataset. Requires stream-capable ARTIQ and an HDF5 output location.
     :param element_type: Numeric element type, currently ``"float"`` or ``"int"``.
         Integer numpy array payloads keep their concrete dtype, so camera-like data
         can be stored as e.g. ``uint16`` instead of being widened to platform ``int``.
@@ -457,7 +477,7 @@ class ArrayChannel(ResultChannel):
         display_hints: dict[str, Any] | None = None,
         save_by_default: bool = True,
         *,
-        stream: bool = False,
+        stream: bool | str = False,
         element_type: str = "float",
         shape: tuple[int, ...] | list[int],
         dim_names: tuple[str, ...] | list[str] | None = None,

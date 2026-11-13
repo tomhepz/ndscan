@@ -261,26 +261,26 @@ class FileSeries:
         return np.asarray(self[()], dtype=dtype)
 
 
-class MissingImagesSeries(FileSeries):
-    """A stream stored in a split images file that is not present.
+class MissingStreamSeries(FileSeries):
+    """A stream whose ARTIQ stream-group file is not next to the data file.
 
-    Length, dtype and shape come from the data file's manifest, so the series can be
-    described and counted. Reading values raises ``FileNotFoundError``.
+    The length comes from the data file's ``artiq_streams`` attribute and the item
+    shape from the channel schema, so the series can be described and counted. The
+    dtype is nominal (from ``element_type``). Reading values raises
+    ``FileNotFoundError``.
     """
 
-    def __init__(self, images_path: Path, length: int, schema: Mapping[str, Any]):
+    def __init__(self, path: Path, length: int, schema: Mapping[str, Any]):
         self._dataset = None
         self._check = None
-        self.images_path = images_path
-        self._set_shape(
-            (length, *schema.get("item_shape", ())), schema.get("dtype", "f8")
-        )
+        self.path = path
+        dtype = "f8" if schema.get("element_type") == "float" else "i8"
+        self._set_shape((length, *schema.get("shape", ())), dtype)
 
     def __getitem__(self, selection):
         raise FileNotFoundError(
-            f"These images are stored in {self.images_path.name}, which is not "
-            f"next to the data file. Copy it to {self.images_path.parent} to read "
-            "them."
+            f"This stream is stored in {self.path.name}, which is not next to the "
+            f"data file. Copy it to {self.path.parent} to read it."
         )
 
 
@@ -320,7 +320,7 @@ def _read_datasets_group(
     return datasets
 
 
-_IMAGES_MANIFEST_ATTR = "artiq_images"
+_STREAMS_MANIFEST_ATTR = "artiq_streams"
 _CHECKPOINT_MANIFEST_ATTR = "artiq_checkpoint"
 
 
@@ -346,48 +346,52 @@ def _checkpoint_segment_check(file, file_path: Path) -> Callable[[], None] | Non
     return check
 
 
-def _attach_images(
+def _attach_streams(
     file, file_path: Path, datasets: dict[str, Any], channel_filter
-) -> h5py.File | None:
-    """Add stream channels kept in a split ``.images.h5`` file next to the data file.
+) -> list[h5py.File]:
+    """Add stream channels kept in ARTIQ ``<results>.<group>.h5`` files.
 
-    Returns the open images file (owned by the snapshot), or None when absent.
-    Image channels are always file-backed, even for an eager snapshot.
+    Returns the stream-group files that were opened (owned by the snapshot).
+    These channels are always file-backed, even for an eager snapshot.
     """
-    if _IMAGES_MANIFEST_ATTR not in file.attrs:
-        return None
-    manifest = json.loads(file.attrs[_IMAGES_MANIFEST_ATTR])
-    images_path = file_path.parent / manifest["file"]
+    if _STREAMS_MANIFEST_ATTR not in file.attrs:
+        return []
+    manifest = json.loads(file.attrs[_STREAMS_MANIFEST_ATTR])
     excluded = _excluded_point_keys(file["datasets"], channel_filter)
-    keys = [key for key in manifest["streams"] if key not in excluded]
-    images = h5py.File(images_path, "r") if images_path.exists() else None
+    opened = []
     try:
-        if images is not None and "rid" in file and "rid" in images:
-            if images["rid"][()] != file["rid"][()]:
-                raise ValueError(f"{images_path} belongs to a different run")
-        for key in keys:
-            length = manifest["streams"][key]
-            if images is None:
-                datasets[key] = MissingImagesSeries(
-                    images_path, length, manifest.get("schema", {}).get(key, {})
-                )
-            else:
-                datasets[key] = FileSeries(images["datasets"][key])
-            # Image rows follow the site's point index; say so if they cannot.
-            num_points = datasets.get(key.split("points.")[0] + "state.num_points")
-            if num_points is not None and int(num_points) != length:
-                import warnings
+        for entry in manifest.values():
+            path = file_path.parent / entry["file"]
+            handle = h5py.File(path, "r") if path.exists() else None
+            if handle is not None:
+                opened.append(handle)
+                if "rid" in file and "rid" in handle:
+                    if handle["rid"][()] != file["rid"][()]:
+                        raise ValueError(f"{path} belongs to a different run")
+            for key, length in entry["streams"].items():
+                if key in excluded:
+                    continue
+                prefix, _, name = key.rpartition("points.")
+                if handle is None:
+                    schema = datasets.get(prefix + "scan.channels", {}).get(name, {})
+                    datasets[key] = MissingStreamSeries(path, length, schema)
+                else:
+                    datasets[key] = FileSeries(handle["datasets"][key])
+                # Stream rows follow the site's point index; say so if they cannot.
+                num_points = datasets.get(prefix + "state.num_points")
+                if num_points is not None and int(num_points) != length:
+                    import warnings
 
-                warnings.warn(
-                    f"{key} has {length} images but its site has {num_points} "
-                    "points, so image rows may not align with point indices.",
-                    stacklevel=3,
-                )
+                    warnings.warn(
+                        f"{key} has {length} rows but its site has {num_points} "
+                        "points, so rows may not align with point indices.",
+                        stacklevel=3,
+                    )
     except BaseException:
-        if images is not None:
-            images.close()
+        for handle in opened:
+            handle.close()
         raise
-    return images
+    return opened
 
 
 def _find_site_prefixes(dataset_values: dict[str, Any]) -> list[str]:
@@ -1466,23 +1470,25 @@ class ScanSiteSnapshot:
     top_level_metadata: dict[str, Any]
     sites: dict[tuple[str, ...], ScanSiteData]
     _file: h5py.File | None = field(default=None, repr=False, compare=False)
-    #: Split ``.images.h5`` file backing image channels, kept open for slicing.
-    _images_file: h5py.File | None = field(default=None, repr=False, compare=False)
+    #: ARTIQ stream-group files backing stream channels, kept open for slicing.
+    _stream_handles: tuple[h5py.File, ...] = field(
+        default=(), repr=False, compare=False
+    )
 
     @property
-    def images_path(self) -> Path | None:
-        """The split images file for this result, if it has one (present or not)."""
-        name = self.top_level_metadata.get("_images_file_name")
-        return None if name is None else self.path.parent / name
+    def stream_files(self) -> dict[str, Path]:
+        """Stream-group name to file path for this result (present or not)."""
+        names = self.top_level_metadata.get("_stream_files", {})
+        return {group: self.path.parent / name for group, name in names.items()}
 
     def close(self) -> None:
         """Close file handles. Arrays already read remain usable."""
-        for handle in (self._file, self._images_file):
+        for handle in (self._file, *self._stream_handles):
             if handle is not None:
                 handle.close()
 
     def __enter__(self):
-        for handle in (self._file, self._images_file):
+        for handle in (self._file, *self._stream_handles):
             if handle is not None and not handle.id.valid:
                 raise ValueError("Snapshot is closed")
         return self
@@ -1537,10 +1543,10 @@ def read_scan_site_snapshot(
     its payload before any HDF5 read; schema remains available in ``site.channels``.
     Accessing an omitted series raises KeyError. The default loads all channels.
 
-    For split results, image channels stay in ``<rid>-<class>.images.h5`` and are
-    returned file-backed (slice them to read). Close the snapshot when finished with
-    them. If the images file is absent, everything else still loads and reading an
-    image channel raises ``FileNotFoundError``.
+    Stream channels finalised by ARTIQ into ``<results>.<group>.h5`` files (e.g.
+    ``.images.h5``) are returned file-backed; slice them to read, and close the
+    snapshot when finished. If a group file is absent, everything else still loads
+    and reading its channels raises ``FileNotFoundError``.
     """
 
     with h5py.File(path, "r") as file:
@@ -1575,16 +1581,17 @@ def _snapshot_from_file(file, file_path, channel_filter, *, lazy=False):
     datasets = _read_datasets_group(
         file["datasets"], channel_filter, lazy=lazy, check=check
     )
-    images_file = _attach_images(file, file_path, datasets, channel_filter)
+    stream_handles = _attach_streams(file, file_path, datasets, channel_filter)
     top_level_metadata = {
         key: _decode_dataset_value(key, dataset[()])
         for key, dataset in file.items()
         if key != "datasets" and key != "archive"
     }
-    if _IMAGES_MANIFEST_ATTR in file.attrs:
-        top_level_metadata["_images_file_name"] = json.loads(
-            file.attrs[_IMAGES_MANIFEST_ATTR]
-        )["file"]
+    if _STREAMS_MANIFEST_ATTR in file.attrs:
+        top_level_metadata["_stream_files"] = {
+            group: entry["file"]
+            for group, entry in json.loads(file.attrs[_STREAMS_MANIFEST_ATTR]).items()
+        }
 
     sites = {}
     for prefix in _find_site_prefixes(datasets):
@@ -1635,5 +1642,5 @@ def _snapshot_from_file(file, file_path, channel_filter, *, lazy=False):
         top_level_metadata=top_level_metadata,
         sites=sites,
         _file=file if lazy else None,
-        _images_file=images_file,
+        _stream_handles=tuple(stream_handles),
     )

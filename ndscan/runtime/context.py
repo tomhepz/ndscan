@@ -153,7 +153,7 @@ class PreviewCoordinator:
             _storage_stop_reason = (
                 f"Results disk nearly full: {usage.free / 1e9:.1f} GB free, "
                 f"{needed / 1e9:.1f} GB needed to finalise this run "
-                f"({segment_bytes / 1e9:.1f} GB of images plus "
+                f"({segment_bytes / 1e9:.1f} GB of stream data plus "
                 f"{reserve / 1e9:.1f} GB reserve). Stopping the run cleanly."
             )
             logger.error(_storage_stop_reason)
