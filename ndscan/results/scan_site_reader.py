@@ -13,6 +13,7 @@ view.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -230,13 +231,12 @@ class FileSeries:
     loads the entire series; use slices for large image histories.
     """
 
-    def __init__(
-        self, dataset: h5py.Dataset, check: Callable[[], None] | None = None
-    ):
+    def __init__(self, dataset: h5py.Dataset, length: int | None = None):
         self._dataset = dataset
-        # Called before each read, e.g. to confirm checkpoint segments still exist.
-        self._check = check
-        self._set_shape(dataset.shape, dataset.dtype)
+        # A stream file may hold rows appended after the snapshot that refers to
+        # it; ``length`` limits the series to the rows that snapshot recorded.
+        self._length = dataset.shape[0] if length is None else int(length)
+        self._set_shape((self._length, *dataset.shape[1:]), dataset.dtype)
 
     def _set_shape(self, shape, dtype) -> None:
         self.shape = tuple(shape)
@@ -251,14 +251,29 @@ class FileSeries:
     def __getitem__(self, selection):
         if not self._dataset.id.valid:
             raise ValueError("Snapshot is closed; load the selected data before closing it")
-        if self._check is not None:
-            self._check()
+        if self._length != self._dataset.shape[0]:
+            selection = _limit_first_axis(selection, self._length)
         return self._dataset[selection]
 
     def __array__(self, dtype=None, copy=None):
         if copy is False:
             raise ValueError("Reading an HDF5 series requires allocating an array")
         return np.asarray(self[()], dtype=dtype)
+
+
+def _limit_first_axis(selection, length: int):
+    """Apply a selection's first index to ``range(length)``, not the whole dataset."""
+    rest = ()
+    if isinstance(selection, tuple):
+        if not selection or selection[0] is Ellipsis:
+            selection, rest = slice(None), selection
+        else:
+            selection, rest = selection[0], selection[1:]
+    first = range(length)[selection] if not isinstance(selection, (list, np.ndarray)) \
+        else np.arange(length)[selection]
+    if isinstance(first, range):
+        first = slice(first.start, first.stop, first.step) if len(first) else slice(0, 0)
+    return (first, *rest)
 
 
 class MissingStreamSeries(FileSeries):
@@ -272,7 +287,7 @@ class MissingStreamSeries(FileSeries):
 
     def __init__(self, path: Path, length: int, schema: Mapping[str, Any]):
         self._dataset = None
-        self._check = None
+        self._length = length
         self.path = path
         dtype = "f8" if schema.get("element_type") == "float" else "i8"
         self._set_shape((length, *schema.get("shape", ())), dtype)
@@ -290,10 +305,10 @@ def _excluded_point_keys(
     # Resolve semantic channel paths from the small schema before touching payloads.
     excluded = set()
     if channel_filter is not None:
-        for key, dataset in group.items():
+        for key in group.keys():
             if key.endswith("scan.channels"):
                 prefix = key[:-len("scan.channels")]
-                channels = _decode_dataset_value(key, dataset[()])
+                channels = _decode_dataset_value(key, group[key][()])
                 for name, schema in channels.items():
                     if not channel_filter(_channel_series_path(name, schema)):
                         excluded.add(prefix + "points." + name)
@@ -302,48 +317,38 @@ def _excluded_point_keys(
 
 def _read_datasets_group(
     group: h5py.Group, channel_filter: Callable[[str], bool] | None = None,
-    *, lazy: bool = False, check: Callable[[], None] | None = None,
+    *, lazy: bool = False,
 ) -> dict[str, Any]:
     excluded = _excluded_point_keys(group, channel_filter)
     datasets = {}
-    for key, dataset in group.items():
-        if key in excluded:
+    for key in group.keys():
+        # ARTIQ links stream datasets to their own files; _attach_streams opens
+        # those, so never resolve the links here.
+        if key in excluded or isinstance(group.get(key, getlink=True), h5py.ExternalLink):
             continue
+        dataset = group[key]
         # All point streams stay on disk, including axes and point metadata.
         # Scan schemas and bookkeeping are small and remain ordinary Python values.
         if lazy and ".points." in key:
-            datasets[key] = FileSeries(
-                dataset, check if dataset.is_virtual else None
-            )
+            datasets[key] = FileSeries(dataset)
         else:
             datasets[key] = _decode_dataset_value(key, dataset[()])
     return datasets
 
 
 _STREAMS_MANIFEST_ATTR = "artiq_streams"
-_CHECKPOINT_MANIFEST_ATTR = "artiq_checkpoint"
-
-
-def _checkpoint_segment_check(file, file_path: Path) -> Callable[[], None] | None:
-    """Return a check that a checkpoint's segment files still exist, if relevant.
-
-    A finalised run deletes its segments. HDF5 then reads the missing parts of a
-    checkpoint's virtual datasets as fill values instead of failing, so check first.
-    """
-    if _CHECKPOINT_MANIFEST_ATTR not in file.attrs:
-        return None
-    manifest = json.loads(file.attrs[_CHECKPOINT_MANIFEST_ATTR])
-    paths = [file_path.parent / entry["path"] for entry in manifest["segments"]]
-
-    def check() -> None:
-        for path in paths:
-            if not path.exists():
-                raise FileNotFoundError(
-                    f"{path} no longer exists: the run has probably been finalised. "
-                    "Open its final results file instead of this checkpoint."
-                )
-
-    return check
+def _open_stream_file(path: Path, attempts: int = 5) -> h5py.File:
+    """Open a stream file, retrying while ARTIQ is briefly appending to it."""
+    for attempt in range(attempts):
+        try:
+            # Default locking, as plain h5py uses: ARTIQ appends without taking
+            # locks, so readers never block it.
+            return h5py.File(path, "r")
+        except OSError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.2)
+    raise AssertionError("unreachable")
 
 
 def _attach_streams(
@@ -362,7 +367,7 @@ def _attach_streams(
     try:
         for entry in manifest.values():
             path = file_path.parent / entry["file"]
-            handle = h5py.File(path, "r") if path.exists() else None
+            handle = _open_stream_file(path) if path.exists() else None
             if handle is not None:
                 opened.append(handle)
                 if "rid" in file and "rid" in handle:
@@ -376,7 +381,7 @@ def _attach_streams(
                     schema = datasets.get(prefix + "scan.channels", {}).get(name, {})
                     datasets[key] = MissingStreamSeries(path, length, schema)
                 else:
-                    datasets[key] = FileSeries(handle["datasets"][key])
+                    datasets[key] = FileSeries(handle["datasets"][key], length)
                 # Stream rows follow the site's point index; say so if they cannot.
                 num_points = datasets.get(prefix + "state.num_points")
                 if num_points is not None and int(num_points) != length:
@@ -1476,6 +1481,14 @@ class ScanSiteSnapshot:
     )
 
     @property
+    def in_progress(self) -> bool:
+        """True if ARTIQ wrote this file at a checkpoint of a run not yet finished.
+
+        After a worker failure, the results file stays in this state.
+        """
+        return self.top_level_metadata.get("_in_progress", False)
+
+    @property
     def stream_files(self) -> dict[str, Path]:
         """Stream-group name to file path for this result (present or not)."""
         names = self.top_level_metadata.get("_stream_files", {})
@@ -1574,19 +1587,14 @@ def open_scan_site_snapshot(
 
 
 def _snapshot_from_file(file, file_path, channel_filter, *, lazy=False):
-    check = _checkpoint_segment_check(file, file_path)
-    if check is not None and not lazy:
-        # Eager reads materialise virtual image streams now.
-        check()
-    datasets = _read_datasets_group(
-        file["datasets"], channel_filter, lazy=lazy, check=check
-    )
+    datasets = _read_datasets_group(file["datasets"], channel_filter, lazy=lazy)
     stream_handles = _attach_streams(file, file_path, datasets, channel_filter)
     top_level_metadata = {
         key: _decode_dataset_value(key, dataset[()])
         for key, dataset in file.items()
         if key != "datasets" and key != "archive"
     }
+    top_level_metadata["_in_progress"] = bool(file.attrs.get("artiq_in_progress", False))
     if _STREAMS_MANIFEST_ATTR in file.attrs:
         top_level_metadata["_stream_files"] = {
             group: entry["file"]

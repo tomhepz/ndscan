@@ -21,13 +21,15 @@ GB = 1e9
 
 
 class _DatasetManager:
-    def __init__(self, stream_directory):
-        self.stream_directory = stream_directory
+    def __init__(self, results_filename, stream_buffer_bytes=0):
+        self.results_filename = results_filename
+        self.stream_buffer_bytes = stream_buffer_bytes
 
 
 class _Owner:
-    def __init__(self, stream_directory):
-        self._HasEnvironment__dataset_mgr = _DatasetManager(stream_directory)
+    def __init__(self, results_filename, stream_buffer_bytes=0):
+        self._HasEnvironment__dataset_mgr = _DatasetManager(
+            results_filename, stream_buffer_bytes)
         self.checkpoints = 0
 
     def checkpoint_datasets(self):
@@ -37,18 +39,27 @@ class _Owner:
 class StorageGuardTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.segments = Path(self.tmp.name) / "run.h5.segments"
-        self.segments.mkdir()
-        (self.segments / "000000000.h5").write_bytes(b"x" * 1000)
+        self.results = str(Path(self.tmp.name) / "run.h5")
 
     def tearDown(self):
         self.tmp.cleanup()
         context._storage_stop_reason = None
 
+    def test_buffered_stream_data_counts(self):
+        coordinator = PreviewCoordinator(
+            _Owner(self.results, stream_buffer_bytes=5 * GB),
+            CheckpointPolicy(min_interval_s=0), run_start_unix_time=0.0,
+        )
+        usage = Usage(total=1000 * GB, used=0, free=24 * GB)
+        with patch("ndscan.runtime.context.shutil.disk_usage", return_value=usage):
+            with self.assertLogs("ndscan.runtime.context", "ERROR"):
+                coordinator.maybe_write_preview()
+        self.assertTrue(storage_stop_requested())
+
     def _checkpoint(self, free, policy=None):
         policy = policy or CheckpointPolicy(min_interval_s=0)
         coordinator = PreviewCoordinator(
-            _Owner(str(self.segments)), policy, run_start_unix_time=0.0
+            _Owner(self.results), policy, run_start_unix_time=0.0
         )
         usage = Usage(total=1000 * GB, used=0, free=free)
         with patch("ndscan.runtime.context.shutil.disk_usage", return_value=usage):
@@ -63,7 +74,7 @@ class StorageGuardTest(unittest.TestCase):
         # 2% of 5000 GB = 100 GB exceeds the 20 GB floor.
         policy = CheckpointPolicy(min_interval_s=0)
         coordinator = PreviewCoordinator(
-            _Owner(str(self.segments)), policy, run_start_unix_time=0.0
+            _Owner(self.results), policy, run_start_unix_time=0.0
         )
         usage = Usage(total=5000 * GB, used=0, free=99 * GB)
         with patch("ndscan.runtime.context.shutil.disk_usage", return_value=usage):

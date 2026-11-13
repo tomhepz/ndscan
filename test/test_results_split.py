@@ -34,14 +34,28 @@ def _write_site(group, num_points):
     group["scan.points.channel_1"] = np.arange(num_points, dtype=float)
 
 
-def _write_split(directory, images, traces, *, group_rid=7, num_points=None):
+def _write_split(directory, images, traces, *, group_rid=7, num_points=None,
+                 links=True, in_progress=False, committed=None):
+    """Write results as ARTIQ does: data file linking to stream-group files.
+
+    ``links=False`` gives the earlier layout (manifest only). ``committed``
+    overrides the image row count recorded in the data file.
+    """
     num_points = len(images) if num_points is None else num_points
+    n_images = len(images) if committed is None else committed
     with h5py.File(directory / DATA, "w") as file:
         file["rid"] = 7
-        _write_site(file.create_group("datasets"), num_points)
+        group = file.create_group("datasets")
+        _write_site(group, num_points)
+        if links:
+            group[IMAGE_KEY] = h5py.ExternalLink(
+                "000000007-Camera.images.h5", "/datasets/" + IMAGE_KEY)
+            group[TRACE_KEY] = h5py.ExternalLink(
+                "000000007-Camera.streams.h5", "/datasets/" + TRACE_KEY)
+        file.attrs["artiq_in_progress"] = in_progress
         file.attrs["artiq_streams"] = json.dumps({
             "images": {"file": "000000007-Camera.images.h5",
-                       "streams": {IMAGE_KEY: len(images)}},
+                       "streams": {IMAGE_KEY: n_images}},
             "streams": {"file": "000000007-Camera.streams.h5",
                         "streams": {TRACE_KEY: len(traces)}},
         })
@@ -111,34 +125,32 @@ class StreamGroupResultsTest(unittest.TestCase):
             read_scan_site_snapshot(data).close()
         self.assertTrue(any("may not align" in str(w.message) for w in caught))
 
-    def test_checkpoint_with_deleted_segments_fails_loudly(self):
-        segment = self.directory / "000000000.h5"
-        with h5py.File(segment, "w") as file:
-            file.create_group("datasets")[IMAGE_KEY] = self.images
-        checkpoints = self.directory / "checkpoints"
-        checkpoints.mkdir()
-        checkpoint = checkpoints / "000000000.h5"
-        with h5py.File(checkpoint, "w", libver="latest") as file:
-            group = file.create_group("datasets")
-            _write_site(group, 4)
-            layout = h5py.VirtualLayout(self.images.shape, dtype=np.uint16)
-            layout[:] = h5py.VirtualSource(
-                "../000000000.h5", "datasets/" + IMAGE_KEY, shape=self.images.shape)
-            group.create_virtual_dataset(IMAGE_KEY, layout)
-            file.attrs["artiq_checkpoint"] = json.dumps({
-                "version": 1, "streams": [IMAGE_KEY],
-                "segments": [{"path": "../000000000.h5",
-                              "size": segment.stat().st_size}],
-            })
-        snapshot = open_scan_site_snapshot(checkpoint)
-        stream = snapshot.get_site().series("camera/image")
-        np.testing.assert_array_equal(stream[0], self.images[0])
-        segment.unlink()
-        with self.assertRaisesRegex(FileNotFoundError, "finalised"):
-            stream[0]
-        snapshot.close()
-        with self.assertRaisesRegex(FileNotFoundError, "finalised"):
-            read_scan_site_snapshot(checkpoint)
+    def test_rows_beyond_the_snapshot_are_ignored(self):
+        # A stream file may already hold rows appended after this checkpoint.
+        data = _write_split(self.directory, self.images, self.traces,
+                            in_progress=True, committed=2, num_points=2)
+        with open_scan_site_snapshot(data) as snapshot:
+            self.assertTrue(snapshot.in_progress)
+            stream = snapshot.get_site().series("camera/image")
+            self.assertEqual(stream.shape, (2, 5, 6))
+            np.testing.assert_array_equal(stream[:], self.images[:2])
+            np.testing.assert_array_equal(stream[-1], self.images[1])
+            np.testing.assert_array_equal(stream[[0, 1], 1:3], self.images[:2, 1:3])
+            with self.assertRaises(IndexError):
+                stream[2]
+
+    def test_plain_h5py_follows_links(self):
+        data = _write_split(self.directory, self.images, self.traces)
+        with h5py.File(data, "r") as file:
+            np.testing.assert_array_equal(
+                file["datasets/" + IMAGE_KEY][1], self.images[1])
+
+    def test_earlier_layout_without_links(self):
+        data = _write_split(self.directory, self.images, self.traces, links=False)
+        with read_scan_site_snapshot(data) as snapshot:
+            self.assertFalse(snapshot.in_progress)
+            np.testing.assert_array_equal(
+                snapshot.get_site().series("camera/image")[3], self.images[3])
 
 
 if __name__ == "__main__":

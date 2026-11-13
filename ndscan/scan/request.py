@@ -67,14 +67,14 @@ class PreviewPolicy:
 class CheckpointPolicy:
     """Archive the root run at completed batch boundaries, including child sites.
 
-    The interval is checked at those boundaries, not by a background timer. ARTIQ
-    keeps only the newest checkpoint; at the end of the run the results are
-    finalised and the checkpoint and stream segments are deleted.
+    The interval is checked at those boundaries, not by a background timer. Each
+    checkpoint has ARTIQ rewrite the results file and append buffered stream data
+    to the stream files.
 
-    At each checkpoint the free space on the results disk is compared with what the
-    run needs to finalise: the stream segment bytes written so far, plus a reserve
-    of ``max(min_free_bytes, min_free_fraction * disk size)``. If there is less,
-    the run ends cleanly after the current batch, as if termination had been
+    After each checkpoint, free space on the results disk is compared with the
+    stream data still buffered plus a reserve of
+    ``max(min_free_bytes, min_free_fraction * disk size)``. If there is less, the
+    run ends cleanly after the current batch, as if termination had been
     requested, so that its results can be written.
     """
 

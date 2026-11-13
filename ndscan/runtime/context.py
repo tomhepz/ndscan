@@ -127,34 +127,35 @@ class PreviewCoordinator:
         _storage_stop_reason = None
 
     def _check_free_space(self) -> None:
-        """Request a clean stop when finalising would no longer fit on disk."""
+        """Request a clean stop when the results disk is nearly full.
+
+        Checked after each checkpoint. Writing the rest of the run needs the
+        still-buffered stream data plus room for the next checkpoint, covered by
+        the policy's reserve.
+        """
         global _storage_stop_reason
         if _storage_stop_reason is not None:
             return
+        dataset_mgr = self._owner._HasEnvironment__dataset_mgr
+        filename = getattr(dataset_mgr, "results_filename", None)
+        if filename is None:
+            return
+        buffered = getattr(dataset_mgr, "stream_buffer_bytes", 0)
         try:
-            dataset_mgr = self._owner._HasEnvironment__dataset_mgr
-            directory = getattr(dataset_mgr, "stream_directory", None)
-            if directory is None or not os.path.isdir(directory):
-                return
-            segment_bytes = sum(
-                entry.stat().st_size
-                for entry in os.scandir(directory)
-                if entry.is_file()
-            )
-            usage = shutil.disk_usage(directory)
+            usage = shutil.disk_usage(os.path.dirname(os.path.abspath(filename)))
         except OSError:
             logger.warning("Could not check free space for results", exc_info=True)
             return
         reserve = max(
             self.policy.min_free_bytes, self.policy.min_free_fraction * usage.total
         )
-        needed = segment_bytes + reserve
+        needed = buffered + reserve
         if usage.free < needed:
             _storage_stop_reason = (
                 f"Results disk nearly full: {usage.free / 1e9:.1f} GB free, "
-                f"{needed / 1e9:.1f} GB needed to finalise this run "
-                f"({segment_bytes / 1e9:.1f} GB of stream data plus "
-                f"{reserve / 1e9:.1f} GB reserve). Stopping the run cleanly."
+                f"less than the {reserve / 1e9:.1f} GB reserve plus "
+                f"{buffered / 1e9:.1f} GB of buffered stream data. "
+                "Stopping the run cleanly."
             )
             logger.error(_storage_stop_reason)
 
